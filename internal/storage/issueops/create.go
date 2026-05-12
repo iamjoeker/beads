@@ -337,11 +337,18 @@ func PersistDependencies(ctx context.Context, tx *sql.Tx, issues []*types.Issue,
 			if dep.IssueID == "" {
 				dep.IssueID = issue.ID
 			}
-			// Skip if target doesn't exist.
-			var exists int
-			//nolint:gosec // G201: table is determined by isWisp flag
-			if err := tx.QueryRowContext(ctx, fmt.Sprintf("SELECT 1 FROM %s WHERE id = ?", lookupTable), dep.DependsOnID).Scan(&exists); err != nil {
-				continue
+			// Skip if target doesn't exist in the local DB — BUT preserve
+			// external references (external:<project>:<id>), which by design
+			// point to issues in another beads database and are resolved at
+			// query time via routes.jsonl / repos.additional. Without this
+			// exception, JSONL imports silently drop every cross-rig tracks
+			// dep (the bug surfaced by gastown auto-convoy tracking).
+			if !strings.HasPrefix(dep.DependsOnID, "external:") {
+				var exists int
+				//nolint:gosec // G201: table is determined by isWisp flag
+				if err := tx.QueryRowContext(ctx, fmt.Sprintf("SELECT 1 FROM %s WHERE id = ?", lookupTable), dep.DependsOnID).Scan(&exists); err != nil {
+					continue
+				}
 			}
 			createdAt := dep.CreatedAt
 			if createdAt.IsZero() {

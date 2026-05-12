@@ -172,12 +172,27 @@ func (s *DoltStore) GetDependenciesWithMetadata(ctx context.Context, issueID str
 
 	var results []*types.IssueWithDependencyMetadata
 	for _, d := range deps {
-		issue, ok := issueMap[d.depID]
-		if !ok {
+		if issue, ok := issueMap[d.depID]; ok {
+			results = append(results, &types.IssueWithDependencyMetadata{
+				Issue:          *issue,
+				DependencyType: types.DependencyType(d.depType),
+			})
 			continue
 		}
+		// Target isn't in the local DB. This is expected for cross-rig refs
+		// (external:<project>:<id>) and for unresolved cross-database links
+		// (a bare <prefix>-<id> whose home rig is hydrated via routes.jsonl
+		// but not yet joined). Return a placeholder so the consumer can still
+		// see the edge — silently dropping these has previously broken
+		// dashboard convoy tracking and any tooling that walks the dep graph
+		// without separately querying GetDependencyRecords. The placeholder's
+		// status is "open" so callers don't mistakenly treat unresolved deps
+		// as already closed.
 		results = append(results, &types.IssueWithDependencyMetadata{
-			Issue:          *issue,
+			Issue: types.Issue{
+				ID:     d.depID,
+				Status: types.StatusOpen,
+			},
 			DependencyType: types.DependencyType(d.depType),
 		})
 	}
