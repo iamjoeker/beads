@@ -9,6 +9,8 @@ import (
 	"time"
 
 	"github.com/spf13/cobra"
+	"golang.org/x/term"
+
 	"github.com/steveyegge/beads/internal/audit"
 	"github.com/steveyegge/beads/internal/config"
 	"github.com/steveyegge/beads/internal/debug"
@@ -51,8 +53,31 @@ the flags appear in the command line.`,
 			return runCloseProxiedServer(cmd, rootCtx, args)
 		}
 
-		// If no IDs provided, use last touched issue
+		// If no IDs provided, use last touched issue.
+		//
+		// This convenience is INTERACTIVE ONLY. Non-interactively it is a
+		// hazard rather than a shortcut: a command substitution that yields
+		// nothing silently degrades an explicit close into "close whatever was
+		// touched last", which is a destructive action on a target the caller
+		// never named.
+		//
+		//     bd close $(some-query-that-returns-nothing) --force
+		//     -> bd close --force
+		//     -> closes the last-touched issue
+		//
+		// That has already happened in the field, closing a live agent bead
+		// nobody had referenced. It was recoverable only because the bead was
+		// not a wisp; a wisp closed this way is deleted by the next gc sweep
+		// before anyone notices, and no reopen is possible.
+		//
+		// So: keep the shortcut where a human can see what they typed, and
+		// require an explicit ID everywhere else.
 		if len(args) == 0 {
+			if !term.IsTerminal(int(os.Stdin.Fd())) {
+				return HandleErrorRespectJSON(
+					"no issue ID provided; the last-touched shortcut is interactive-only. " +
+						"Pass an explicit ID — if this came from a command substitution, it produced no output")
+			}
 			lastTouched := GetLastTouchedID()
 			if lastTouched == "" {
 				return HandleErrorRespectJSON("no issue ID provided and no last touched issue")
