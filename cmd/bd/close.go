@@ -2,6 +2,7 @@ package main
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"os"
@@ -114,6 +115,12 @@ the flags appear in the command line.`,
 		closedCount := 0
 		alreadyClosed := 0
 		firstSettledID := ""
+		// Every per-ID refusal below is recorded, not just printed: a batch that
+		// closes some IDs and refuses others must still exit nonzero (bd-gq7).
+		var failures []closeIDFailure
+		recordFailure := func(id, reason string) {
+			failures = append(failures, closeIDFailure{ID: id, Error: reason})
+		}
 
 		for i, id := range resolvedIDs {
 			result := results[i]
@@ -139,6 +146,7 @@ the flags appear in the command line.`,
 			if issue == nil || issue.Status != types.StatusClosed {
 				if err := validateIssueClosable(id, issue, actor, force); err != nil {
 					fmt.Fprintf(os.Stderr, "%s\n", err)
+					recordFailure(id, err.Error())
 					continue
 				}
 			}
@@ -153,6 +161,7 @@ the flags appear in the command line.`,
 						fmt.Fprintf(os.Stderr, "warning: closing %s with %d open child issue(s) still active\n", id, openChildren)
 					} else {
 						fmt.Fprintf(os.Stderr, "cannot close %s: %d open child issue(s); close children first or use --force to override\n", id, openChildren)
+						recordFailure(id, fmt.Sprintf("%d open child issue(s)", openChildren))
 						continue
 					}
 				}
@@ -162,6 +171,7 @@ the flags appear in the command line.`,
 			if !force {
 				if err := checkGateSatisfaction(issue); err != nil {
 					fmt.Fprintf(os.Stderr, "cannot close %s: %s\n", id, err)
+					recordFailure(id, err.Error())
 					continue
 				}
 			}
@@ -173,6 +183,7 @@ the flags appear in the command line.`,
 			ops, err := writeOps(activeStore)
 			if err != nil {
 				fmt.Fprintf(os.Stderr, "Error closing %s: %v\n", id, err)
+				recordFailure(id, fmt.Sprintf("closing issue: %v", err))
 				continue
 			}
 			res, err := ops.Close(opsCtx, issueops.CloseRequest{
@@ -190,6 +201,7 @@ the flags appear in the command line.`,
 				} else {
 					fmt.Fprintf(os.Stderr, "Error closing %s: %v\n", id, err)
 				}
+				recordFailure(id, fmt.Sprintf("closing issue: %v", err))
 				continue
 			}
 			if !res.Changed {
@@ -410,10 +422,69 @@ the flags appear in the command line.`,
 
 		totalAttempted := len(resolvedIDs)
 		if totalAttempted > 0 && closedCount == 0 && alreadyClosed == 0 {
+			// Nothing settled at all. Every refusal is already on stderr and there
+			// is no success for the caller to disambiguate, so keep the historical
+			// silent nonzero exit rather than appending a summary.
 			return SilentExit()
+		}
+		// Closes are per-ID, not atomic across IDs: the IDs that closed above stay
+		// closed and committed, but a partial batch must still exit nonzero. Without
+		// this, one success masked every sibling refusal and `bd close a b` exited 0
+		// with b still open — so every caller checking exit status believed the whole
+		// batch closed (bd-gq7). Mirrors bd update's reportUpdateFailures.
+		if len(failures) > 0 {
+			return reportCloseFailures(failures, totalAttempted)
 		}
 		return nil
 	},
+}
+
+// closeIDFailure is one ID `bd close` refused or failed to close, for the
+// partial-batch report.
+type closeIDFailure struct {
+	ID    string `json:"id"`
+	Error string `json:"error"`
+}
+
+// reportCloseFailures emits a per-ID failure summary on stderr and returns a
+// nonzero exit error. It runs only when the batch also closed something: the
+// individual errors were already printed inline as they happened, so this adds
+// the summary that names which IDs did not close even though the command
+// produced success output. In --json mode the report is a single compact JSON
+// line on stderr, leaving stdout's array-of-closed-issues success shape intact,
+// matching reportUpdateFailures.
+func reportCloseFailures(failures []closeIDFailure, total int) error {
+	msg := fmt.Sprintf("%d of %d issues failed to close", len(failures), total)
+	if jsonOutput {
+		inner := map[string]interface{}{
+			"error":  msg,
+			"failed": failures,
+		}
+		var payload interface{}
+		if jsonEnvelopeEnabled() {
+			payload = map[string]interface{}{
+				"schema_version": JSONSchemaVersion,
+				"data":           inner,
+			}
+		} else {
+			inner["schema_version"] = JSONSchemaVersion
+			payload = inner
+		}
+		data, err := json.Marshal(payload)
+		if err != nil {
+			// Marshaling flat strings cannot realistically fail; fall back to the
+			// text summary rather than exiting silently.
+			fmt.Fprintf(os.Stderr, "Error: %s\n", msg)
+		} else {
+			fmt.Fprintln(os.Stderr, string(data))
+		}
+	} else {
+		fmt.Fprintf(os.Stderr, "Error: %s\n", msg)
+		for _, f := range failures {
+			fmt.Fprintf(os.Stderr, "  %s: %s\n", f.ID, f.Error)
+		}
+	}
+	return &exitError{Code: 1}
 }
 
 func init() {
@@ -738,7 +809,7 @@ func resolveCloseTargets(ctx context.Context, localStore storage.DoltStorage, id
 			return nil, fmt.Errorf("no auto-routed store available")
 		}
 		sharedRoutedTried = true
-		rs, routed, _, err := openRoutedReadStore(ctx, localStore)
+		rs, routed, _, err := openRoutedWriteStore(ctx, localStore)
 		if err != nil {
 			return nil, err
 		}
@@ -758,8 +829,10 @@ func resolveCloseTargets(ctx context.Context, localStore storage.DoltStorage, id
 			return nil, func() {}, fmt.Errorf("resolving ID %s: %w", id, err)
 		}
 		// Write-intent: a prefix-routed target opens writable so the close
-		// commits on the target head (#4141). Contributor auto-routing below
-		// stays read-only: it hydrates foreign projects that must not be mutated.
+		// commits on the target head (#4141). Contributor auto-routing below is
+		// writable for the same reason — a close is an explicit mutation of the
+		// named issue, and an issue that lives only in the routed store could
+		// otherwise never be closed at all (bd-gq7).
 		if r, err := resolveViaPrefixRoutingWithAccess(ctx, id, true); err == nil {
 			results = append(results, r)
 			continue
