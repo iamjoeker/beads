@@ -84,10 +84,12 @@ func resolveAndGetIssueWithRoutingAccess(ctx context.Context, localStore storage
 	}
 
 	// If not found via prefix routing, try contributor auto-routing as fallback (GH#2345).
-	// Auto-routed stores stay read-only even for write-intent callers (writablePrefixRoute):
-	// this path hydrates foreign contributor projects, which must never be mutated.
+	// Write-intent callers open the auto-routed target writable: an issue that exists
+	// only there is an issue the user can otherwise never close or update, and creates
+	// already land there. A read-intent caller keeps the read-only open that guarantees
+	// hydrating a foreign project cannot mutate it (GH#3231, bd-6dnrw.32).
 	if isNotFoundErr(err) {
-		if autoResult, autoErr := resolveViaAutoRouting(ctx, localStore, id); autoErr == nil {
+		if autoResult, autoErr := resolveViaAutoRouting(ctx, localStore, id, writablePrefixRoute); autoErr == nil {
 			return autoResult, nil
 		}
 	}
@@ -120,8 +122,12 @@ func resolveAndGetFromStore(ctx context.Context, s storage.DoltStorage, id strin
 // resolveViaAutoRouting attempts to find an issue using contributor auto-routing.
 // This is the fallback when the local store doesn't have the issue (GH#2345).
 // Returns a RoutedResult if the issue is found in the auto-routed store.
-func resolveViaAutoRouting(ctx context.Context, localStore storage.DoltStorage, id string) (*RoutedResult, error) {
-	routedStore, routed, _, err := openRoutedReadStore(ctx, localStore)
+//
+// writable opens the routed target writable so a mutation command can commit
+// there; false keeps the read-only open that guarantees a routed read cannot
+// mutate the target.
+func resolveViaAutoRouting(ctx context.Context, localStore storage.DoltStorage, id string, writable bool) (*RoutedResult, error) {
+	routedStore, routed, _, err := openRoutedStore(ctx, localStore, writable)
 	if err != nil || !routed {
 		return nil, fmt.Errorf("no auto-routed store available")
 	}
@@ -327,8 +333,10 @@ func getIssueWithRouting(ctx context.Context, localStore storage.DoltStorage, id
 	}
 
 	// If not found via prefix routing, try contributor auto-routing as fallback (GH#2345).
+	// getIssueWithRouting is the read-intent entry point, so the routed store stays
+	// read-only here; mutation commands go through resolveAndGetIssueForMutation.
 	if isNotFoundErr(err) {
-		if autoResult, autoErr := resolveViaAutoRouting(ctx, localStore, id); autoErr == nil {
+		if autoResult, autoErr := resolveViaAutoRouting(ctx, localStore, id, false); autoErr == nil {
 			return autoResult, nil
 		}
 	}
