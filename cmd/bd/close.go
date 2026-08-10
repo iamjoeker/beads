@@ -2,6 +2,7 @@ package main
 
 import (
 	"context"
+	"encoding/json"
 	"fmt"
 	"os"
 	"strings"
@@ -146,6 +147,12 @@ the flags appear in the command line.`,
 		closedCount := 0
 		alreadyClosed := 0
 		firstSettledID := ""
+		// Every per-ID refusal below is recorded, not just printed: a batch that
+		// closes some IDs and refuses others must still exit nonzero (bd-gq7).
+		var failures []closeIDFailure
+		recordFailure := func(id, reason string) {
+			failures = append(failures, closeIDFailure{ID: id, Error: reason})
+		}
 
 		for i, id := range resolvedIDs {
 			res := outcomes[i]
@@ -153,10 +160,12 @@ the flags appear in the command line.`,
 				// The CLI's own close policy refused this argument, so the
 				// batch never saw it.
 				fmt.Fprintln(os.Stderr, plan.refusals[i])
+				recordFailure(id, plan.refusals[i])
 				continue
 			}
 			if res.Err != nil {
 				fmt.Fprintln(os.Stderr, closeDirectRefusal(id, res.Err))
+				recordFailure(id, res.Err.Error())
 				continue
 			}
 
@@ -371,10 +380,69 @@ the flags appear in the command line.`,
 
 		totalAttempted := len(resolvedIDs)
 		if totalAttempted > 0 && closedCount == 0 && alreadyClosed == 0 {
+			// Nothing settled at all. Every refusal is already on stderr and there
+			// is no success for the caller to disambiguate, so keep the historical
+			// silent nonzero exit rather than appending a summary.
 			return SilentExit()
+		}
+		// Closes are per-ID, not atomic across IDs: the IDs that closed above stay
+		// closed and committed, but a partial batch must still exit nonzero. Without
+		// this, one success masked every sibling refusal and `bd close a b` exited 0
+		// with b still open — so every caller checking exit status believed the whole
+		// batch closed (bd-gq7). Mirrors bd update's reportUpdateFailures.
+		if len(failures) > 0 {
+			return reportCloseFailures(failures, totalAttempted)
 		}
 		return nil
 	},
+}
+
+// closeIDFailure is one ID `bd close` refused or failed to close, for the
+// partial-batch report.
+type closeIDFailure struct {
+	ID    string `json:"id"`
+	Error string `json:"error"`
+}
+
+// reportCloseFailures emits a per-ID failure summary on stderr and returns a
+// nonzero exit error. It runs only when the batch also closed something: the
+// individual errors were already printed inline as they happened, so this adds
+// the summary that names which IDs did not close even though the command
+// produced success output. In --json mode the report is a single compact JSON
+// line on stderr, leaving stdout's array-of-closed-issues success shape intact,
+// matching reportUpdateFailures.
+func reportCloseFailures(failures []closeIDFailure, total int) error {
+	msg := fmt.Sprintf("%d of %d issues failed to close", len(failures), total)
+	if jsonOutput {
+		inner := map[string]interface{}{
+			"error":  msg,
+			"failed": failures,
+		}
+		var payload interface{}
+		if jsonEnvelopeEnabled() {
+			payload = map[string]interface{}{
+				"schema_version": JSONSchemaVersion,
+				"data":           inner,
+			}
+		} else {
+			inner["schema_version"] = JSONSchemaVersion
+			payload = inner
+		}
+		data, err := json.Marshal(payload)
+		if err != nil {
+			// Marshaling flat strings cannot realistically fail; fall back to the
+			// text summary rather than exiting silently.
+			fmt.Fprintf(os.Stderr, "Error: %s\n", msg)
+		} else {
+			fmt.Fprintln(os.Stderr, string(data))
+		}
+	} else {
+		fmt.Fprintf(os.Stderr, "Error: %s\n", msg)
+		for _, f := range failures {
+			fmt.Fprintf(os.Stderr, "  %s: %s\n", f.ID, f.Error)
+		}
+	}
+	return &exitError{Code: 1}
 }
 
 func init() {
