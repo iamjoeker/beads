@@ -160,6 +160,29 @@ func printContributorRoutingNotice(ctx context.Context, localStore storage.DoltS
 // returned routing.RoutingRule identifies which rule matched, for callers
 // that print a routing notice.
 func openRoutedReadStore(ctx context.Context, store storage.DoltStorage) (storage.DoltStorage, bool, routing.RoutingRule, error) {
+	return openRoutedStore(ctx, store, false)
+}
+
+// openRoutedWriteStore is openRoutedReadStore for a mutation command acting on
+// an issue that lives in the auto-routed store. It opens the target writable so
+// the mutation the user explicitly asked for can commit there.
+//
+// `bd create` has always written to the auto-routed target (that is the whole
+// point of contributor routing: the planning store is where the issues live),
+// so a read-only open here made the store append-only — every close, update,
+// assign and note on a routed issue failed with embeddeddolt's ErrReadOnly
+// while creates succeeded. Merge-request wisps are the visible casualty, since
+// they are created in the routed store and must later be retired there.
+//
+// This mirrors what prefix routing already does for write intent (#4141). It
+// does not weaken GH#3231/bd-6dnrw.32: those protect a *read* from incidentally
+// mutating a foreign project at open time (migrations, schema init, metadata
+// writes), and reads still take the read-only path above.
+func openRoutedWriteStore(ctx context.Context, store storage.DoltStorage) (storage.DoltStorage, bool, routing.RoutingRule, error) {
+	return openRoutedStore(ctx, store, true)
+}
+
+func openRoutedStore(ctx context.Context, store storage.DoltStorage, writable bool) (storage.DoltStorage, bool, routing.RoutingRule, error) {
 	repoPath, rule := determineAutoRoutedRepoPath(ctx, store)
 	if repoPath == "" || repoPath == "." {
 		return nil, false, routing.RuleNone, nil
@@ -167,7 +190,11 @@ func openRoutedReadStore(ctx context.Context, store storage.DoltStorage) (storag
 
 	targetRepoPath := routing.ExpandPath(repoPath)
 	targetBeadsDir := filepath.Join(targetRepoPath, ".beads")
-	targetStore, err := newReadOnlyStoreFromConfig(ctx, targetBeadsDir)
+	open := newReadOnlyStoreFromConfig
+	if writable {
+		open = newDoltStoreFromConfig
+	}
+	targetStore, err := open(ctx, targetBeadsDir)
 	if err != nil {
 		return nil, false, rule, fmt.Errorf("failed to open routed store at %s: %w", targetRepoPath, err)
 	}
