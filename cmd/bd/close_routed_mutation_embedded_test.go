@@ -4,6 +4,7 @@ package main
 
 import (
 	"os"
+	"strings"
 	"testing"
 
 	"github.com/steveyegge/beads/internal/types"
@@ -94,4 +95,61 @@ func TestEmbeddedRoutedMutationPersists(t *testing.T) {
 			}
 		})
 	}
+}
+
+// TestEmbeddedClosePartialBatchExitsNonZero pins the second half of bd-gq7:
+// `bd close` reported success for a batch in which some IDs never closed.
+//
+// The exit gate only fired when NOTHING settled (closedCount == 0 &&
+// alreadyClosed == 0), so a single success masked every sibling refusal and the
+// command exited 0 with issues still open. Any automation checking exit status —
+// the refinery retiring merged MRs, the wisp reaper — read that as "the batch
+// closed". `bd update` had already been fixed for the identical shape
+// (reportUpdateFailures, "multi-ID update used to exit 0 after mid-batch
+// failures"); close had not.
+//
+// The refusal is produced with the open-children guard rather than a read-only
+// store so the case is topology-independent: this is about the exit code, not
+// about routing.
+func TestEmbeddedClosePartialBatchExitsNonZero(t *testing.T) {
+	if os.Getenv("BEADS_TEST_EMBEDDED_DOLT") != "1" {
+		t.Skip("set BEADS_TEST_EMBEDDED_DOLT=1 to run embedded dolt integration tests")
+	}
+	t.Parallel()
+
+	bd := buildEmbeddedBD(t)
+	dir, _, _ := bdInit(t, bd, "--prefix", "pb")
+
+	parent := bdCreate(t, bd, dir, "parent with open child", "-p", "2")
+	child := bdCreate(t, bd, dir, "open child", "-p", "2")
+	closable := bdCreate(t, bd, dir, "closable", "-p", "2")
+	bdDepAdd(t, bd, dir, child.ID, parent.ID, "--type", "parent-child")
+
+	// parent is refused (open child), closable succeeds — the partial batch.
+	out, code := bdRunFailCode(t, bd, dir, "close", parent.ID, closable.ID, "--reason", "batch")
+	if code != 1 {
+		t.Errorf("partial-failure close exit code = %d, want 1\n%s", code, out)
+	}
+	if !strings.Contains(out, "1 of 2 issues failed to close") {
+		t.Errorf("partial-failure close should summarize which IDs failed, got:\n%s", out)
+	}
+	if !strings.Contains(out, parent.ID) {
+		t.Errorf("failure summary should name the refused ID %s, got:\n%s", parent.ID, out)
+	}
+
+	// The successful half must stay closed and committed: the batch is per-ID,
+	// not atomic, so a nonzero exit must not read as "nothing happened".
+	if got := bdShow(t, bd, dir, closable.ID); got.Status != types.StatusClosed {
+		t.Errorf("%s status = %q, want closed: a sibling's refusal must not roll back a real close",
+			closable.ID, got.Status)
+	}
+	if got := bdShow(t, bd, dir, parent.ID); got.Status == types.StatusClosed {
+		t.Errorf("%s was refused and must still be open, got closed", parent.ID)
+	}
+
+	// Guard the other direction: an all-success batch still exits 0, so the new
+	// gate cannot turn ordinary closes into spurious failures.
+	a := bdCreate(t, bd, dir, "batch ok a", "-p", "2")
+	b := bdCreate(t, bd, dir, "batch ok b", "-p", "2")
+	bdClose(t, bd, dir, a.ID, b.ID, "--reason", "batch")
 }
