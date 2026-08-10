@@ -718,7 +718,7 @@ func resolveCloseTargets(ctx context.Context, localStore storage.DoltStorage, id
 			return nil, fmt.Errorf("no auto-routed store available")
 		}
 		sharedRoutedTried = true
-		rs, routed, _, err := openRoutedReadStore(ctx, localStore)
+		rs, routed, _, err := openRoutedWriteStore(ctx, localStore)
 		if err != nil {
 			return nil, err
 		}
@@ -738,8 +738,10 @@ func resolveCloseTargets(ctx context.Context, localStore storage.DoltStorage, id
 			return nil, func() {}, fmt.Errorf("resolving ID %s: %w", id, err)
 		}
 		// Write-intent: a prefix-routed target opens writable so the close
-		// commits on the target head (#4141). Contributor auto-routing below
-		// stays read-only: it hydrates foreign projects that must not be mutated.
+		// commits on the target head (#4141). Contributor auto-routing below is
+		// writable for the same reason — a close is an explicit mutation of the
+		// named issue, and an issue that lives only in the routed store could
+		// otherwise never be closed at all (bd-gq7).
 		if r, err := resolveViaPrefixRoutingWithAccess(ctx, id, true); err == nil {
 			results = append(results, r)
 			continue
