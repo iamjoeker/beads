@@ -153,3 +153,46 @@ func TestEmbeddedClosePartialBatchExitsNonZero(t *testing.T) {
 	b := bdCreate(t, bd, dir, "batch ok b", "-p", "2")
 	bdClose(t, bd, dir, a.ID, b.ID, "--reason", "batch")
 }
+
+// TestEmbeddedMutateUnknownIDExitsNonZero pins the not-found half of bd-gq7's
+// exit-code acceptance: `bd close <unknown>` printed "no issue found" and
+// exited 0, so automation that closes by ID — the refinery retiring an MR whose
+// wisp it cannot see, the reaper — read a missed target as a completed close.
+// The routing rewrite made both commands surface the resolution failure as a
+// real error, and this pins it so a future routing change cannot quietly send
+// the miss back down a nil-returning path.
+//
+// Unknown-ID resolution is the one failure mode reachable without constructing
+// a store that refuses writes, and it exercises the same reporting seam the
+// read-only error travels through, so it guards both.
+func TestEmbeddedMutateUnknownIDExitsNonZero(t *testing.T) {
+	if os.Getenv("BEADS_TEST_EMBEDDED_DOLT") != "1" {
+		t.Skip("set BEADS_TEST_EMBEDDED_DOLT=1 to run embedded dolt integration tests")
+	}
+	t.Parallel()
+
+	bd := buildEmbeddedBD(t)
+	dir, _, _ := bdInit(t, bd, "--prefix", "nf")
+
+	// Well-formed for the workspace prefix and simply absent, so the miss comes
+	// from resolution rather than from argument validation.
+	const missing = "nf-nosuchissue"
+
+	for _, tc := range []struct {
+		name string
+		args []string
+	}{
+		{name: "close", args: []string{"close", missing, "--reason", "gone"}},
+		{name: "update", args: []string{"update", missing, "--status=in_progress"}},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			out, code := bdRunFailCode(t, bd, dir, tc.args...)
+			if code != 1 {
+				t.Errorf("bd %s on an unknown ID exit code = %d, want 1\n%s", tc.name, code, out)
+			}
+			if !strings.Contains(out, missing) {
+				t.Errorf("bd %s on an unknown ID should name %s, got:\n%s", tc.name, missing, out)
+			}
+		})
+	}
+}
