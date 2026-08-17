@@ -2,9 +2,6 @@ package dolt
 
 import (
 	"context"
-	"os"
-	"os/exec"
-	"path/filepath"
 	"strings"
 	"testing"
 )
@@ -16,10 +13,11 @@ import (
 // fallback path.
 //
 // This test covers the fallback error leg (DOLT_FETCH fails because the test
-// store has no configured remote). The full success path — where DOLT_FETCH
-// and DOLT_MERGE both succeed — is exercised by
-// TestPullWithAutoResolve_BranchTrackingSuccess in the integration test file
-// (//go:build integration), which requires a remotesapi-accessible Dolt server.
+// store has no configured remote). The success path — where DOLT_FETCH and
+// DOLT_MERGE both succeed — is covered by
+// TestPullWithAutoResolve_BranchTrackingFallbackSuccess below, and end to end
+// against a remotesapi server by TestPullWithAutoResolve_BranchTrackingSuccess
+// in the integration test file (//go:build integration).
 func TestPullWithAutoResolve_BranchTrackingFallback(t *testing.T) {
 	store, cleanup := setupTestStore(t)
 	defer cleanup()
@@ -84,38 +82,78 @@ func TestPullWithAutoResolve_BranchTrackingFallback(t *testing.T) {
 	}
 }
 
+// TestPullWithAutoResolve_BranchTrackingFallbackSuccess covers the SUCCESS leg
+// of the GH#3144 fallback: DOLT_PULL fails for lack of upstream tracking,
+// DOLT_FETCH + DOLT_MERGE take over, and the remote's rows land locally.
+//
+// Two fixture bugs kept this test skipping — and therefore never asserting — on
+// every commit before bd-6n5. Both are load-bearing; don't "simplify" them back:
+//
+//  1. The remote lived on the TEST PROCESS's filesystem (a t.TempDir() seeded
+//     with the dolt CLI). The suite's Dolt server runs in a container, so that
+//     path does not exist for the server, and a file:// URL pointing at it looks
+//     exactly like an empty remote: `branch "main" not found on remote`. The
+//     remote must be built on the SERVER's filesystem, which DOLT_PUSH does —
+//     it creates the remote's chunk-store layout, which an in-place `dolt init`
+//     working repo does not produce anyway.
+//
+//  2. The precondition pulled with an explicit branch, CALL DOLT_PULL(remote,
+//     branch). That form never needs tracking config, so against a remote the
+//     server can actually read it SUCCEEDS — fixing only bug 1 would have moved
+//     the skip to the "succeeded without tracking config" branch instead of
+//     reaching the assertion. The tracking error requires the single-argument
+//     form, CALL DOLT_PULL(remote), which is what federation.go's PullFromPeer
+//     issues — the production caller this fallback exists for.
+//
+// The preconditions below are guaranteed by construction, so they are hard
+// failures. A skip here would re-hide a regression exactly as before.
 func TestPullWithAutoResolve_BranchTrackingFallbackSuccess(t *testing.T) {
-	// The fallback assertion needs a real file:// remote, which is built with the
-	// dolt CLI (runDoltCmdForBranchTracking / runDoltSQLForBranchTracking). Skip when
-	// the binary is absent, matching the existing guard in this package
-	// (bootstrap_test.go, fsck_test.go). The store itself talks the MySQL protocol
-	// and needs no local dolt binary.
-	if _, err := exec.LookPath("dolt"); err != nil {
-		t.Skip("dolt CLI not available")
-	}
-
-	remoteDir := filepath.Join(t.TempDir(), "remote")
-	if err := os.MkdirAll(remoteDir, 0o755); err != nil {
-		t.Fatalf("mkdir remote: %v", err)
-	}
-	runDoltCmdForBranchTracking(t, remoteDir, "init")
-	runDoltSQLForBranchTracking(t, remoteDir, `
-		CREATE TABLE branch_tracking_marker (id INT PRIMARY KEY, value TEXT);
-		INSERT INTO branch_tracking_marker VALUES (1, 'from remote');
-		CALL DOLT_ADD('.');
-		CALL DOLT_COMMIT('-Am', 'init: branch tracking marker');
-	`)
-
 	store, cleanup := setupTestStore(t)
 	defer cleanup()
 
 	ctx, cancel := testContext(t)
 	defer cancel()
 
-	remoteURL := "file://" + remoteDir
+	var branch string
+	if err := store.db.QueryRowContext(ctx, "SELECT active_branch()").Scan(&branch); err != nil {
+		t.Fatalf("read active branch: %v", err)
+	}
+
+	// Server-side remote path, unique per test branch so parallel tests in this
+	// package cannot collide in the server's filesystem. Nothing here can remove
+	// it afterwards (no SQL reaches the server's filesystem); it dies with the
+	// suite's container.
+	remoteURL := "file:///tmp/beads-branch-tracking-remote-" + branch
 	if _, err := store.db.ExecContext(ctx, "CALL DOLT_REMOTE('add', 'origin', ?)", remoteURL); err != nil {
 		t.Fatalf("add remote via DOLT_REMOTE: %v", err)
 	}
+	refspec := branch + ":main"
+	if _, err := store.db.ExecContext(ctx, "CALL DOLT_PUSH(?, ?)", "origin", refspec); err != nil {
+		t.Fatalf("seed remote via DOLT_PUSH: %v", err)
+	}
+
+	// Put a marker on the remote that the local branch does not have: commit it,
+	// push it, then reset the local branch back one commit. The fallback's merge
+	// is what has to bring it back.
+	if _, err := store.db.ExecContext(ctx, "CREATE TABLE branch_tracking_marker (id INT PRIMARY KEY, value TEXT)"); err != nil {
+		t.Fatalf("create marker table: %v", err)
+	}
+	if _, err := store.db.ExecContext(ctx, "INSERT INTO branch_tracking_marker VALUES (1, 'from remote')"); err != nil {
+		t.Fatalf("insert marker row: %v", err)
+	}
+	if _, err := store.db.ExecContext(ctx, "CALL DOLT_COMMIT('-Am', 'test: branch tracking marker')"); err != nil {
+		t.Fatalf("commit marker: %v", err)
+	}
+	if _, err := store.db.ExecContext(ctx, "CALL DOLT_PUSH(?, ?)", "origin", refspec); err != nil {
+		t.Fatalf("push marker to remote: %v", err)
+	}
+	if _, err := store.db.ExecContext(ctx, "CALL DOLT_RESET('--hard', 'HEAD~1')"); err != nil {
+		t.Fatalf("reset local branch behind remote: %v", err)
+	}
+	if err := store.db.QueryRowContext(ctx, "SELECT value FROM branch_tracking_marker WHERE id = 1").Scan(new(string)); err == nil {
+		t.Fatal("marker still present locally after reset — the pull below would prove nothing")
+	}
+
 	store.remote = "origin"
 	store.branch = "main"
 
@@ -123,16 +161,16 @@ func TestPullWithAutoResolve_BranchTrackingFallbackSuccess(t *testing.T) {
 	if txErr != nil {
 		t.Fatalf("begin tx for raw pull check: %v", txErr)
 	}
-	_, rawPullErr := tx.ExecContext(ctx, "CALL DOLT_PULL(?, ?)", "origin", "main")
+	_, rawPullErr := tx.ExecContext(ctx, "CALL DOLT_PULL(?)", "origin")
 	_ = tx.Rollback()
 	if rawPullErr == nil {
-		t.Skip("DOLT_PULL succeeded without tracking config; fallback path is not needed for this Dolt version")
+		t.Fatal("DOLT_PULL succeeded without tracking config: the fallback under test was never entered")
 	}
 	if !isBranchTrackingError(rawPullErr) {
-		t.Skipf("DOLT_PULL failed with an unexpected non-tracking error: %v", rawPullErr)
+		t.Fatalf("DOLT_PULL failed with a non-tracking error, so the fallback under test was never entered: %v", rawPullErr)
 	}
 
-	if err := store.pullWithAutoResolve(ctx, "origin", "CALL DOLT_PULL(?, ?)", "origin", "main"); err != nil {
+	if err := store.pullWithAutoResolve(ctx, "origin", "CALL DOLT_PULL(?)", "origin"); err != nil {
 		t.Fatalf("pullWithAutoResolve fallback failed: %v", err)
 	}
 
@@ -142,23 +180,5 @@ func TestPullWithAutoResolve_BranchTrackingFallbackSuccess(t *testing.T) {
 	}
 	if got != "from remote" {
 		t.Fatalf("pulled marker value = %q, want %q", got, "from remote")
-	}
-}
-
-func runDoltCmdForBranchTracking(t *testing.T, dir string, args ...string) {
-	t.Helper()
-	cmd := exec.Command("dolt", args...)
-	cmd.Dir = dir
-	if output, err := cmd.CombinedOutput(); err != nil {
-		t.Fatalf("dolt %v failed in %s: %v\n%s", args, dir, err, output)
-	}
-}
-
-func runDoltSQLForBranchTracking(t *testing.T, dir, query string) {
-	t.Helper()
-	cmd := exec.Command("dolt", "sql", "-q", query)
-	cmd.Dir = dir
-	if output, err := cmd.CombinedOutput(); err != nil {
-		t.Fatalf("dolt sql failed in %s: %v\nQuery: %.200s...\n%s", dir, err, query, output)
 	}
 }
