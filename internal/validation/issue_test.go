@@ -159,6 +159,20 @@ func TestCanonicalActor(t *testing.T) {
 		{name: "mixed separators each collapse to one canonical separator", in: "gastown.dog-3", want: "gastown_dog_3"},
 		{name: "leading separator is preserved as a separator, not dropped", in: ".mayor", want: "_mayor"},
 		{name: "trailing separator is preserved as a separator, not dropped", in: "mayor.", want: "mayor_"},
+
+		// Gas Town address form. "/" separates rig from role, and a TRAILING
+		// slash marks a town-level agent's empty rig slot — it is the one
+		// trailing separator carrying no positional meaning, so it collapses
+		// onto the bare identity that BD_ACTOR supplies.
+		{name: "slash separator canonicalizes like the other separators", in: "beads/witness", want: "beads_witness"},
+		{name: "slash and dot spellings of one identity agree", in: "beads.witness", want: "beads_witness"},
+		{name: "town-level address drops its empty-rig trailing slash", in: "mayor/", want: "mayor"},
+		{name: "town-level address for deacon likewise", in: "deacon/", want: "deacon"},
+		{name: "bare identity is unchanged and equals the address form", in: "mayor", want: "mayor"},
+		{name: "nested rig address canonicalizes fully", in: "deacon/dogs/charlie", want: "deacon_dogs_charlie"},
+		// Degenerate input must not canonicalize to empty: an absent actor
+		// must never compare equal to a present one.
+		{name: "lone slash stays non-empty", in: "/", want: "_"},
 	}
 
 	for _, tt := range tests {
@@ -758,6 +772,52 @@ func TestForClose(t *testing.T) {
 			err := forClose(tt.force)("bd-test", tt.issue)
 			if (err != nil) != tt.wantErr {
 				t.Errorf("forClose() error = %v, wantErr %v", err, tt.wantErr)
+			}
+		})
+	}
+}
+
+// TestAssigneeMatchesTownLevelAddress is the regression test for the field
+// incident: on 2026-08-16 every one of the 77 escalation beads in hq was
+// assigned the ADDRESS "mayor/" while BD_ACTOR supplied the IDENTITY "mayor",
+// so AssigneeMatches refused every close with
+//
+//	cannot close hq-szkp: assignee is "mayor/", actor is "mayor";
+//	reclaim or use --force to override
+//
+// The Mayor is the only role that receives escalations, and `gt escalate close`
+// exposes no --force, so the error prescribed a remedy its own command could
+// not perform and the escalation queue could only grow. Both beads had to be
+// closed out-of-band with `bd close --force`.
+//
+// The two spellings are not drift — they are two namespaces for one principal
+// (address vs identity), so the guard must convert rather than string-match.
+func TestAssigneeMatchesTownLevelAddress(t *testing.T) {
+	tests := []struct {
+		name     string
+		assignee string
+		actor    string
+		wantErr  bool
+	}{
+		{name: "town-level address closed by bare identity", assignee: "mayor/", actor: "mayor", wantErr: false},
+		{name: "bare identity closed by town-level address", assignee: "mayor", actor: "mayor/", wantErr: false},
+		{name: "deacon town-level address likewise", assignee: "deacon/", actor: "deacon", wantErr: false},
+		{name: "rig-level address closed by dotted alias", assignee: "beads/witness", actor: "beads.witness", wantErr: false},
+		{name: "nested dog address closed by its identity", assignee: "deacon/dogs/charlie", actor: "deacon-dogs-charlie", wantErr: false},
+
+		// The guard must NOT become permissive. Different principals still refuse.
+		{name: "different role still refuses", assignee: "mayor/", actor: "deacon", wantErr: true},
+		{name: "different rig still refuses", assignee: "beads/witness", actor: "gastown/witness", wantErr: true},
+		{name: "empty actor against an assigned issue still refuses", assignee: "mayor/", actor: "", wantErr: true},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			issue := &types.Issue{ID: "hq-test", Assignee: tt.assignee}
+			err := AssigneeMatches(tt.actor, false)("hq-test", issue)
+			if (err != nil) != tt.wantErr {
+				t.Errorf("AssigneeMatches(assignee=%q, actor=%q) error = %v, wantErr %v",
+					tt.assignee, tt.actor, err, tt.wantErr)
 			}
 		})
 	}
