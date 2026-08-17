@@ -253,7 +253,16 @@ func TestMigration0053RepairsIssuesMissingRigColumns(t *testing.T) {
 		t.Fatalf("commit legacy fixture: %v", err)
 	}
 
-	if _, err := store.db.ExecContext(ctx, "DELETE FROM schema_migrations WHERE version = ?", schema.LatestVersion()); err != nil {
+	// Mark 0053 itself pending — NOT LatestVersion(). The repair under test is
+	// registered against version 53 specifically
+	// (preMigrationRepairs[{"schema_migrations", 53}]), so replaying whatever
+	// happens to be newest re-runs a different migration and the rig-column
+	// backfill never fires. That silently passed as long as 53 WAS the latest;
+	// the schema is now at 0065, so the test was exercising migration 65 while
+	// asserting 53's behaviour and failing with "column agent_state could not
+	// be found".
+	const migration0053 = 53
+	if _, err := store.db.ExecContext(ctx, "DELETE FROM schema_migrations WHERE version >= ?", migration0053); err != nil {
 		t.Fatalf("mark 0053 pending: %v", err)
 	}
 	if _, err := schema.MigrateUp(ctx, store.db); err != nil {
