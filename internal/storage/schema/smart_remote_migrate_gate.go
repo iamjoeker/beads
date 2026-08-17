@@ -286,6 +286,14 @@ func routeSmartGate(ctx context.Context, db DBConn, current, latest int, remoteN
 	if remoteName == "" {
 		remoteName = smartGateDefaultRemote
 	}
+	// The caller's remote value is a *sync* config value, not necessarily a Dolt
+	// remote NAME: it is frequently a URL, and when unset it defaults to the
+	// literal string "upstream". Building remotes/<that>/<branch> from it yields
+	// a ref that cannot resolve, ReadMigrationContentHashes below fails, and the
+	// gate reports unreadable-remote-state and blocks every write — even though
+	// the real remote's state was readable all along. Resolve it to a remote that
+	// actually exists first.
+	remoteName = resolveSmartGateRemote(ctx, db, remoteName)
 	branch := smartGateActiveBranch(ctx, db)
 	ref = "remotes/" + remoteName + "/" + branch
 	remote, err := ReadMigrationContentHashes(ctx, db, ref)
@@ -322,6 +330,82 @@ func routeSmartGate(ctx context.Context, db DBConn, current, latest int, remoteN
 		return smartAutoMigrate, nil, ref, false
 	}
 	return smartBelowFloor, nil, ref, false
+}
+
+// resolveSmartGateRemote maps a configured sync-remote value onto a Dolt remote
+// NAME that actually exists on this database, so the smart gate reads a
+// remote-tracking ref that can resolve.
+//
+// Why this is needed (gastownhall/beads#4516 follow-up): the value threaded in
+// here comes from sync.remote, which is NOT constrained to be a Dolt remote
+// name. Two observed shapes both produce an unresolvable ref:
+//
+//	sync.remote unset -> the literal name "upstream", while the only configured
+//	                     Dolt remote is "origin"     -> remotes/upstream/main
+//	sync.remote set   -> a URL such as git+ssh://...  -> remotes/git+ssh://.../main
+//
+// Both make ReadMigrationContentHashes fail, which routeSmartGate reports as
+// smartUndetermined -> fallbackReasonUnreadableState -> a blunt block on every
+// write. Measured on a real rig: remotes/upstream/main gives "branch not found"
+// while remotes/origin/main returns the full migration set, so the gate blocked
+// on state it could have read.
+//
+// Resolution order, deliberately conservative:
+//  1. remoteName already names a configured remote -> use it unchanged.
+//  2. "origin" is configured -> use it (matches smartGateDefaultRemote).
+//  3. exactly one remote is configured -> use that one, it is unambiguous.
+//  4. otherwise -> return the caller's value unchanged and let the existing
+//     unreadable-remote-state fallback block, exactly as before.
+//
+// This never loosens the gate. It only replaces a ref that is guaranteed not to
+// resolve with one that can, so the comparison the gate already wanted to make
+// actually happens; a genuine fork still returns smartForkSkew and still stops.
+// If the remote list cannot be read, the caller's value is returned untouched —
+// failing toward the existing block rather than toward a migrate.
+func resolveSmartGateRemote(ctx context.Context, db DBConn, remoteName string) string {
+	names, err := doltRemoteNames(ctx, db)
+	if err != nil || len(names) == 0 {
+		return remoteName
+	}
+	for _, n := range names {
+		if n == remoteName {
+			return remoteName
+		}
+	}
+	for _, n := range names {
+		if n == smartGateDefaultRemote {
+			return smartGateDefaultRemote
+		}
+	}
+	if len(names) == 1 {
+		return names[0]
+	}
+	return remoteName
+}
+
+// doltRemoteNames lists the Dolt remote names configured on this database. A
+// missing dolt_remotes table (not a Dolt-backed store) is reported as an error
+// so callers fall back to the caller-supplied value rather than treating "no
+// remotes" as a resolution.
+func doltRemoteNames(ctx context.Context, db DBConn) ([]string, error) {
+	rows, err := db.QueryContext(ctx, "SELECT name FROM dolt_remotes")
+	if err != nil {
+		return nil, err
+	}
+	defer func() { _ = rows.Close() }()
+
+	var names []string
+	for rows.Next() {
+		var name string
+		if err := rows.Scan(&name); err != nil {
+			return nil, err
+		}
+		names = append(names, name)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, err
+	}
+	return names, nil
 }
 
 // smartGateActiveBranch returns the active branch, defaulting to "main" — the
