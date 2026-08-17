@@ -174,6 +174,78 @@ func TestEmbeddedQuery(t *testing.T) {
 		}
 	})
 
+	// ===== LIKE (bd-791) =====
+	//
+	// These go through the real storage layer on purpose: the defect being
+	// guarded is a LIKE predicate that returns the empty set for rows the same
+	// query surface demonstrably holds, which only an end-to-end query can
+	// disprove.
+
+	queryIDs := func(t *testing.T, expr string) map[string]bool {
+		t.Helper()
+		ids := map[string]bool{}
+		for _, r := range bdQueryJSON(t, bd, dir, expr, "-n", "0") {
+			ids[r["id"].(string)] = true
+		}
+		return ids
+	}
+
+	t.Run("query_like_without_wildcard_agrees_with_equals", func(t *testing.T) {
+		ids := queryIDs(t, `title LIKE "Medium bug"`)
+		if !ids[bugMed.ID] || len(ids) != 1 {
+			t.Errorf("expected exactly %s, got %v", bugMed.ID, ids)
+		}
+	})
+
+	t.Run("query_like_trailing_wildcard", func(t *testing.T) {
+		ids := queryIDs(t, `title LIKE "Medium%"`)
+		if !ids[bugMed.ID] || len(ids) != 1 {
+			t.Errorf("expected exactly %s, got %v", bugMed.ID, ids)
+		}
+	})
+
+	t.Run("query_like_surrounding_wildcards", func(t *testing.T) {
+		ids := queryIDs(t, `title LIKE "%priority%"`)
+		if !ids[taskHigh.ID] || len(ids) != 1 {
+			t.Errorf("expected exactly %s, got %v", taskHigh.ID, ids)
+		}
+	})
+
+	t.Run("query_like_is_case_insensitive", func(t *testing.T) {
+		ids := queryIDs(t, `title LIKE "%MEDIUM%"`)
+		if !ids[bugMed.ID] {
+			t.Errorf("expected %s, got %v", bugMed.ID, ids)
+		}
+	})
+
+	t.Run("query_like_is_anchored_unlike_equals", func(t *testing.T) {
+		// The one zero LIKE is allowed to return: a bare substring is an
+		// anchored pattern, so it matches no title. "=" stays a contains match.
+		if ids := queryIDs(t, `title LIKE "bug"`); len(ids) != 0 {
+			t.Errorf("expected no matches for an unanchored-looking LIKE, got %v", ids)
+		}
+		if ids := queryIDs(t, `title="bug"`); !ids[bugMed.ID] {
+			t.Errorf("expected %s from the contains form, got %v", bugMed.ID, ids)
+		}
+	})
+
+	t.Run("query_not_like", func(t *testing.T) {
+		ids := queryIDs(t, `title NOT LIKE "%bug%"`)
+		if ids[bugMed.ID] {
+			t.Errorf("NOT LIKE should have excluded %s: %v", bugMed.ID, ids)
+		}
+		if !ids[taskHigh.ID] || !ids[featureLow.ID] {
+			t.Errorf("NOT LIKE dropped non-matching issues: %v", ids)
+		}
+	})
+
+	t.Run("query_like_on_unsupported_field_errors", func(t *testing.T) {
+		out := bdQueryFail(t, bd, dir, `assignee LIKE "%alice%"`)
+		if !strings.Contains(out, "does not support LIKE") {
+			t.Errorf("expected an explicit LIKE-unsupported error, got:\n%s", out)
+		}
+	})
+
 	// ===== Flags =====
 
 	t.Run("query_all_includes_closed", func(t *testing.T) {

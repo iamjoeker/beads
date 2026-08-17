@@ -155,6 +155,9 @@ func (e *Evaluator) buildFilter(node Node, filter *types.IssueFilter) error {
 
 // applyComparison applies a comparison to the filter.
 func (e *Evaluator) applyComparison(comp *ComparisonNode, filter *types.IssueFilter) error {
+	if comp.Op == OpLike && !LikeFields[comp.Field] {
+		return likeFieldError(comp.Field)
+	}
 	switch comp.Field {
 	case "status":
 		return e.applyStatusFilter(comp, filter)
@@ -302,16 +305,32 @@ func (e *Evaluator) applyLabelFilter(comp *ComparisonNode, filter *types.IssueFi
 }
 
 func (e *Evaluator) applyTitleFilter(comp *ComparisonNode, filter *types.IssueFilter) error {
+	if comp.Op == OpLike {
+		pattern, err := validateLikePattern(comp.Value)
+		if err != nil {
+			return err
+		}
+		filter.TitleLike = pattern
+		return nil
+	}
 	if comp.Op != OpEquals {
-		return fmt.Errorf("title only supports = operator (use title contains pattern)")
+		return fmt.Errorf("title only supports = (contains) and LIKE operators")
 	}
 	filter.TitleContains = comp.Value
 	return nil
 }
 
 func (e *Evaluator) applyDescriptionFilter(comp *ComparisonNode, filter *types.IssueFilter) error {
+	if comp.Op == OpLike {
+		pattern, err := validateLikePattern(comp.Value)
+		if err != nil {
+			return err
+		}
+		filter.DescriptionLike = pattern
+		return nil
+	}
 	if comp.Op != OpEquals {
-		return fmt.Errorf("description only supports = operator (use desc contains pattern)")
+		return fmt.Errorf("description only supports = (contains) and LIKE operators")
 	}
 	if comp.Value == "" || strings.ToLower(comp.Value) == "none" || strings.ToLower(comp.Value) == "null" {
 		filter.EmptyDescription = true
@@ -322,8 +341,16 @@ func (e *Evaluator) applyDescriptionFilter(comp *ComparisonNode, filter *types.I
 }
 
 func (e *Evaluator) applyNotesFilter(comp *ComparisonNode, filter *types.IssueFilter) error {
+	if comp.Op == OpLike {
+		pattern, err := validateLikePattern(comp.Value)
+		if err != nil {
+			return err
+		}
+		filter.NotesLike = pattern
+		return nil
+	}
 	if comp.Op != OpEquals {
-		return fmt.Errorf("notes only supports = operator")
+		return fmt.Errorf("notes only supports = (contains) and LIKE operators")
 	}
 	filter.NotesContains = comp.Value
 	return nil
@@ -688,6 +715,9 @@ func (e *Evaluator) buildPredicate(node Node) (func(*types.Issue) bool, error) {
 
 // buildComparisonPredicate builds a predicate for a single comparison.
 func (e *Evaluator) buildComparisonPredicate(comp *ComparisonNode) (func(*types.Issue) bool, error) {
+	if comp.Op == OpLike && !LikeFields[comp.Field] {
+		return nil, likeFieldError(comp.Field)
+	}
 	switch comp.Field {
 	case "status":
 		return e.buildStatusPredicate(comp)
@@ -849,6 +879,14 @@ func (e *Evaluator) buildLabelPredicate(comp *ComparisonNode) (func(*types.Issue
 func (e *Evaluator) buildTitlePredicate(comp *ComparisonNode) (func(*types.Issue) bool, error) {
 	value := strings.ToLower(comp.Value)
 	switch comp.Op {
+	case OpLike:
+		pattern, err := validateLikePattern(comp.Value)
+		if err != nil {
+			return nil, err
+		}
+		return func(i *types.Issue) bool {
+			return likeMatch(pattern, i.Title)
+		}, nil
 	case OpEquals:
 		return func(i *types.Issue) bool {
 			return strings.Contains(strings.ToLower(i.Title), value)
@@ -866,6 +904,14 @@ func (e *Evaluator) buildDescriptionPredicate(comp *ComparisonNode) (func(*types
 	value := comp.Value
 	isNone := value == "" || strings.ToLower(value) == "none" || strings.ToLower(value) == "null"
 	switch comp.Op {
+	case OpLike:
+		pattern, err := validateLikePattern(comp.Value)
+		if err != nil {
+			return nil, err
+		}
+		return func(i *types.Issue) bool {
+			return likeMatch(pattern, i.Description)
+		}, nil
 	case OpEquals:
 		if isNone {
 			return func(i *types.Issue) bool { return i.Description == "" }, nil
@@ -888,6 +934,14 @@ func (e *Evaluator) buildDescriptionPredicate(comp *ComparisonNode) (func(*types
 func (e *Evaluator) buildNotesPredicate(comp *ComparisonNode) (func(*types.Issue) bool, error) {
 	value := strings.ToLower(comp.Value)
 	switch comp.Op {
+	case OpLike:
+		pattern, err := validateLikePattern(comp.Value)
+		if err != nil {
+			return nil, err
+		}
+		return func(i *types.Issue) bool {
+			return likeMatch(pattern, i.Notes)
+		}, nil
 	case OpEquals:
 		return func(i *types.Issue) bool {
 			return strings.Contains(strings.ToLower(i.Notes), value)
