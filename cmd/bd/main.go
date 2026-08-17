@@ -1282,7 +1282,13 @@ var rootCmd = &cobra.Command{
 						if remotecache.IsRemoteURL(repoVal) {
 							return nil
 						}
-						targetBeadsDir := filepath.Join(routing.ExpandPath(repoVal), ".beads")
+						// Follow a redirect stub so the store this opens is the
+						// target's real workspace, matching what create.go's
+						// resolveRepoTargetBeadsDir picks (bd-1yi). An invalid
+						// target is not diagnosed here: dbPath stays non-empty
+						// so PreRun proceeds and create.go reports the specific
+						// --repo error instead of "no beads database found".
+						targetBeadsDir := beads.FollowRedirect(filepath.Join(routing.ExpandPath(repoVal), ".beads"))
 						dbPath = utils.CanonicalizePath(filepath.Join(targetBeadsDir, beads.CanonicalDatabaseName))
 					}
 				}
