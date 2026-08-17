@@ -2,6 +2,7 @@
 //
 // The query language supports:
 //   - Field comparisons: status=open, priority>1, updated>7d
+//   - SQL LIKE patterns on text fields: title LIKE "%auth%"
 //   - Boolean operators: AND, OR, NOT
 //   - Parentheses for grouping: (status=open OR status=blocked) AND priority<2
 //   - Date-relative expressions: updated>7d, created<30d
@@ -34,6 +35,7 @@ const (
 	TokenLessEq              // <=
 	TokenGreater             // >
 	TokenGreaterEq           // >=
+	TokenLike                // LIKE
 	TokenAnd                 // AND
 	TokenOr                  // OR
 	TokenNot                 // NOT
@@ -67,6 +69,8 @@ func (t TokenType) String() string {
 		return ">"
 	case TokenGreaterEq:
 		return ">="
+	case TokenLike:
+		return "LIKE"
 	case TokenAnd:
 		return "AND"
 	case TokenOr:
@@ -308,6 +312,8 @@ func (l *Lexer) readIdent(startPos int) (Token, error) {
 
 	// Check for keywords
 	switch upper {
+	case "LIKE":
+		return Token{Type: TokenLike, Value: value, Pos: startPos}, nil
 	case "AND":
 		return Token{Type: TokenAnd, Value: value, Pos: startPos}, nil
 	case "OR":
