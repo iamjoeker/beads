@@ -34,6 +34,12 @@ Syntax:
   field<value       Less than
   field<=value      Less than or equal
 
+Pattern matching (case-insensitive):
+  field=value            Substring match on title, description, and notes
+  field LIKE "pat"       SQL LIKE on title, description, and notes:
+                         % matches any run of characters, _ matches one
+  field NOT LIKE "pat"   Negated LIKE
+
 Boolean operators (case-insensitive):
   expr AND expr     Both conditions must match
   expr OR expr      Either condition can match
@@ -47,9 +53,9 @@ Supported fields:
   assignee          Assigned user (use "none" for unassigned)
   owner             Issue owner
   label             Issue label (use "none" for unlabeled)
-  title             Search in title (contains)
-  description       Search in description (contains, "none" for empty)
-  notes             Search in notes (contains)
+  title             Search in title (contains, or LIKE)
+  description       Search in description (contains or LIKE, "none" for empty)
+  notes             Search in notes (contains, or LIKE)
   created           Creation date/time
   updated           Last update date/time
   started           Date/time issue first transitioned to in_progress
@@ -76,7 +82,10 @@ Examples:
   bd query "assignee=none AND type=task"
   bd query "created>30d AND status!=closed"
   bd query "label=frontend OR label=backend"
-  bd query "title=authentication AND priority=0"`,
+  bd query "title=authentication AND priority=0"
+  bd query 'title LIKE "%auth%"'
+  bd query 'title LIKE "mol-deacon%" AND status=open'
+  bd query 'description NOT LIKE "%wontfix%"'`,
 	SilenceUsage:  true,
 	SilenceErrors: true,
 	RunE: func(cmd *cobra.Command, args []string) error {

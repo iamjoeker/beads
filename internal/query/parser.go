@@ -21,6 +21,9 @@ const (
 	OpLessEq
 	OpGreater
 	OpGreaterEq
+	// OpLike is SQL LIKE pattern matching: % matches any run of characters,
+	// _ matches exactly one. Case-insensitive, like the = contains match.
+	OpLike
 )
 
 // String returns the string representation of a ComparisonOp.
@@ -38,6 +41,8 @@ func (op ComparisonOp) String() string {
 		return ">"
 	case OpGreaterEq:
 		return ">="
+	case OpLike:
+		return "LIKE"
 	default:
 		return "?"
 	}
@@ -53,6 +58,11 @@ type ComparisonNode struct {
 
 func (n *ComparisonNode) node() {}
 func (n *ComparisonNode) String() string {
+	// LIKE is a word operator, so it needs surrounding spaces to round-trip;
+	// the symbolic operators read better without them.
+	if n.Op == OpLike {
+		return fmt.Sprintf("%s LIKE %s", n.Field, n.Value)
+	}
 	return fmt.Sprintf("%s%s%s", n.Field, n.Op.String(), n.Value)
 }
 
@@ -250,6 +260,7 @@ func (p *Parser) parseComparison() (Node, error) {
 	}
 
 	var op ComparisonOp
+	negated := false
 	switch p.current.Type {
 	case TokenEquals:
 		op = OpEquals
@@ -263,19 +274,38 @@ func (p *Parser) parseComparison() (Node, error) {
 		op = OpGreater
 	case TokenGreaterEq:
 		op = OpGreaterEq
+	case TokenLike:
+		op = OpLike
+	case TokenNot:
+		// Infix "field NOT LIKE value" — SQL spells the negation here rather
+		// than as a prefix, and it desugars to NOT (field LIKE value).
+		next, err := p.peek()
+		if err != nil {
+			return nil, err
+		}
+		if next.Type != TokenLike {
+			return nil, p.operatorError(field)
+		}
+		if err := p.advance(); err != nil {
+			return nil, err
+		}
+		op = OpLike
+		negated = true
 	default:
-		return nil, fmt.Errorf("expected comparison operator at position %d, got %s", p.current.Pos, p.current.Type.String())
+		return nil, p.operatorError(field)
 	}
 
 	if err := p.advance(); err != nil {
 		return nil, err
 	}
 
-	// Value can be identifier, string, number, or duration
+	// Value can be identifier, string, number, or duration. A bare "like" in
+	// value position is a value, not the operator — "assignee=like" must keep
+	// working now that LIKE lexes as a keyword.
 	var value string
 	var valueType TokenType
 	switch p.current.Type {
-	case TokenIdent:
+	case TokenIdent, TokenLike:
 		value = p.current.Value
 		valueType = TokenIdent
 	case TokenString:
@@ -295,12 +325,28 @@ func (p *Parser) parseComparison() (Node, error) {
 		return nil, err
 	}
 
-	return &ComparisonNode{
+	comp := &ComparisonNode{
 		Field:     field,
 		Op:        op,
 		Value:     value,
 		ValueType: valueType,
-	}, nil
+	}
+	if negated {
+		return &NotNode{Operand: comp}, nil
+	}
+	return comp, nil
+}
+
+// operatorError reports a missing/unknown comparison operator after a field
+// name. It names the operators the language actually has: an unsupported
+// operator must never be mistaken for a query that legitimately matched
+// nothing, so the message has to be unmissable (bd-791).
+func (p *Parser) operatorError(field string) error {
+	got := p.current.Type.String()
+	if p.current.Value != "" {
+		got = fmt.Sprintf("%q", p.current.Value)
+	}
+	return fmt.Errorf("expected a comparison operator (=, !=, <, <=, >, >=, LIKE, NOT LIKE) after field %q at position %d, got %s", field, p.current.Pos, got)
 }
 
 // Parse is a convenience function that parses a query string.

@@ -1874,6 +1874,14 @@ type IssueFilter struct {
 	ExternalRefContains string
 	ExternalRef         *string // exact match on external_ref
 
+	// SQL LIKE patterns, applied verbatim (case-insensitively) to the matching
+	// column: '%' matches any run of characters, '_' exactly one. Unlike the
+	// *Contains fields above, the caller supplies the wildcards, so an anchored
+	// pattern ("mol-deacon%") stays anchored. Empty means "no LIKE filter".
+	TitleLike       string
+	DescriptionLike string
+	NotesLike       string
+
 	// Date ranges
 	CreatedAfter  *time.Time
 	CreatedBefore *time.Time
