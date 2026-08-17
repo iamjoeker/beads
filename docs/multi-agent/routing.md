@@ -148,6 +148,21 @@ bd create "Fix upstream bug" --repo .              # force current repo
 bd create "Private experiment" --repo ~/scratch    # force another repo
 ```
 
+The value is a **path** to a repository — a directory, or a remote URL — not a
+repository name. A path that names no directory fails before the bead gets an
+ID, so a mistyped or name-shaped target can't quietly write a bead somewhere
+nobody reads:
+
+```bash
+bd create "Filed against the wrong thing" --repo gastown
+# Error: --repo target "gastown" does not exist (--repo takes a path to a
+# repository, not a repository name)
+```
+
+An existing directory with no beads workspace is still a valid target: `bd`
+initializes one in place. If the target's `.beads` is a redirect, the bead
+lands in the workspace the redirect points at.
+
 ## Discovered work stays with its parent
 
 A bead created with a `discovered-from` dependency inherits its parent's
