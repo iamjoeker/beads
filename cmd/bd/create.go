@@ -12,6 +12,7 @@ import (
 	"time"
 
 	"github.com/spf13/cobra"
+	"github.com/steveyegge/beads/internal/beads"
 	"github.com/steveyegge/beads/internal/config"
 	"github.com/steveyegge/beads/internal/configfile"
 	"github.com/steveyegge/beads/internal/debug"
@@ -410,15 +411,16 @@ var createCmd = &cobra.Command{
 					return HandleError("failed to open remote store: %v", err)
 				}
 			} else {
-				targetBeadsDir := routing.ExpandPath(repoPath)
-				debug.Logf("DEBUG: Routing to target repo: %s\n", targetBeadsDir)
+				targetBeadsDirPath, err := resolveRepoTargetBeadsDir(repoPath)
+				if err != nil {
+					return HandleError("%v", err)
+				}
+				debug.Logf("DEBUG: Routing to target repo: %s\n", targetBeadsDirPath)
 
-				if err := ensureBeadsDirForPath(rootCtx, targetBeadsDir, store); err != nil {
+				if err := ensureBeadsDirForPath(rootCtx, targetBeadsDirPath, store); err != nil {
 					return HandleError("failed to initialize target repo: %v", err)
 				}
 
-				targetBeadsDirPath := filepath.Join(targetBeadsDir, ".beads")
-				var err error
 				targetStore, err = newDoltStoreFromConfig(rootCtx, targetBeadsDirPath)
 				if err != nil {
 					return HandleError("failed to open target store: %v", err)
@@ -936,14 +938,16 @@ func openDryRunTargetStore(ctx context.Context, repoPath string) (storage.DoltSt
 		return store, nil
 	}
 
-	targetPath := routing.ExpandPath(repoPath)
-	beadsDir := filepath.Join(targetPath, ".beads")
+	beadsDir, err := resolveRepoTargetBeadsDir(repoPath)
+	if err != nil {
+		return nil, err
+	}
 	metadataPath := filepath.Join(beadsDir, "metadata.json")
 	if _, err := os.Stat(metadataPath); err != nil {
 		if os.IsNotExist(err) {
-			return nil, fmt.Errorf("target repo %s is not initialized; refusing to initialize it during dry-run", targetPath)
+			return nil, fmt.Errorf("target repo %s is not initialized; refusing to initialize it during dry-run", routing.ExpandPath(repoPath))
 		}
-		return nil, fmt.Errorf("failed to inspect target repo %s: %w", targetPath, err)
+		return nil, fmt.Errorf("failed to inspect target repo %s: %w", routing.ExpandPath(repoPath), err)
 	}
 
 	store, err := newPreviewStoreFromConfig(ctx, beadsDir)
@@ -953,11 +957,50 @@ func openDryRunTargetStore(ctx context.Context, repoPath string) (storage.DoltSt
 	return store, nil
 }
 
-// ensureBeadsDirForPath ensures a beads directory exists at the target path.
-// If the .beads directory doesn't exist, it creates it and initializes with
-// the same prefix as the source store (T010, T012: prefix inheritance).
-func ensureBeadsDirForPath(ctx context.Context, targetPath string, sourceStore storage.DoltStorage) error {
-	beadsDir := filepath.Join(targetPath, ".beads")
+// resolveRepoTargetBeadsDir resolves the .beads workspace that an explicit
+// `--repo <path>` targets, for the local (non-remote-URL) case.
+//
+// Two silent-write-loss traps live here (bd-1yi), and both end the same way:
+// a success line quoting an issue ID that no later read can resolve.
+//
+//  1. --repo takes a PATH, but a plausible repository NAME ("gastown") is easy
+//     to pass instead. Nothing used to check that the path exists, so
+//     ensureBeadsDirForPath's MkdirAll invented <cwd>/<name>/.beads and the
+//     issue landed in a workspace nobody would ever look in. Requiring an
+//     existing directory turns that into a non-zero exit before an ID is
+//     minted.
+//  2. A target whose .beads is a redirect stub (a rig pointing at the real
+//     workspace elsewhere) has no metadata.json of its own. Without following
+//     the redirect, ensureBeadsDirForPath reads the stub as uninitialized and
+//     initializes an EMBEDDED database beside it, so the write lands in a
+//     store the configured backend — a shared Dolt server, typically — never
+//     reads.
+func resolveRepoTargetBeadsDir(repoPath string) (string, error) {
+	targetPath := routing.ExpandPath(repoPath)
+	if targetPath == "" {
+		return "", fmt.Errorf("--repo requires a repository path")
+	}
+
+	info, err := os.Stat(targetPath)
+	if err != nil {
+		if os.IsNotExist(err) {
+			return "", fmt.Errorf("--repo target %q does not exist (--repo takes a path to a repository, not a repository name)", repoPath)
+		}
+		return "", fmt.Errorf("failed to inspect --repo target %s: %w", targetPath, err)
+	}
+	if !info.IsDir() {
+		return "", fmt.Errorf("--repo target %q is not a directory", repoPath)
+	}
+
+	return beads.FollowRedirect(filepath.Join(targetPath, ".beads")), nil
+}
+
+// ensureBeadsDirForPath ensures a beads directory exists at beadsDir.
+// If it doesn't exist, it creates it and initializes with the same prefix as
+// the source store (T010, T012: prefix inheritance). Callers pass the
+// redirect-resolved .beads directory (see resolveRepoTargetBeadsDir), not the
+// repository root.
+func ensureBeadsDirForPath(ctx context.Context, beadsDir string, sourceStore storage.DoltStorage) error {
 	metadataPath := filepath.Join(beadsDir, "metadata.json")
 
 	// Check if beads directory already exists with a Dolt database.
