@@ -85,19 +85,42 @@ func NotPinned(force bool) IssueValidator {
 // genuinely different identities, whose non-separator characters still
 // differ (e.g. "gastown.mayor" vs "gastown.dog-3" stay distinct).
 //
+// "/" is a separator of exactly the same kind, and is the one Gas Town uses
+// in its ADDRESS form: "<rig>/<role>" for rig-level agents ("beads/witness",
+// "deacon/dogs/charlie"), and "<role>/" for TOWN-level agents, where the
+// trailing slash holds the EMPTY RIG SLOT ("mayor/", "deacon/").
+//
+// A trailing slash is therefore the one trailing separator that carries no
+// positional information — it marks an absent rig, not a missing name — so it
+// alone is stripped, before the general collapse. Trailing ".", "_" and "-"
+// keep their existing pinned behavior of being preserved as separators
+// (TestCanonicalActor), because in the dotted-alias world they may still
+// distinguish identities; this change does not touch them.
+//
+// Without this, every ownership check on a town-level agent compares an
+// ADDRESS to an IDENTITY and refuses. Measured 2026-08-16: all 77 escalation
+// beads are assigned "mayor/" while BD_ACTOR is "mayor", so the Mayor could
+// not close a single escalation through the intended command, and
+// `gt escalate close` has no --force to take the error's own advice.
+//
 // Empty stays empty: an actual absence of an actor must never canonicalize
 // to the same value as a non-empty one, or AssigneeMatches would start
-// accepting an empty actor against an assigned issue.
+// accepting an empty actor against an assigned issue. The slash strip is
+// therefore skipped when it would empty a non-empty input (the degenerate
+// "/"), preserving that invariant.
 func CanonicalActor(s string) string {
 	if s == "" {
 		return ""
+	}
+	if trimmed := strings.TrimSuffix(s, "/"); trimmed != "" {
+		s = trimmed
 	}
 	var b strings.Builder
 	b.Grow(len(s))
 	inSeparator := false
 	for _, r := range s {
 		switch r {
-		case '.', '_', '-':
+		case '.', '_', '-', '/':
 			if !inSeparator {
 				b.WriteByte('_')
 				inSeparator = true
