@@ -80,6 +80,17 @@ func TestResolveSmartGateRemote(t *testing.T) {
 			remotes:    []string{"alpha", "beta"},
 			want:       "upstream",
 		},
+		{
+			// Zero configured remotes: nothing to resolve onto, so the caller's
+			// value passes through untouched. Raised by beads/refinery on review
+			// of the parent fix. Note this is the resolver's LOCAL behaviour
+			// only — see TestZeroRemoteStoreNeverReachesSmartRouter for why a
+			// database in this state never reaches the resolver at all.
+			name:       "zero remotes is left unchanged",
+			configured: "upstream",
+			remotes:    nil,
+			want:       "upstream",
+		},
 	}
 
 	for _, tc := range tests {
@@ -107,6 +118,67 @@ func TestResolveSmartGateRemoteFailsSafe(t *testing.T) {
 
 	if got := resolveSmartGateRemote(context.Background(), db, "upstream"); got != "upstream" {
 		t.Errorf("on read failure got %q, want the caller's value %q", got, "upstream")
+	}
+}
+
+// TestZeroRemoteStoreNeverReachesSmartRouter pins the claim that resolves a
+// review dispute on the parent fix (bd-2x7).
+//
+// beads/refinery read resolveSmartGateRemote's zero-remote early return —
+// "names empty -> return remoteName unchanged -> unresolvable ref -> block" —
+// and concluded that a database with NO remotes still blocks. The trace is
+// accurate but the function is unreachable in that state:
+// checkRemoteMigrateGate returns nil as soon as hasRemote is false, well before
+// the smart router, the resolver, or any ref construction.
+//
+// Both sides of that exchange were code-path analysis, and the one field
+// observation suggesting otherwise was confounded (the gate error and the
+// repo_state capture may have come from different stores). So pin it with a
+// test instead of an argument.
+//
+// The assertion is structural, not just the returned error: the mock is primed
+// ONLY for the blunt-gate probes. If control ever reached routeSmartGate it
+// would issue "SELECT version, content_hash FROM schema_migrations", which is
+// unmocked — sqlmock fails, and this test fails with it. That makes the test
+// sensitive to the exact regression it guards, rather than merely asserting a
+// nil error that a dozen unrelated changes could also produce.
+func TestZeroRemoteStoreNeverReachesSmartRouter(t *testing.T) {
+	t.Setenv(SmartGateEnv, "1")
+	t.Setenv(AllowRemoteMigrateEnv, "0")
+	floor := LastNonDeterministicMigration
+
+	for _, tc := range []struct {
+		name           string
+		extraHasRemote func() bool
+	}{
+		{"no extra probe wired (embedded path)", nil},
+		{"extra probe reports no persisted remote", func() bool { return false }},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			db, mock, _ := sqlmock.New()
+			defer db.Close()
+
+			// Pending migrations exist — so the gate is NOT short-circuiting on
+			// "nothing to migrate". Without this the test would pass vacuously.
+			expectGateCurrentVersion(mock, floor) // CurrentVersion
+			expectGateCurrentVersion(mock, floor) // PendingVersions -> pending
+			// The database has NO Dolt remotes.
+			mock.ExpectQuery(`SELECT COUNT\(\*\) FROM dolt_remotes`).
+				WillReturnRows(sqlmock.NewRows([]string{"count"}).AddRow(0))
+
+			err := CheckRemoteMigrateGateForRemoteWithRemoteCheck(
+				context.Background(), db, "upstream", tc.extraHasRemote)
+			if err != nil {
+				t.Fatalf("a database with no remotes has no cross-clone fork risk "+
+					"and must not be gated, got %v", err)
+			}
+			// Proves the smart router never ran: any further query would be
+			// unexpected and is reported here.
+			if err := mock.ExpectationsWereMet(); err != nil {
+				t.Fatalf("gate issued queries beyond the blunt probes — it reached "+
+					"the smart router despite having no remote: %v", err)
+			}
+		})
 	}
 }
 
