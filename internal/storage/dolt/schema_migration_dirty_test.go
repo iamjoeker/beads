@@ -287,23 +287,36 @@ func TestSchemaMigrationRejectsChangedPreExistingDirtyTable(t *testing.T) {
 		t.Fatalf("CommitWithConfig: %v", err)
 	}
 
+	// Commit a state where 'review' is ABSENT but the table is non-empty, so
+	// the closing assertion ("HEAD must not have gained 'review'") can still
+	// discriminate, and so the uncommitted DELETE below produces a real diff.
 	if _, err := store.db.ExecContext(ctx, "DELETE FROM custom_statuses"); err != nil {
 		t.Fatalf("clear custom_statuses: %v", err)
+	}
+	if _, err := store.db.ExecContext(ctx,
+		"INSERT INTO custom_statuses (name, category) VALUES ('placeholder', 'wip')",
+	); err != nil {
+		t.Fatalf("seed placeholder custom status: %v", err)
 	}
 	if err := store.doltAddAndCommit(ctx, []string{"custom_statuses"}, "test: simulate missing custom status backfill"); err != nil {
 		t.Fatalf("commit cleared custom_statuses: %v", err)
 	}
 
-	// Leave an UNCOMMITTED user write on custom_statuses: the pass's backfill
-	// (re-inserting 'review' from config) then changes a pre-existing dirty
-	// table mid-pass, which the changed-signature guard must reject.
-	// (Historically this test dirtied dolt_ignore and relied on the pass's
-	// pattern re-seed to flip it; dolt_ignore is now pass-owned state exempt
-	// from the guard, so the canary is a real user table.)
-	if _, err := store.db.ExecContext(ctx,
-		"INSERT INTO custom_statuses (name, category) VALUES ('scratch', 'wip')",
-	); err != nil {
-		t.Fatalf("dirty custom_statuses: %v", err)
+	// Now leave custom_statuses UNCOMMITTED-EMPTY. The table is BOTH
+	// pre-existing dirty (it differs from HEAD) AND empty, which is the state
+	// the pass's backfill reacts to.
+	//
+	// The EMPTINESS is load-bearing, and getting it wrong was this test's bug.
+	// needsCustomStatusesBackfill fires ONLY on an empty table
+	// (`SELECT COUNT(*) ... if count > 0 { return false }`). The previous canary
+	// — an uncommitted INSERT of a 'scratch' row — made the table NON-EMPTY and
+	// so SUPPRESSED the very backfill it meant to provoke. With no backfill,
+	// `backfilled` stayed false, initSchemaOnDB took its
+	// "applied == 0 && !backfilled" early return, and the changed-dirty-table
+	// guard was never reached: the test asserted a rejection the pass had no
+	// opportunity to make, and failed with "error = <nil>".
+	if _, err := store.db.ExecContext(ctx, "DELETE FROM custom_statuses"); err != nil {
+		t.Fatalf("dirty custom_statuses by emptying it uncommitted: %v", err)
 	}
 
 	_, err := initSchemaOnDB(ctx, store.db)

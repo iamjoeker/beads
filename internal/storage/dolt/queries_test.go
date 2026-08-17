@@ -37,6 +37,16 @@ func TestRigIssueIsPersistentButHiddenFromReady(t *testing.T) {
 	ctx, cancel := testContext(t)
 	defer cancel()
 
+	// "rig" is a CUSTOM type, not a built-in: ReadyWorkExcludeTypes knows to
+	// hide it from ready work, but creating one still requires it to be
+	// registered in types.custom. setupTestStore deliberately does not set
+	// types.custom (see the GH#1356 note in dolt_test.go), so register it here
+	// exactly as the product does — otherwise CreateIssue correctly refuses
+	// with "invalid issue type: rig" and the test never reaches its subject.
+	if err := store.SetConfig(ctx, "types.custom", "molecule,gate,convoy,merge-request,slot,agent,role,rig,event,message"); err != nil {
+		t.Fatalf("register custom types: %v", err)
+	}
+
 	rig := &types.Issue{
 		ID:        "rw-rig-durable",
 		Title:     "Rig identity",

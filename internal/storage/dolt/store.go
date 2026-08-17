@@ -1046,34 +1046,11 @@ func (s *DoltStore) withReadTxLongTimeout(ctx context.Context, fn func(tx *sql.T
 	s.mu.RLock()
 	defer s.mu.RUnlock()
 	return s.withRetry(ctx, func() error {
-		db, err := s.openLongTimeoutConn()
+		db, err := s.openLongTimeoutConnOnActiveBranch(ctx)
 		if err != nil {
 			return err
 		}
 		defer db.Close()
-		// The fresh one-shot connection defaults to the default branch, not
-		// whatever branch the store's pooled session (s.db) is actually
-		// checked out to. The pool is branch-isolated (MaxOpenConns(1)
-		// semantics — see the comment on MaxOpenConns above), so ask it for
-		// its real active branch and reproduce that checkout here before
-		// starting the read tx; otherwise a query like dolt_history_* would
-		// silently read the wrong branch after any in-process checkout,
-		// including a test-harness CALL DOLT_CHECKOUT run directly against
-		// s.db, which bypasses Store.Checkout and leaves s.branch stale.
-		var branch string
-		if scanErr := s.db.QueryRowContext(ctx, "SELECT active_branch()").Scan(&branch); scanErr == nil {
-			if branch != "" {
-				if _, err := db.ExecContext(ctx, "CALL DOLT_CHECKOUT(?)", branch); err != nil {
-					return fmt.Errorf("checkout active branch %q on long-timeout connection: %w", branch, err)
-				}
-			}
-		} else if s.branch != "" {
-			// Fall back to the store's recorded branch rather than failing
-			// the whole call outright.
-			if _, err := db.ExecContext(ctx, "CALL DOLT_CHECKOUT(?)", s.branch); err != nil {
-				return fmt.Errorf("checkout fallback branch %q on long-timeout connection: %w", s.branch, err)
-			}
-		}
 		tx, err := db.BeginTx(ctx, nil)
 		if err != nil {
 			return fmt.Errorf("begin read tx: %w", err)
@@ -3931,6 +3908,45 @@ func (s *DoltStore) pullTransport(ctx context.Context, remote string) error {
 // openLongTimeoutConn opens a dedicated single-connection *sql.DB to this store's
 // database with a long read timeout, for merge/pull/conflict operations that can run
 // longer than the default connection timeout. The caller must Close the returned DB.
+// matchActiveBranchOn reproduces the pooled session's checkout on a freshly
+// opened one-shot connection.
+//
+// A new connection is a NEW DOLT SESSION and lands on the database's DEFAULT
+// branch, not whatever branch the store's pooled session (s.db) is checked out
+// to. The pool is branch-isolated (MaxOpenConns(1) semantics), so ask it for
+// its real active branch and reproduce that checkout here. Without this, any
+// work done on the one-shot connection silently targets the wrong branch —
+// including after a test-harness CALL DOLT_CHECKOUT run directly against s.db,
+// which bypasses Store.Checkout and leaves s.branch stale.
+//
+// This was previously inlined in withReadTxLongTimeout and therefore protected
+// only READ paths. recomputeAllBlocked is a WRITE path that opened the same
+// kind of connection without it, so its dirty-graph guard and its repair both
+// ran against the default branch: the guard saw a clean working set it could
+// never have seen the caller's dirt in, and the repair found 0 rows to fix on
+// a branch that did not hold the caller's data (bd-6dnrw.37 regression, found
+// 2026-08-17 — measured as main branch "test-<name>-<hash>" vs one-shot
+// connection "main", 0 rows in issues).
+func (s *DoltStore) matchActiveBranchOn(ctx context.Context, db *sql.DB) error {
+	var branch string
+	if scanErr := s.db.QueryRowContext(ctx, "SELECT active_branch()").Scan(&branch); scanErr == nil {
+		if branch != "" {
+			if _, err := db.ExecContext(ctx, "CALL DOLT_CHECKOUT(?)", branch); err != nil {
+				return fmt.Errorf("checkout active branch %q on long-timeout connection: %w", branch, err)
+			}
+		}
+		return nil
+	}
+	if s.branch != "" {
+		// Fall back to the store's recorded branch rather than failing the
+		// whole call outright.
+		if _, err := db.ExecContext(ctx, "CALL DOLT_CHECKOUT(?)", s.branch); err != nil {
+			return fmt.Errorf("checkout fallback branch %q on long-timeout connection: %w", s.branch, err)
+		}
+	}
+	return nil
+}
+
 func (s *DoltStore) openLongTimeoutConn() (*sql.DB, error) {
 	cfg, err := mysql.ParseDSN(s.connStr)
 	if err != nil {
@@ -3945,6 +3961,30 @@ func (s *DoltStore) openLongTimeoutConn() (*sql.DB, error) {
 	return db, nil
 }
 
+// openLongTimeoutConnOnActiveBranch opens a long-timeout connection ALREADY
+// checked out to the pooled session's branch. Prefer it over the raw
+// openLongTimeoutConn for anything that reads or writes table data.
+//
+// The raw form lands on the database's DEFAULT branch, and remembering to
+// follow it with matchActiveBranchOn was left to each caller. Of the five call
+// sites, exactly one did (withReadTxLongTimeout); the other four — the
+// post-merge recompute, the full recompute, the auto-resolving pull and the
+// filtered peer push — silently operated on the wrong branch whenever the
+// store was checked out anywhere but the default. Making the primitive carry
+// the branch removes the failure mode rather than asking every future caller
+// to remember it.
+func (s *DoltStore) openLongTimeoutConnOnActiveBranch(ctx context.Context) (*sql.DB, error) {
+	db, err := s.openLongTimeoutConn()
+	if err != nil {
+		return nil, err
+	}
+	if err := s.matchActiveBranchOn(ctx, db); err != nil {
+		_ = db.Close()
+		return nil, err
+	}
+	return db, nil
+}
+
 // remote names the remote the query pulls from; the GH#3144 fetch+merge
 // fallback targets it directly, so pulls from non-default remotes (PullRemote,
 // federation peers) no longer fall back to s.remote.
@@ -3955,7 +3995,7 @@ func (s *DoltStore) pullWithAutoResolve(ctx context.Context, remote string, quer
 }
 
 func (s *DoltStore) pullWithAutoResolveUnchecked(ctx context.Context, remote string, query string, args ...any) error {
-	db, err := s.openLongTimeoutConn()
+	db, err := s.openLongTimeoutConnOnActiveBranch(ctx)
 	if err != nil {
 		return err
 	}
@@ -4132,7 +4172,11 @@ func (s *DoltStore) recomputeAllBlocked(ctx context.Context) (int, error) {
 	// with "i/o timeout" — and the retry dies the same way, so the owed
 	// recompute never lands (bd-bn8jo). Run it on a dedicated long-timeout
 	// connection like the other known-long maintenance ops.
-	db, err := s.openLongTimeoutConn()
+	// Must carry the pooled session's branch: on the default branch the
+	// dirty-graph guard cannot observe the caller's working set and the repair
+	// scans a branch that does not hold the caller's rows — both fail silently
+	// as "clean, nothing to do".
+	db, err := s.openLongTimeoutConnOnActiveBranch(ctx)
 	if err != nil {
 		return 0, err
 	}
@@ -4187,7 +4231,9 @@ func blockedRecomputeStagedTableList() []string {
 // kill here is what turns into the owed full recompute in the first place
 // (bd-bn8jo).
 func (s *DoltStore) recomputeBlockedTx(ctx context.Context, fromCommit string) error {
-	db, err := s.openLongTimeoutConn()
+	// Runs automatically after every merge/pull, so a default-branch connection
+	// here silently recomputes is_blocked on the wrong branch in production.
+	db, err := s.openLongTimeoutConnOnActiveBranch(ctx)
 	if err != nil {
 		return err
 	}

@@ -10,6 +10,7 @@ import (
 
 	"github.com/steveyegge/beads/internal/storage"
 	"github.com/steveyegge/beads/internal/types"
+	"github.com/steveyegge/beads/internal/validation"
 )
 
 // Claim-family verify-after-write (bd-zccb9, from wyvern incident wy-ejph3).
@@ -60,7 +61,15 @@ func claimedAs(assignee string, status types.Status) claimPostcondition {
 	return claimPostcondition{
 		op: "claim",
 		want: func(gotAssignee string, gotStatus types.Status) bool {
-			return gotAssignee == assignee && gotStatus == status
+			// Compare identities, not spellings. One principal reaches bd in
+			// more than one spelling depending on which layer produced the
+			// string ("gastown.mayor" from a dotted alias, "gastown__mayor" as
+			// persisted), and a re-claim across spellings is deliberately a
+			// NO-OP that leaves the stored spelling alone. Under raw ==, that
+			// correct no-op read as a LOST WRITE and the claim failed loudly
+			// with "reported success but did not land" — turning the
+			// idempotent path into a hard error.
+			return validation.ActorMatches(gotAssignee, assignee) && gotStatus == status
 		},
 		desc: fmt.Sprintf("assignee=%q status=%q", assignee, status),
 	}
