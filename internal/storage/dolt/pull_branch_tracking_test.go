@@ -27,14 +27,22 @@ func TestPullWithAutoResolve_BranchTrackingFallback(t *testing.T) {
 	ctx, cancel := testContext(t)
 	defer cancel()
 
-	// Create a stored procedure that injects the exact Dolt GH#3144 error text.
+	// Create a stored procedure that injects the Dolt GH#3144 error text.
 	// This reproduces the message DOLT_PULL emits when repo_state.json lacks
 	// branch-tracking info for the remote, without requiring a real remote.
+	//
+	// The text is TRUNCATED relative to Dolt's real message, and must stay
+	// under 128 characters: MySQL caps SIGNAL's MESSAGE_TEXT at 128, and
+	// exceeding it raises "signal condition information item MESSAGE_TEXT has
+	// max length of 128" INSTEAD of the message we are trying to inject — so
+	// the fixture silently stops testing what it claims to. Only the substring
+	// matched by isBranchTrackingError ("did not specify a branch") is load-
+	// bearing; the rest of Dolt's real sentence is decoration.
 	const createSP = `
 		CREATE PROCEDURE inject_tracking_error()
 		BEGIN
 			SIGNAL SQLSTATE 'HY000'
-			SET MESSAGE_TEXT = 'Error 1105: You asked to pull from the remote origin, but did not specify a branch. Because this is not the default configured remote for your current branch, you must specify a branch.';
+			SET MESSAGE_TEXT = 'Error 1105: You asked to pull from the remote origin, but did not specify a branch.';
 		END`
 	if _, err := store.execContext(ctx, createSP); err != nil {
 		t.Skipf("stored procedures with SIGNAL not supported by this Dolt version: %v", err)
@@ -56,8 +64,20 @@ func TestPullWithAutoResolve_BranchTrackingFallback(t *testing.T) {
 	if err == nil {
 		t.Fatal("expected an error from DOLT_FETCH (no remote configured), got nil")
 	}
+	// This was a t.Skipf until bd-cn4. It must NOT be: "the procedure is not
+	// visible to the pull long-timeout connection" is not a Dolt version
+	// difference, it is exactly the bug bd-cn4 fixed — the long-timeout
+	// connection opened on the default branch instead of the store's active
+	// branch, where the procedure had been created. Stored procedures live in
+	// dolt_procedures, which is branch-scoped, so a mismatched branch makes
+	// them invisible.
+	//
+	// While it skipped, this test never executed its own assertion ONCE, on any
+	// commit, and reported ok the whole time. Restoring the skip would re-hide a
+	// regression of bd-cn4 in precisely the same way.
 	if strings.Contains(err.Error(), "inject_tracking_error") && strings.Contains(err.Error(), "does not exist") {
-		t.Skipf("stored procedure is not visible to pull long-timeout connection on this Dolt version: %v", err)
+		t.Fatalf("stored procedure invisible to the pull long-timeout connection — "+
+			"this is the bd-cn4 branch-matching regression, not a Dolt version issue: %v", err)
 	}
 	if !strings.Contains(err.Error(), "fetch from") {
 		t.Errorf("expected 'fetch from' error confirming fallback was triggered; got: %v", err)
