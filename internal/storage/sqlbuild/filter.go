@@ -74,6 +74,21 @@ func BuildIssueFilterClauses(query string, filter types.IssueFilter, tables Filt
 		whereClauses = append(whereClauses, "LOWER(external_ref) LIKE ?")
 		args = append(args, "%"+strings.ToLower(filter.ExternalRefContains)+"%")
 	}
+	// Caller-supplied LIKE patterns. The pattern is bound as-is (lowercased to
+	// match LOWER(col)) — no surrounding %, because the caller's wildcards are
+	// the whole point.
+	if filter.TitleLike != "" {
+		whereClauses = append(whereClauses, "LOWER(title) LIKE ?")
+		args = append(args, strings.ToLower(filter.TitleLike))
+	}
+	if filter.DescriptionLike != "" {
+		whereClauses = append(whereClauses, "LOWER(description) LIKE ?")
+		args = append(args, strings.ToLower(filter.DescriptionLike))
+	}
+	if filter.NotesLike != "" {
+		whereClauses = append(whereClauses, "LOWER(notes) LIKE ?")
+		args = append(args, strings.ToLower(filter.NotesLike))
+	}
 	if filter.ExternalRef != nil {
 		whereClauses = append(whereClauses, "external_ref = ?")
 		args = append(args, *filter.ExternalRef)

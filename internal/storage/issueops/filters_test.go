@@ -566,3 +566,71 @@ func TestBuildIssueFilterClauses_CombinedFilters(t *testing.T) {
 		t.Errorf("expected 6 args, got %d", len(args))
 	}
 }
+
+// TestBuildIssueFilterClauses_LikePatterns pins the distinction that makes the
+// LIKE query operator usable: the *Contains filters wrap the value in %...%,
+// while the *Like filters bind the caller's pattern verbatim so an anchored
+// pattern stays anchored (bd-791).
+func TestBuildIssueFilterClauses_LikePatterns(t *testing.T) {
+	t.Parallel()
+
+	tests := []struct {
+		name       string
+		filter     types.IssueFilter
+		wantClause string
+		wantArg    string
+	}{
+		{
+			name:       "title",
+			filter:     types.IssueFilter{TitleLike: "Mol-Deacon%"},
+			wantClause: "LOWER(title) LIKE ?",
+			wantArg:    "mol-deacon%",
+		},
+		{
+			name:       "description",
+			filter:     types.IssueFilter{DescriptionLike: "%Imposters%"},
+			wantClause: "LOWER(description) LIKE ?",
+			wantArg:    "%imposters%",
+		},
+		{
+			name:       "notes",
+			filter:     types.IssueFilter{NotesLike: "handoff_"},
+			wantClause: "LOWER(notes) LIKE ?",
+			wantArg:    "handoff_",
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+
+			clauses, args, err := BuildIssueFilterClauses("", tt.filter, IssuesFilterTables)
+			if err != nil {
+				t.Fatalf("unexpected error: %v", err)
+			}
+			if len(clauses) != 1 || clauses[0] != tt.wantClause {
+				t.Fatalf("clauses = %v, want [%s]", clauses, tt.wantClause)
+			}
+			if len(args) != 1 || args[0] != tt.wantArg {
+				t.Errorf("args = %v, want [%q]", args, tt.wantArg)
+			}
+		})
+	}
+}
+
+// TestBuildIssueFilterClauses_ContainsStillWrapsWildcards guards the other half
+// of that distinction: adding *Like must not change what = means.
+func TestBuildIssueFilterClauses_ContainsStillWrapsWildcards(t *testing.T) {
+	t.Parallel()
+
+	clauses, args, err := BuildIssueFilterClauses("", types.IssueFilter{TitleContains: "Auth"}, IssuesFilterTables)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if len(clauses) != 1 || clauses[0] != "LOWER(title) LIKE ?" {
+		t.Fatalf("clauses = %v", clauses)
+	}
+	if len(args) != 1 || args[0] != "%auth%" {
+		t.Errorf("args = %v, want [%q]", args, "%auth%")
+	}
+}
