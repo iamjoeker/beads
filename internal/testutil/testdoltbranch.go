@@ -69,15 +69,20 @@ func StartTestBranch(t *testing.T, db *sql.DB, database string) (branchName stri
 	// Checkout the branch
 	if _, err := db.Exec("CALL DOLT_CHECKOUT(?)", branchName); err != nil {
 		// Clean up the branch we just created
-		_, _ = db.Exec("CALL DOLT_BRANCH('-D', ?)", branchName)
+		recordBranchCleanupResult("DOLT_BRANCH('-D')", execDiscardingResult(db, "CALL DOLT_BRANCH('-D', ?)", branchName))
 		t.Fatalf("StartTestBranch: DOLT_CHECKOUT(%s) failed: %v", branchName, err)
 	}
 
 	cleanup = func() {
-		// Switch back to main before deleting
-		_, _ = db.Exec(fmt.Sprintf("USE `%s`", database))
-		_, _ = db.Exec("CALL DOLT_CHECKOUT('main')")
-		_, _ = db.Exec("CALL DOLT_BRANCH('-D', ?)", branchName)
+		// Switch back to main before deleting. These failures stay non-fatal —
+		// a cleanup that fails a passing test would be worse — but they are
+		// counted, because a leaked branch is invisible from inside the test
+		// that leaked it and only shows up as the NEXT test being slower.
+		// BranchCleanupReport is how a suite reads the total back.
+		//nolint:gosec // G201: database name comes from test infrastructure
+		recordBranchCleanupResult("USE", execDiscardingResult(db, fmt.Sprintf("USE `%s`", database)))
+		recordBranchCleanupResult("DOLT_CHECKOUT('main')", execDiscardingResult(db, "CALL DOLT_CHECKOUT('main')"))
+		recordBranchCleanupResult("DOLT_BRANCH('-D')", execDiscardingResult(db, "CALL DOLT_BRANCH('-D', ?)", branchName))
 	}
 
 	return branchName, cleanup
@@ -124,10 +129,27 @@ func CleanTestBranches(db *sql.DB, database string) {
 	}
 
 	// Make sure we're on main before deleting branches
-	_, _ = db.Exec("CALL DOLT_CHECKOUT('main')")
+	recordBranchCleanupResult("DOLT_CHECKOUT('main')", execDiscardingResult(db, "CALL DOLT_CHECKOUT('main')"))
 	for _, branch := range branches {
-		_, _ = db.Exec("CALL DOLT_BRANCH('-D', ?)", branch)
+		recordBranchCleanupResult("DOLT_BRANCH('-D')", execDiscardingResult(db, "CALL DOLT_BRANCH('-D', ?)", branch))
 	}
+}
+
+// CountTestBranches reports how many test branches the database still holds.
+// Every test branch has a cleanup, so a count taken after a suite finishes
+// should be zero; anything left is a cleanup that did not run or did not work,
+// and it was there slowing down every test that came after it. A negative
+// result means the count itself could not be taken.
+func CountTestBranches(db *sql.DB, database string) int {
+	//nolint:gosec // G201: database name comes from test infrastructure
+	if _, err := db.Exec(fmt.Sprintf("USE `%s`", database)); err != nil {
+		return -1
+	}
+	var n int
+	if err := db.QueryRow("SELECT COUNT(*) FROM dolt_branches WHERE name LIKE ?", branchPrefix+"%").Scan(&n); err != nil {
+		return -1
+	}
+	return n
 }
 
 // SetupSharedTestDB creates a shared database on the test Dolt server with

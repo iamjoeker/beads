@@ -3,6 +3,7 @@ package dolt
 import (
 	"context"
 	"database/sql"
+	"flag"
 	"fmt"
 	"os"
 	"path/filepath"
@@ -61,6 +62,19 @@ func testMainInner(m *testing.M) int {
 		fmt.Fprintf(os.Stderr, "WARN: %v, skipping Dolt tests\n", err)
 	} else {
 		defer testutil.TerminateDoltContainer()
+
+		// The timeout guard lives here, inside the branch where Dolt is
+		// actually available, because that is the only branch that does
+		// real work. With Docker absent or BEADS_TEST_SKIP=dolt set —
+		// which is the default for scripts/test.sh and for every CI job
+		// that runs ./... — every test self-skips in seconds and any
+		// ceiling is fine. See requiredSuiteTimeout in suite_timeout_test.go.
+		flag.Parse() // testing.Init registered the flags; m.Run has not parsed them yet
+		if msg := suiteTimeoutRefusal(readSuiteRunFlags()); msg != "" {
+			fmt.Fprint(os.Stderr, msg)
+			return 1
+		}
+
 		testServerPort = testutil.DoltContainerPortInt()
 
 		// Set up shared database for branch-per-test isolation
@@ -82,6 +96,22 @@ func testMainInner(m *testing.M) int {
 	}
 
 	code := m.Run()
+
+	// Branch-per-test residue. Nothing here fails the run — a suite that
+	// passed did pass — but the two numbers are what a whole-package run
+	// costs an hour to produce, so print them rather than throw them away.
+	// The standing question they answer (bd-033) is whether test branches
+	// accumulate across the run, which would make per-test setup slower as
+	// the suite goes on and would explain deadline expiries that cluster
+	// toward the end.
+	if report := testutil.BranchCleanupReport(); report != "" {
+		fmt.Fprint(os.Stderr, report)
+	}
+	if testSharedConn != nil {
+		if leaked := testutil.CountTestBranches(testSharedConn, testSharedDB); leaked > 0 {
+			fmt.Fprintf(os.Stderr, "%d test branch(es) survived the run in %s\n", leaked, testSharedDB)
+		}
+	}
 
 	// Best-effort reap of any dolt sql-server left running under this
 	// suite's own temp root (e.g. a SIGKILLed run of the multiprocess

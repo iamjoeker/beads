@@ -80,6 +80,29 @@ To skip an optional service explicitly, use the existing skip mechanism:
 BEADS_TEST_SKIP=dolt ./scripts/test.sh ./...
 ```
 
+### The `internal/storage/dolt` Suite
+
+Because the runner and every CI job that walks `./...` skip Dolt, no routine
+gate runs this package end to end. When you need to, run it through its target
+rather than by hand:
+
+```bash
+make test-dolt
+```
+
+The target carries the two things a hand-written invocation keeps missing. It
+passes `-timeout 60m`, because the suite measured 3414s (56.9 min) on an
+unloaded box and `go test`'s 10m default therefore cannot reach the end of it —
+a run that dies at its ceiling reports a deadline panic naming no failing test,
+which reads as a slow suite rather than as a result you never got. And it
+clears the injected `BEADS_DOLT_*` variables, which otherwise point the suite
+at an agent's own server instead of the container `TestMain` starts.
+
+`TestMain` refuses to start a whole-package run below that ceiling, so a wrong
+invocation costs seconds instead of the ceiling. The refusal does not apply
+to `-run`, `-bench`, or `-list`: a single test in this package finishes in
+under two seconds, and that is the right way to work one of them.
+
 Tests that need a temporary repository or store should use `t.TempDir()` and
 `t.Cleanup()`. Temporary repositories must set a repository-local hooks path;
 do not inherit the developer's global hooks configuration.
