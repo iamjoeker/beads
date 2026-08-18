@@ -51,6 +51,67 @@ type SourceDatabaseInfo struct {
 	// NOT the env-var-aware GetDoltDatabase()). Empty if no source metadata exists
 	// or the source has no dolt_database configured.
 	SourceDatabase string
+	// SourceMode is dolt_mode from the source metadata.json (raw field). Empty
+	// if no source metadata exists or it declares no mode.
+	SourceMode string
+	// TargetMode is dolt_mode from the redirect target's metadata.json (raw
+	// field). Empty if the target has no metadata.json or declares no mode.
+	TargetMode string
+}
+
+// SourceIdentityContradictsTarget reports whether SourceDatabase is an
+// embedded-mode identity that the redirect target contradicts by declaring a
+// server mode of its own.
+//
+// The supported multi-database topology (see ResolveRedirect) is a server-mode
+// rig redirecting to a shared server-mode root, each side naming its own
+// dolt_database. An embedded-mode source is not part of that topology:
+// dolt_database in an embedded metadata.json names a directory under
+// .beads/embeddeddolt/, not a database on the shared server, so carrying it
+// across the redirect re-points the target at a server database that merely
+// shares the name — or at one that does not exist at all.
+//
+// That is not hypothetical: a stray embedded metadata.json written beside a
+// rig's redirect stub (bd-cqv) repointed the whole rig root away from its own
+// database for every other caller in the tree, and every read there answered
+// empty with exit 0.
+func (i SourceDatabaseInfo) SourceIdentityContradictsTarget() bool {
+	if !i.WasRedirected || i.SourceDatabase == "" {
+		return false
+	}
+	if !strings.EqualFold(strings.TrimSpace(i.SourceMode), configfile.DoltModeEmbedded) {
+		return false
+	}
+	switch strings.ToLower(strings.TrimSpace(i.TargetMode)) {
+	case configfile.DoltModeServer, configfile.DoltModeProxiedServer:
+		return true
+	default:
+		// A target that declares no mode of its own proves no contradiction;
+		// leave the historical preserve behavior alone.
+		return false
+	}
+}
+
+// readRawIdentity reads dolt_database and dolt_mode straight out of a .beads
+// directory's metadata.json.
+//
+// It deliberately does NOT go through configfile.Load: that path can trigger
+// Dolt connections and recursive FollowRedirect calls (deadlock), and the
+// env-var-aware accessors would answer for the current process rather than for
+// what the file on disk actually declares.
+func readRawIdentity(beadsDir string) (database, mode string) {
+	data, err := os.ReadFile(filepath.Join(beadsDir, "metadata.json"))
+	if err != nil {
+		return "", ""
+	}
+	var raw struct {
+		DoltDatabase string `json:"dolt_database"`
+		DoltMode     string `json:"dolt_mode"`
+	}
+	if json.Unmarshal(data, &raw) != nil {
+		return "", ""
+	}
+	return raw.DoltDatabase, raw.DoltMode
 }
 
 // ResolveRedirect follows a .beads/redirect file and captures the source directory's
@@ -62,31 +123,24 @@ type SourceDatabaseInfo struct {
 // so callers can use it as an override when the env var is not set.
 //
 // Returns SourceDatabaseInfo with WasRedirected=true if a redirect was followed,
-// and SourceDatabase set to the source's dolt_database (if any).
+// and SourceDatabase set to the source's dolt_database (if any). SourceMode and
+// TargetMode carry each side's declared dolt_mode so callers can tell the
+// supported server-to-server topology from a stray embedded identity sitting
+// beside a redirect — see SourceIdentityContradictsTarget.
 func ResolveRedirect(beadsDir string) SourceDatabaseInfo {
 	info := SourceDatabaseInfo{
 		SourceDir: beadsDir,
 		TargetDir: beadsDir,
 	}
 
-	// Read source metadata.json directly (NOT via configfile.Load which may trigger
-	// Dolt connections or recursive FollowRedirect calls causing deadlocks).
-	// We only need the raw dolt_database field.
-	metadataPath := filepath.Join(beadsDir, "metadata.json")
-	if data, err := os.ReadFile(metadataPath); err == nil {
-		var raw struct {
-			DoltDatabase string `json:"dolt_database"`
-		}
-		if json.Unmarshal(data, &raw) == nil {
-			info.SourceDatabase = raw.DoltDatabase
-		}
-	}
+	info.SourceDatabase, info.SourceMode = readRawIdentity(beadsDir)
 
 	// Follow redirect
 	resolved := FollowRedirect(beadsDir)
 	if resolved != beadsDir {
 		info.WasRedirected = true
 		info.TargetDir = resolved
+		_, info.TargetMode = readRawIdentity(resolved)
 	}
 
 	return info

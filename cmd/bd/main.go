@@ -505,6 +505,17 @@ func preserveRedirectSourceDatabase(beadsDir string) {
 
 	rInfo := beads.ResolveRedirect(beadsDir)
 	if rInfo.WasRedirected && rInfo.SourceDatabase != "" {
+		// An embedded-mode identity beside a redirect is not a database
+		// selector for the server-mode target it points at (bd-cqv). Applying
+		// it anyway repoints the target's whole tree at an empty or unrelated
+		// database, and every read there answers empty with exit 0.
+		if rInfo.SourceIdentityContradictsTarget() {
+			if os.Getenv("BD_DEBUG_ROUTING") != "" {
+				fmt.Fprintf(os.Stderr, "[routing] Ignored source dolt_database %q across redirect: source declares dolt_mode %q but target %s declares %q\n",
+					rInfo.SourceDatabase, rInfo.SourceMode, rInfo.TargetDir, rInfo.TargetMode)
+			}
+			return
+		}
 		_ = os.Setenv("BEADS_DOLT_SERVER_DATABASE", rInfo.SourceDatabase)
 		if os.Getenv("BD_DEBUG_ROUTING") != "" {
 			fmt.Fprintf(os.Stderr, "[routing] Preserved source dolt_database %q across redirect\n", rInfo.SourceDatabase)

@@ -159,9 +159,23 @@ bd create "Filed against the wrong thing" --repo gastown
 # repository, not a repository name)
 ```
 
-An existing directory with no beads workspace is still a valid target: `bd`
-initializes one in place. If the target's `.beads` is a redirect, the bead
-lands in the workspace the redirect points at.
+If the target's `.beads` is a redirect, the bead lands in the workspace the
+redirect points at.
+
+An existing directory with no beads workspace is a valid target in embedded
+mode: `bd` initializes one in place. In two cases it refuses instead, because
+the workspace it would create is one no later read consults:
+
+| When | Why `bd` refuses |
+|---|---|
+| The target's `.beads` holds a redirect `bd` could not resolve to a database | Initializing here writes an identity file *beside* the redirect, and that file overrides the redirect for every command run in that tree — not just this one. Repair the redirect target, or run `bd init` in the workspace it should point at. |
+| You are working in server mode | A new workspace initializes as embedded storage under `.beads/embeddeddolt/`, which the shared Dolt server never sees. Run `bd init` in the target repository first. |
+
+`bd doctor --check=artifacts` reports embedded databases already left beside a
+redirect, whether or not they hold beads — an empty one is unreachable for the
+same reason, and it is the one a check that looks for stranded beads would call
+clean. `bd doctor --fix` never removes them: an orphan can hold the only copy of
+a bead, so reading it is your call, not `bd`'s.
 
 ## Discovered work stays with its parent
 
