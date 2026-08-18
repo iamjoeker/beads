@@ -79,6 +79,11 @@ type envSnapshotValue struct {
 
 var changeDirEnvSnapshot map[string]envSnapshotValue
 
+// changeDirOriginalWD is the working directory captured before `-C` moved the
+// process, so restoreChangeDirSelection can put it back. Empty means -C did not
+// move anything (unused flag, or Getwd failed), and restore leaves cwd alone.
+var changeDirOriginalWD string
+
 var (
 	noColorFlag       bool
 	sandboxMode       bool
@@ -752,7 +757,7 @@ func init() {
 	}
 
 	// Register persistent flags
-	rootCmd.PersistentFlags().StringVarP(&changeDir, "directory", "C", "", "Change to this directory before running the command (like git -C)")
+	rootCmd.PersistentFlags().StringVarP(&changeDir, "directory", "C", "", "Run as if bd had been started in this directory: bd chdirs there and selects the beads project found from it (like git -C). Relative paths in other arguments resolve against it too")
 	rootCmd.PersistentFlags().StringVar(&dbPath, "db", "", "Database path (default: auto-discover .beads/*.db). In proxied-server mode, a value that isn't an existing path is treated as a database name override (see --database)")
 	rootCmd.PersistentFlags().StringVar(&databaseFlag, "database", "", "Run against a different server database for this invocation, without changing the project's configured database (proxied-server mode only)")
 	rootCmd.PersistentFlags().StringVar(&actor, "actor", "", "Actor name for audit trail (default: $BEADS_ACTOR, git user.name, $USER)")
@@ -790,35 +795,62 @@ func init() {
 	rootCmd.SetHelpFunc(colorizedHelpFunc)
 }
 
-func resolveChangeDirBeadsDir(path string) (string, error) {
+// resolveChangeDirTarget validates a -C argument and returns the absolute
+// directory to run from plus the .beads directory discovered from it. It is
+// deliberately side-effect free — nothing here moves the process. The move
+// itself belongs to applyChangeDirSelection, which owns the snapshot needed to
+// undo it.
+func resolveChangeDirTarget(path string) (target string, beadsDir string, err error) {
 	if strings.TrimSpace(path) == "" {
-		return "", nil
+		return "", "", nil
 	}
 	absPath, err := filepath.Abs(path)
 	if err != nil {
-		return "", fmt.Errorf("cannot resolve -C directory %q: %w", path, err)
+		return "", "", fmt.Errorf("cannot resolve -C directory %q: %w", path, err)
 	}
 	info, err := os.Stat(absPath)
 	if err != nil {
-		return "", fmt.Errorf("cannot use -C directory %q: %w", path, err)
+		return "", "", fmt.Errorf("cannot use -C directory %q: %w", path, err)
 	}
 	if !info.IsDir() {
-		return "", fmt.Errorf("cannot use -C directory %q: not a directory", path)
+		return "", "", fmt.Errorf("cannot use -C directory %q: not a directory", path)
 	}
-	beadsDir := beads.FindBeadsDirFrom(absPath)
+	beadsDir = beads.FindBeadsDirFrom(absPath)
 	if beadsDir == "" {
-		return "", fmt.Errorf("cannot use -C directory %q: no beads project found", path)
+		return "", "", fmt.Errorf("cannot use -C directory %q: no beads project found", path)
 	}
-	return beadsDir, nil
+	return absPath, beadsDir, nil
 }
 
+// applyChangeDirSelection implements `bd -C <dir>`: it moves the process into
+// <dir> and pins the store to the beads project discovered from there.
+//
+// The chdir is the point, not an implementation detail. `-C` used to set
+// BEADS_DIR only, which moved the *store* half of every cwd-sensitive decision
+// and left the other half reading the caller's directory. Role detection is the
+// expensive case: routing.DetectUserRole(".") (routing_read.go, create.go) reads
+// the process cwd, so `bd -C <other-project> create` could resolve a role from
+// one repository and a routing config from another, and no single-variable rule
+// about the flag was true (bd-det, gt-d37). Moving both halves together makes
+// -C mean one thing.
+//
+// BEADS_DIR is still set on top of the chdir: it pins the exact workspace even
+// when the target is a subdirectory or a worktree whose store lives elsewhere,
+// and child processes (hooks) inherit the same selection.
 func applyChangeDirSelection() error {
 	if strings.TrimSpace(changeDir) == "" {
 		return nil
 	}
-	beadsDir, err := resolveChangeDirBeadsDir(changeDir)
+	target, beadsDir, err := resolveChangeDirTarget(changeDir)
 	if err != nil {
 		return HandleError("%v", err)
+	}
+	origWD, wdErr := os.Getwd()
+	if err := os.Chdir(target); err != nil {
+		return HandleError("cannot use -C directory %q: %v", changeDir, err)
+	}
+	if wdErr == nil {
+		changeDirOriginalWD = origWD
 	}
 	changeDirEnvSnapshot = make(map[string]envSnapshotValue, 3)
 	for _, key := range []string{"BEADS_DIR", "BEADS_DB", "BD_DB"} {
@@ -826,12 +858,27 @@ func applyChangeDirSelection() error {
 		changeDirEnvSnapshot[key] = envSnapshotValue{value: value, ok: ok}
 	}
 	_ = os.Setenv("BEADS_DIR", beadsDir)
+	// Project config discovery walks up from the working directory, and it ran
+	// in init() — before this flag was parsed. Redo it now that both the cwd and
+	// BEADS_DIR name the target, or the command runs against the target's store
+	// with the caller project's config.yaml merged underneath it.
+	if err := config.Initialize(); err != nil {
+		fmt.Fprintf(os.Stderr, "Warning: failed to reload config for -C %s: %v\n", changeDir, err)
+	}
 	return nil
 }
 
+// restoreChangeDirSelection undoes applyChangeDirSelection. It runs from
+// PersistentPostRunE after waitForCommandHooks, so hook children still see the
+// workspace the command actually ran against; see the defer ordering comment
+// there. Idempotent, and a no-op when -C was not used.
 func restoreChangeDirSelection() {
-	if changeDirEnvSnapshot == nil {
+	if changeDirOriginalWD == "" && changeDirEnvSnapshot == nil {
 		return
+	}
+	if changeDirOriginalWD != "" {
+		_ = os.Chdir(changeDirOriginalWD)
+		changeDirOriginalWD = ""
 	}
 	for key, snapshot := range changeDirEnvSnapshot {
 		if snapshot.ok {
@@ -841,6 +888,12 @@ func restoreChangeDirSelection() {
 		}
 	}
 	changeDirEnvSnapshot = nil
+	// Undo the reload applyChangeDirSelection did, so a second in-process
+	// Execute (the cmd/bd test binary, library embedders) does not inherit the
+	// -C target's config after the cwd and BEADS_DIR have gone back.
+	if err := config.Initialize(); err != nil {
+		debug.Logf("warning: failed to reload config after -C restore: %v", err)
+	}
 }
 
 func guardLegacyNoStoreCommand(cmd *cobra.Command, beadsDir string) error {

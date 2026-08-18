@@ -9,6 +9,22 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Changed
 
+- **`bd -C <dir>` now actually changes directory, as its help has always
+  claimed** (bd-det). It used to resolve `<dir>` to a `.beads` project and set
+  `BEADS_DIR` — nothing more. That moved the *store* half of every
+  cwd-sensitive decision and left the other half reading the caller's
+  directory: `routing.DetectUserRole(".")` kept detecting the role of wherever
+  the shell was, so `bd -C <other-project>` could pair one repository's role
+  with another repository's routing config, and no single-variable rule about
+  the flag was true. bd now `chdir`s into the literal `-C` path (like `git -C`;
+  a subdirectory target stays in the subdirectory while the store is still the
+  project found by walking up from it), sets `BEADS_DIR` on top of that, and
+  redoes project-config discovery from there so the target's
+  `.beads/config.yaml` applies instead of the caller's. **Relative paths in
+  other arguments now resolve against the `-C` directory**, matching `git -C`:
+  `bd -C ../other export -o out.jsonl` writes into `../other`. Pass absolute
+  paths where that matters.
+
 - **`bd reclaim` summarizes the leases its replica guard declined instead of
   naming every one, every run** (wy-sp2l4). A lease granted by another replica
   is by construction never reclaimed here, so the audit was not a one-off: it
