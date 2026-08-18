@@ -43,7 +43,7 @@ export PATH := $(GIT_WINDOWS_ROOT)/usr/bin;$(PATH)
 endif
 endif
 
-.PHONY: all build doctor-build test test-icu-path test-full-cgo test-regression test-upgrade test-cross-version test-migration corpus-regen bench bench-quick clean clean-test-tmp install install-force help check-up-to-date fmt fmt-check check-testing-short
+.PHONY: all build doctor-build test test-icu-path test-full-cgo test-dolt test-regression test-upgrade test-cross-version test-migration corpus-regen bench bench-quick clean clean-test-tmp install install-force help check-up-to-date fmt fmt-check check-testing-short
 .PHONY: ci-pr-core ci-pr-policy ci-pr-lint ci-package-mcp ci-package-npm
 .PHONY: api-gen api-check
 
@@ -180,6 +180,31 @@ test-icu-path:
 test-full-cgo:
 	@echo "WARNING: make test-full-cgo is deprecated; use make test-icu-path for the explicit ICU-only path." >&2
 	@$(MAKE) test-icu-path
+
+# The whole internal/storage/dolt suite, which `make test` skips by default
+# (scripts/ci/lib/test-env.sh adds dolt to BEADS_TEST_SKIP) and which no CI job
+# runs end to end. This target exists so the two things that invocation needs
+# are copied rather than remembered:
+#
+#   1. -timeout. The suite is the slowest in the repo — 3414s (56.9 min) on an
+#      unloaded box — so go test's 10m default cannot reach the end of it, and
+#      a run that dies at its ceiling reports a deadline panic naming no
+#      failing test. Three runs at the default or at 40m each burned their
+#      whole ceiling and learned nothing. TestMain refuses to start below
+#      DOLT_SUITE_TIMEOUT; keep it in sync with requiredSuiteTimeout in
+#      internal/storage/dolt/suite_timeout_test.go (a test enforces this).
+#   2. env -u. A gt-managed shell injects BEADS_DOLT_* pointing at its own
+#      server, and the suite then fails instantly against an unreachable
+#      address instead of starting its own container.
+DOLT_SUITE_TIMEOUT ?= 60m
+test-dolt:
+	@echo "Running the full internal/storage/dolt suite (expect ~1 hour)..."
+	env -u BEADS_DOLT_AUTO_START -u BEADS_DOLT_PORT -u BEADS_DOLT_SERVER_PORT \
+		-u BEADS_DOLT_HOST -u BEADS_DOLT_SERVER_HOST -u BEADS_DOLT_DATABASE \
+		-u BEADS_DOLT_SERVER_MODE -u BEADS_DOLT_SERVER_DATABASE \
+		-u BEADS_DOLT_DATA_DIR -u BEADS_DOLT_SHARED_SERVER \
+		-u BEADS_DOLT_SERVER_SOCKET -u BEADS_SHARED_SERVER_DIR \
+		go test -tags "$(BUILD_TAGS)" -count=1 -timeout=$(DOLT_SUITE_TIMEOUT) ./internal/storage/dolt/
 
 ci-pr-core:
 	@./scripts/ci/pr-core.sh
@@ -407,6 +432,7 @@ help:
 	@echo "  make test         - Run all tests"
 	@echo "  make test-icu-path - Run opt-in ICU regex path tests (maintainer-only)"
 	@echo "  make test-full-cgo - Deprecated alias for make test-icu-path"
+	@echo "  make test-dolt    - Run the full internal/storage/dolt suite (~1 hour; make test skips it)"
 	@echo "  make ci-pr-core  - Run required PR core Go test wrapper"
 	@echo "  make ci-pr-policy - Run required PR policy wrapper"
 	@echo "  make ci-pr-lint  - Run required PR formatting and lint wrapper"
