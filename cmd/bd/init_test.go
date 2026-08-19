@@ -1214,9 +1214,17 @@ func TestInitRedirect(t *testing.T) {
 		initCmd.Flags().Set("force", "false")
 	}
 
+	// RedirectCreatesDBInTarget runs the real bd binary rather than driving
+	// rootCmd in-process, for the same reason
+	// TestBareParentWorktreeCoreCommandsWithoutRedirect does: the workspace
+	// init creates is only readable through a bd that resolves the workspace
+	// itself. Asserting on a store this process opens by path would instead
+	// assert on whichever Dolt mode the suite's own environment forces, which
+	// is not what this test is about.
 	t.Run("RedirectCreatesDBInTarget", func(t *testing.T) {
 		resetRedirectState(t)
 
+		bd := buildBDForInitTests(t)
 		tmpDir := t.TempDir()
 
 		projectDir := filepath.Join(tmpDir, "project")
@@ -1233,42 +1241,52 @@ func TestInitRedirect(t *testing.T) {
 		if err := os.MkdirAll(targetBeadsDir, 0755); err != nil {
 			t.Fatal(err)
 		}
+		// The target exists but is empty: bd init is what fills it. A redirect
+		// written ahead of init is the documented way to say "the database
+		// belongs over there", so init must honor it rather than treat the
+		// emptiness as a stale redirect (bd-uh0).
 
 		redirectPath := filepath.Join(localBeadsDir, beads.RedirectFileName)
 		if err := os.WriteFile(redirectPath, []byte("../canonical/.beads\n"), 0644); err != nil {
 			t.Fatal(err)
 		}
 
-		t.Chdir(projectDir)
-
-		rootCmd.SetArgs([]string{"init", "--prefix", "redirect-test", "--quiet"})
-		if err := rootCmd.Execute(); err != nil {
-			t.Fatalf("Init with redirect failed: %v", err)
+		sharedEnv := sharedServerTestEnv(t)
+		runBD := func(t *testing.T, what string, args ...string) string {
+			t.Helper()
+			cmd := exec.Command(bd, args...)
+			cmd.Dir = projectDir
+			cmd.Env = sharedEnv
+			out, err := cmd.CombinedOutput()
+			if err != nil {
+				t.Fatalf("bd %s from redirected workspace failed: %v\n%s", what, err, out)
+			}
+			return string(out)
 		}
 
-		targetDBPath := filepath.Join(targetBeadsDir, "dolt")
-		if _, err := os.Stat(targetDBPath); os.IsNotExist(err) {
-			t.Errorf("Dolt database was NOT created in redirect target: %s", targetDBPath)
+		initOut := runBD(t, "init", "init", "--prefix", "redirect-test", "--skip-hooks", "--quiet")
+
+		// The workspace init reports as initialized must be the redirect
+		// target, not the local .beads the redirect points away from.
+		if _, err := os.Stat(filepath.Join(targetBeadsDir, "metadata.json")); err != nil {
+			t.Errorf("workspace was NOT initialized in redirect target %s: %v", targetBeadsDir, err)
+		}
+		if _, err := os.Stat(filepath.Join(localBeadsDir, "metadata.json")); err == nil {
+			t.Errorf("workspace was incorrectly initialized in local .beads: %s (should be in redirect target)", localBeadsDir)
 		}
 
-		localDBPath := filepath.Join(localBeadsDir, "dolt")
-		if _, err := os.Stat(localDBPath); err == nil {
-			t.Errorf("Database was incorrectly created in local .beads: %s (should be in redirect target)", localDBPath)
+		// init makes the redirect valid, so it must not tell the user to
+		// delete it on the way there.
+		if strings.Contains(initOut, "fix or delete the redirect file") {
+			t.Errorf("bd init warned that its own redirect target is invalid:\n%s", initOut)
 		}
 
-		store, err := openExistingTestDB(t, targetDBPath)
-		if err != nil {
-			t.Fatalf("Failed to open database in redirect target: %v", err)
+		// And the workspace is usable through the redirect afterwards.
+		if out := runBD(t, "create", "create", "redirect probe issue", "--json"); !strings.Contains(out, "redirect-test-") {
+			t.Errorf("bd create did not mint an id with the configured prefix:\n%s", out)
 		}
-		defer store.Close()
-
-		ctx := context.Background()
-		prefix, err := store.GetConfig(ctx, "issue_prefix")
-		if err != nil {
-			t.Fatalf("Failed to get issue prefix from database: %v", err)
-		}
-		if prefix != "redirect-test" {
-			t.Errorf("Expected prefix 'redirect-test', got %q", prefix)
+		if out := runBD(t, "list", "list", "--json"); !strings.Contains(out, "redirect probe issue") {
+			t.Errorf("bd list did not read back the issue created through the redirect:\n%s", out)
 		}
 	})
 
@@ -2314,7 +2332,7 @@ func TestBareParentWorktreeCoreCommandsWithoutRedirect(t *testing.T) {
 	bd := buildBDForInitTests(t)
 	bareDir, worktreeDir := setupBareParentInitWorktree(t)
 	bareBeadsDir := filepath.Join(bareDir, ".beads")
-	sharedEnv := append(os.Environ(), "BEADS_DOLT_SHARED_SERVER=1")
+	sharedEnv := sharedServerTestEnv(t)
 
 	initCmd := exec.Command(bd, "init", "--prefix", "bare-core", "--skip-hooks", "--quiet")
 	initCmd.Dir = worktreeDir

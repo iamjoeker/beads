@@ -888,6 +888,83 @@ func TestFollowRedirect_IgnoresInvalidTarget(t *testing.T) {
 	}
 }
 
+// TestFollowRedirectForInit_FollowsEmptyTarget is the init-side counterpart to
+// TestFollowRedirect_IgnoresInvalidTarget: `bd init` is what CREATES the
+// database the #4692 guard looks for, so an existing-but-empty target must be
+// followed rather than ignored. Ignoring it sends init back to the local
+// .beads, which both puts the database in the directory the redirect said not
+// to use and leaves the target permanently empty -- i.e. permanently invalid
+// to every later reader.
+func TestFollowRedirectForInit_FollowsEmptyTarget(t *testing.T) {
+	t.Setenv("BEADS_DOLT_SERVER_MODE", "")
+	t.Setenv("BEADS_DOLT_SHARED_SERVER", "")
+
+	tmpDir := t.TempDir()
+	tmpDir, _ = filepath.EvalSymlinks(tmpDir)
+
+	sourceDir := filepath.Join(tmpDir, "project", ".beads")
+	if err := os.MkdirAll(sourceDir, 0755); err != nil {
+		t.Fatal(err)
+	}
+
+	targetDir := filepath.Join(tmpDir, "canonical", ".beads")
+	if err := os.MkdirAll(targetDir, 0755); err != nil {
+		t.Fatal(err)
+	}
+	// targetDir exists but is empty -- the pre-init state.
+
+	if err := os.WriteFile(filepath.Join(sourceDir, "redirect"), []byte(targetDir+"\n"), 0644); err != nil {
+		t.Fatal(err)
+	}
+
+	var result string
+	stderr := captureStderr(t, func() {
+		result = FollowRedirectForInit(sourceDir)
+	})
+
+	resultResolved, _ := filepath.EvalSymlinks(result)
+	targetResolved, _ := filepath.EvalSymlinks(targetDir)
+	if resultResolved != targetResolved {
+		t.Errorf("FollowRedirectForInit() = %q, want target dir %q", result, targetDir)
+	}
+	if strings.Contains(stderr, "no database or metadata.json") {
+		t.Errorf("init must not be warned off an empty target it is about to fill, got: %q", stderr)
+	}
+}
+
+// TestFollowRedirectForInit_StillRejectsMissingTarget confirms the init
+// variant relaxes only the empty-target guard: a redirect naming a directory
+// that does not exist at all is still ignored, since init has no basis for
+// creating an arbitrary path the user never made.
+func TestFollowRedirectForInit_StillRejectsMissingTarget(t *testing.T) {
+	t.Setenv("BEADS_DOLT_SERVER_MODE", "")
+	t.Setenv("BEADS_DOLT_SHARED_SERVER", "")
+
+	tmpDir := t.TempDir()
+	tmpDir, _ = filepath.EvalSymlinks(tmpDir)
+
+	sourceDir := filepath.Join(tmpDir, "project", ".beads")
+	if err := os.MkdirAll(sourceDir, 0755); err != nil {
+		t.Fatal(err)
+	}
+
+	missingTarget := filepath.Join(tmpDir, "nowhere", ".beads")
+	if err := os.WriteFile(filepath.Join(sourceDir, "redirect"), []byte(missingTarget+"\n"), 0644); err != nil {
+		t.Fatal(err)
+	}
+
+	var result string
+	_ = captureStderr(t, func() {
+		result = FollowRedirectForInit(sourceDir)
+	})
+
+	resultResolved, _ := filepath.EvalSymlinks(result)
+	sourceResolved, _ := filepath.EvalSymlinks(sourceDir)
+	if resultResolved != sourceResolved {
+		t.Errorf("FollowRedirectForInit() = %q, want source dir %q (missing target should be ignored)", result, sourceDir)
+	}
+}
+
 // TestFollowRedirect_FollowsWhenTargetHasDatabase documents that a redirect
 // to a target with a recognizable database (no metadata.json) is followed as
 // before -- the #4692 guard is about missing databases, not about source

@@ -15,6 +15,7 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"strconv"
 	"testing"
 	"time"
 
@@ -223,6 +224,42 @@ func dropTestDatabase(dbName string, port int) {
 	_, _ = db.ExecContext(ctx, fmt.Sprintf("DROP DATABASE IF EXISTS `%s`", dbName))
 	// Purge dropped databases from Dolt's trash directory to reclaim disk space
 	_, _ = db.ExecContext(ctx, "CALL dolt_purge_dropped_databases()")
+}
+
+// sharedServerTestEnv returns the process environment plus shared-server
+// settings for a subprocess `bd`, isolated to this test on two axes.
+//
+// Port: shared-server mode with no configured port always resolves to the
+// fixed DefaultSharedServerPort (3308) and `bd init` starts that server
+// itself, so a test relying on the default passes only while nothing else on
+// the box holds 3308. When something does -- another rig's Dolt server, a
+// second suite running in parallel -- init fails with "cannot start dolt
+// server on port 3308: port 3308 is in use", naming a process that has
+// nothing to do with the test (bd-uh0).
+//
+// Server directory: the shared server's state otherwise lives under HOME,
+// which every subprocess in this package shares (TestMain pins one temp HOME
+// for the whole run). Two shared-server tests in one process then inherit
+// each other's port file and the second one dies on "server configured at
+// port N is unreachable; auto-start started a new server on port M". The
+// directory is allocated under testTempRoot so the suite's orphan-server
+// sweep still reaps anything left listening.
+func sharedServerTestEnv(t *testing.T) []string {
+	t.Helper()
+	port, err := testutil.FindFreePort()
+	if err != nil {
+		t.Fatalf("find free port for shared server: %v", err)
+	}
+	serverDir, err := testTempDir("shared-server-*")
+	if err != nil {
+		t.Fatalf("create shared server dir: %v", err)
+	}
+	t.Cleanup(func() { _ = os.RemoveAll(serverDir) })
+	return append(os.Environ(),
+		"BEADS_DOLT_SHARED_SERVER=1",
+		"BEADS_SHARED_SERVER_DIR="+serverDir,
+		"BEADS_DOLT_SERVER_PORT="+strconv.Itoa(port),
+	)
 }
 
 // openExistingTestDB reopens an existing Dolt store for verification in tests.

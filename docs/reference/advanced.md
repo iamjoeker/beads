@@ -136,7 +136,10 @@ Limitations and guidance:
 
 - Redirect chains are not followed — only a single level works, so a redirect
   must point directly at the real `.beads` directory.
-- The target directory must exist and contain a valid database.
+- The target directory must exist and contain a valid database. A redirect to
+  an empty directory is ignored, with a warning, so a stale redirect can never
+  silently answer "no issues". The one exception is `bd init`, which fills an
+  empty target — write the redirect first and init creates the database there.
 - Give separate projects and long-lived forks their own databases instead of
   redirects.
 - Git worktrees don't need redirects — linked worktrees discover the

@@ -957,7 +957,12 @@ Non-interactive mode (--non-interactive or BD_NON_INTERACTIVE=1):
 			beadsDirForInit = beads.GetWorktreeFallbackBeadsDir()
 			if beadsDirForInit == "" {
 				localBeadsDir := filepath.Join(".", ".beads")
-				beadsDirForInit = beads.FollowRedirect(localBeadsDir)
+				// ForInit, not the plain FollowRedirect: init is what puts a
+				// database in the target, so an empty-but-existing target is
+				// the normal case here rather than a stale redirect
+				// (gastownhall/beads#4692's guard would send init back to the
+				// local .beads and strand the target empty).
+				beadsDirForInit = beads.FollowRedirectForInit(localBeadsDir)
 			}
 		}
 

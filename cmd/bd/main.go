@@ -1015,6 +1015,17 @@ var rootCmd = &cobra.Command{
 			return HandleError("%v", err)
 		}
 
+		// An empty redirect target is the normal pre-init state, so init must
+		// not warn "fix or delete the redirect file" about the very redirect
+		// it is about to honor. Set before loadSelectionEnvironment: the
+		// workspace walk it runs is the first thing to resolve a redirect.
+		// Compared by identity, not name: `bd backup dolt init` and
+		// `bd notion init` are also called "init" and have no business
+		// silencing a redirect warning.
+		if cmd == initCmd {
+			beads.SuppressInvalidRedirectTargetWarning()
+		}
+
 		loadSelectionEnvironment()
 
 		// Apply viper configuration if flags weren't explicitly set

@@ -17,6 +17,7 @@ import (
 	"sort"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	"github.com/steveyegge/beads/internal/configfile"
@@ -156,7 +157,36 @@ func ResolveRedirect(beadsDir string) SourceDatabaseInfo {
 //
 // Redirect chains are not followed - only one level of redirection is supported.
 // This prevents infinite loops and keeps the behavior predictable.
+//
+// A redirect whose target exists but holds no database and no metadata.json is
+// ignored (see the #4692 guard below). Use FollowRedirectForInit from the one
+// caller that is about to CREATE that database.
 func FollowRedirect(beadsDir string) string {
+	return followRedirect(beadsDir, true)
+}
+
+// FollowRedirectForInit resolves a redirect for `bd init`, which is the one
+// caller that legitimately points at a target that does not have a database
+// yet -- creating it there is the whole purpose of the redirect.
+//
+// FollowRedirect's #4692 guard (target must already contain a database or
+// metadata.json) exists to stop READERS from silently landing on an empty
+// directory and reporting "no issues" while the real data sits untouched
+// elsewhere. Applied to init that guard inverts the redirect's meaning: init
+// falls back to the local .beads and creates the database in exactly the
+// directory the redirect said not to use, leaving the canonical target empty
+// forever -- so the next reader is now correctly warned off a redirect that
+// will never become valid.
+//
+// Everything else FollowRedirect checks still applies here: the target must
+// exist and be a directory, chains are still not followed.
+func FollowRedirectForInit(beadsDir string) string {
+	return followRedirect(beadsDir, false)
+}
+
+// followRedirect implements FollowRedirect. requireProjectFiles controls the
+// #4692 empty-target guard; only init passes false.
+func followRedirect(beadsDir string, requireProjectFiles bool) string {
 	redirectFile := filepath.Join(beadsDir, RedirectFileName)
 	data, err := os.ReadFile(redirectFile)
 	if err != nil {
@@ -222,7 +252,11 @@ func FollowRedirect(beadsDir string) string {
 	// missing-database problem, and store_factory.go's
 	// newDoltStoreFromConfig already hard-errors loudly on an unloadable
 	// metadata.json rather than silently falling back to the embedded store.
-	if !hasBeadsProjectFiles(target) {
+	//
+	// `bd init` opts out via FollowRedirectForInit: it is creating the
+	// database the guard is looking for, so an empty target is the expected
+	// state there, not a staleness signal.
+	if requireProjectFiles && !hasBeadsProjectFiles(target) {
 		warnInvalidRedirectTargetOnce(beadsDir, target)
 		return beadsDir
 	}
@@ -247,9 +281,27 @@ func FollowRedirect(beadsDir string) string {
 // fallbacks), all for the same source directory.
 var invalidRedirectTargetWarned sync.Map
 
+// invalidRedirectTargetWarningSuppressed silences the invalid-redirect-target
+// warning for a process that is on its way to making the target valid.
+var invalidRedirectTargetWarningSuppressed atomic.Bool
+
+// SuppressInvalidRedirectTargetWarning silences the "target has no database or
+// metadata.json; fix or delete the redirect file" warning for the rest of this
+// process. `bd init` sets it: the redirect target is empty precisely because
+// init has not filled it yet, so the warning tells the user to delete the
+// redirect file that init is about to honor — advice that would move their
+// database to the wrong place if followed. Nothing about which directory a
+// resolution returns changes; only the warning is dropped.
+func SuppressInvalidRedirectTargetWarning() {
+	invalidRedirectTargetWarningSuppressed.Store(true)
+}
+
 // warnInvalidRedirectTargetOnce emits the invalid-redirect-target warning at
 // most once per source beadsDir per process.
 func warnInvalidRedirectTargetOnce(beadsDir, target string) {
+	if invalidRedirectTargetWarningSuppressed.Load() {
+		return
+	}
 	if _, alreadyWarned := invalidRedirectTargetWarned.LoadOrStore(beadsDir, struct{}{}); alreadyWarned {
 		return
 	}
