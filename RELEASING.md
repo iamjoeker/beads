@@ -396,6 +396,21 @@ against the *old* pin) until the next bump, at which point every command
 added across the skipped releases shows up at once as a pile of "missing
 from docs/CLI_REFERENCE.md" failures with no obvious release to blame.
 
+**The bump moves hand-written pages too.** Decision 1 of the pin ADR covers
+prose, not just the generated reference: a hand-written page states what the
+released binary does. Nothing checks that — `generate-cli-docs.sh` regenerates
+only the CLI reference — so a page describing behavior that changed on `main`
+becomes wrong the moment the pin catches up to it, silently. Before
+regenerating, work whatever is open in this list:
+
+| Page | Bump it past | Tracked by |
+|---|---|---|
+| `docs/reference/troubleshooting.md` — "Corrupt workspace metadata" | 6329f7bcf: a corrupt `.beads/metadata.json` stops falling back to an empty workspace and starts failing loud | bd-sdj |
+
+File a bead and add a row whenever a release changes behavior a hand-written
+page describes; drop the row once the pin has passed it and the page is
+updated.
+
 ## 6. npm Package Release
 
 The npm package wraps the native binary for Node.js environments.
@@ -532,7 +547,8 @@ cat docs/cli-docs.pin  # should be the tag just released, not an older one
 ```
 
 If it's stale, do the bump from the "Documentation Site (Mintlify)" step
-above before calling the release done.
+above before calling the release done — including the hand-written pages the
+table there lists, which no gate checks.
 
 ## Prerelease / Release Candidate (RC) Workflow
 
