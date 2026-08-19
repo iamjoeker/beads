@@ -3,6 +3,7 @@ package httpapi
 import (
 	"net/http"
 	"reflect"
+	"sort"
 	"strings"
 	"testing"
 	"time"
@@ -192,6 +193,72 @@ func TestSweepPublishesTheWholeResult(t *testing.T) {
 	if !ok || len(ids) != 2 || ids[0] != "bd-1" {
 		t.Errorf("referenced_ids = %v, want the role's sample", body["referenced_ids"])
 	}
+}
+
+// TestSweepResponseCarriesEveryRoleField is the guard sweepResponse's own
+// comment has been citing, and until now it did not exist: the projection is a
+// hand-written field list, so a field ADDED to issueops.SweepResult or
+// SweepSkips is dropped on the wire by doing nothing at all, and every
+// value-by-value case above keeps passing because each only asks about the
+// fields whose names it already knows. Skipped.LabelProtected was added to the
+// role and to the projection together (bd-czf); nothing would have failed had
+// it been added to only the first.
+//
+// IT COUNTS RATHER THAN NAMES, which is the point of it. A case that listed the
+// expected keys would be a second hand-maintained list beside the projection,
+// going stale in the same commit and for the same reason. Counting role fields
+// against wire members needs no Go-name-to-JSON-name mapping and fails on the
+// case that matters — a field the projection never learned about.
+//
+// Every counter is seeded NON-ZERO so a bucket dropped from the projection
+// cannot hide behind a zero value, and the sample is seeded so referenced_ids
+// is present; its documented ABSENCE is the next case's subject.
+func TestSweepResponseCarriesEveryRoleField(t *testing.T) {
+	var skips issueops.SweepSkips
+	value := reflect.ValueOf(&skips).Elem()
+	for i := 0; i < value.NumField(); i++ {
+		field := value.Field(i)
+		if field.Kind() != reflect.Int {
+			t.Fatalf("SweepSkips.%s is %s, not an int; this case seeds counters and needs updating for a new shape",
+				value.Type().Field(i).Name, field.Kind())
+		}
+		field.SetInt(int64(i + 1))
+	}
+	sweeper := &roleSweeper{result: issueops.SweepResult{
+		DryRun: true, Swept: 7, Dependencies: 3, Labels: 2, Events: 11,
+		Skipped:       skips,
+		ReferencedIDs: []string{"bd-1"},
+	}}
+	ts := newTestServer(t, rolesConfig(Config{Sweeper: sweeper}))
+
+	body := decodeBody(t, ts.sweep(t, `{"tier":"durable","pattern":"*","dry_run":true}`))
+
+	if want := reflect.TypeOf(issueops.SweepResult{}).NumField(); len(body) != want {
+		t.Errorf("response carries %d members for a role result of %d fields: %v",
+			len(body), want, sortedBodyKeys(body))
+	}
+	skipped, ok := body["skipped"].(map[string]any)
+	if !ok {
+		t.Fatalf("skipped = %v, want an object", body["skipped"])
+	}
+	if want := value.NumField(); len(skipped) != want {
+		t.Errorf("skipped carries %d members for a role bucket set of %d fields: %v",
+			len(skipped), want, sortedBodyKeys(skipped))
+	}
+	for key, got := range skipped {
+		if got == float64(0) {
+			t.Errorf("skipped.%s = 0 for a non-zero role counter", key)
+		}
+	}
+}
+
+func sortedBodyKeys(m map[string]any) []string {
+	keys := make([]string, 0, len(m))
+	for key := range m {
+		keys = append(keys, key)
+	}
+	sort.Strings(keys)
+	return keys
 }
 
 // TestSweepOmitsAnEmptyReferencedSample: the member is documented ABSENT when
