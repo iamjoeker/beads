@@ -129,9 +129,14 @@ func ensureCleanGlobalState(t *testing.T) {
 // savedGlobals holds a snapshot of package-level globals for safe restoration.
 // Used by saveAndRestoreGlobals to ensure test isolation.
 type savedGlobals struct {
-	dbPath                string
-	store                 storage.DoltStorage
-	storeActive           bool
+	dbPath      string
+	store       storage.DoltStorage
+	storeActive bool
+	// jsonOutput is here because leaving it true is silent and cross-test:
+	// nothing fails in the test that set it, and the next test in the same
+	// process that asserts on human-readable stderr gets JSON instead
+	// (bd-vm6). It costs nothing to restore, so the helper always does.
+	jsonOutput            bool
 	exportOutput          string
 	exportAll             bool
 	exportIncludeInfra    bool
@@ -161,6 +166,7 @@ func saveAndRestoreGlobals(t *testing.T) *savedGlobals {
 		dbPath:                dbPath,
 		store:                 store,
 		storeActive:           storeActive,
+		jsonOutput:            jsonOutput,
 		exportOutput:          exportOutput,
 		exportAll:             exportAll,
 		exportIncludeInfra:    exportIncludeInfra,
@@ -174,6 +180,7 @@ func saveAndRestoreGlobals(t *testing.T) *savedGlobals {
 		storeMutex.Lock()
 		storeActive = saved.storeActive
 		storeMutex.Unlock()
+		jsonOutput = saved.jsonOutput
 		exportOutput = saved.exportOutput
 		exportAll = saved.exportAll
 		exportIncludeInfra = saved.exportIncludeInfra
