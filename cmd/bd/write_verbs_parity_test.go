@@ -1584,11 +1584,17 @@ func TestParityCloseNoIDAndNoLastTouchedExits1(t *testing.T) {
 	}
 }
 
-// TestParityClosePartialFailureExitsZero pins the close exit contract's
-// permissive half (cmd/bd/close.go:377-380): as long as ONE id settled as
-// closed, a batch with refused ids still exits 0. The refusal is reported on
-// stderr only.
-func TestParityClosePartialFailureExitsZero(t *testing.T) {
+// TestParityClosePartialFailureExitsNonZero pins the partial half of the close
+// exit contract (reportCloseFailures in cmd/bd/close.go): a batch that closes
+// some ids and refuses others exits 1, and stderr carries both the inline
+// refusal and the summary naming which ids did not close. The closes that DID
+// happen are not rolled back — closes are per-ID, not atomic across the batch.
+//
+// This test formerly pinned the opposite, under the name ...ExitsZero. bd-gq7
+// reversed the contract on purpose: exit 0 on a partial batch made every caller
+// that checks exit status (the refinery, the wisp reaper) read "all closed"
+// while siblings were still open.
+func TestParityClosePartialFailureExitsNonZero(t *testing.T) {
 	env := newParityEnv(t)
 	env.seed("test-cls4", "Closable", nil)
 	env.seed("test-cls5", "Owned by another actor", func(i *types.Issue) {
@@ -1598,11 +1604,12 @@ func TestParityClosePartialFailureExitsZero(t *testing.T) {
 	env.setFlags(closeCmd, nil)
 	res := env.run(closeCmd, "test-cls4", "test-cls5")
 
-	if res.exitCode != 0 {
-		t.Fatalf("exit = %d, want 0 (partial failure is still success today)\nstderr:\n%s", res.exitCode, res.stderr)
+	if res.exitCode != 1 {
+		t.Fatalf("exit = %d, want 1 (a partial batch is a failure)\nstderr:\n%s", res.exitCode, res.stderr)
 	}
-	wantErr := fmt.Sprintf("cannot close %s: assignee is %q, actor is %q; reclaim or use --force to override\n",
+	refusal := fmt.Sprintf("cannot close %s: assignee is %q, actor is %q; reclaim or use --force to override",
 		"test-cls5", "someone-else", actor)
+	wantErr := fmt.Sprintf("%s\nError: 1 of 2 issues failed to close\n  test-cls5: %s\n", refusal, refusal)
 	if res.stderr != wantErr {
 		t.Errorf("stderr = %q, want %q", res.stderr, wantErr)
 	}
