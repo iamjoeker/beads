@@ -452,8 +452,8 @@ func resolveViaPrefixRoutingWithAccess(ctx context.Context, id string, writable 
 		}
 	}
 
-	// Check that the target declares a dolt_database
-	targetDB := readDoltDatabase(targetBeadsDir)
+	// Check that the target declares a dolt_database, then open it.
+	targetStore, targetDB, openErr := openStoreAtBeadsDir(ctx, targetBeadsDir, writable)
 	if targetDB == "" {
 		return nil, &prefixRouteFailure{
 			Prefix:     prefix,
@@ -466,23 +466,6 @@ func resolveViaPrefixRoutingWithAccess(ctx context.Context, id string, writable 
 
 	debug.Logf("[routing] Prefix %q matched route to %s (database: %s)\n", prefix, matchedRoute.Path, targetDB)
 
-	// We need to temporarily override BEADS_DOLT_SERVER_DATABASE so server-mode
-	// stores connect to the correct database on the shared Dolt server.
-	origDB := os.Getenv("BEADS_DOLT_SERVER_DATABASE")
-	_ = os.Setenv("BEADS_DOLT_SERVER_DATABASE", targetDB)
-	var targetStore storage.DoltStorage
-	var openErr error
-	if writable {
-		targetStore, openErr = newDoltStoreFromConfig(ctx, targetBeadsDir)
-	} else {
-		targetStore, openErr = newReadOnlyStoreFromConfig(ctx, targetBeadsDir)
-	}
-	// Restore the original env var
-	if origDB != "" {
-		_ = os.Setenv("BEADS_DOLT_SERVER_DATABASE", origDB)
-	} else {
-		_ = os.Unsetenv("BEADS_DOLT_SERVER_DATABASE")
-	}
 	if openErr != nil {
 		return nil, &prefixRouteFailure{
 			Prefix:     prefix,
@@ -667,6 +650,60 @@ func readDoltDatabase(beadsDir string) string {
 		return ""
 	}
 	return meta.DoltDatabase
+}
+
+// openStoreAtBeadsDir opens the store that beadsDir declares, and reports which
+// Dolt database that was. A "" database with a non-nil error means beadsDir
+// declares no database at all — nothing was opened and nothing was searched,
+// which is a different answer from "the store was opened and held nothing".
+//
+// The declared database has to be published through BEADS_DOLT_SERVER_DATABASE
+// for the duration of the open: in server mode a store connects to whichever
+// database that variable names, so opening a second store without setting it
+// hands back a handle on the FIRST store's database. That failure is silent —
+// it answers, and it answers about the wrong data — which is exactly the class
+// of wrong-store zero this command tree keeps producing (bd-nc4). The previous
+// value is restored before returning.
+//
+// writable opens the target for mutation; false keeps the read-only open that
+// guarantees reading a foreign project cannot modify it (GH#3231).
+func openStoreAtBeadsDir(ctx context.Context, beadsDir string, writable bool) (storage.DoltStorage, string, error) {
+	database := readDoltDatabase(beadsDir)
+	if database == "" {
+		return nil, "", fmt.Errorf("%s has no dolt_database configured", beadsDir)
+	}
+
+	restore := overrideServerDatabase(database)
+	defer restore()
+
+	var s storage.DoltStorage
+	var err error
+	if writable {
+		s, err = newDoltStoreFromConfig(ctx, beadsDir)
+	} else {
+		s, err = newReadOnlyStoreFromConfig(ctx, beadsDir)
+	}
+	if err != nil {
+		return nil, database, err
+	}
+	return s, database, nil
+}
+
+// overrideServerDatabase points server-mode opens at database and returns the
+// function that puts the environment back the way it was found — including
+// unsetting the variable when it was previously unset, so a restore never
+// invents a value the process did not start with.
+func overrideServerDatabase(database string) func() {
+	const key = "BEADS_DOLT_SERVER_DATABASE"
+	original, had := os.LookupEnv(key)
+	_ = os.Setenv(key, database)
+	return func() {
+		if had {
+			_ = os.Setenv(key, original)
+			return
+		}
+		_ = os.Unsetenv(key)
+	}
 }
 
 // getIssueWithRouting gets an issue by exact ID.
