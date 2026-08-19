@@ -34,7 +34,7 @@ Example:
   bd mol burn bd-abc123              # Delete molecule with no trace
   bd mol burn bd-abc123 --dry-run    # Preview what would be deleted
   bd mol burn bd-abc123 --force      # Skip confirmation
-  bd mol burn bd-a1 bd-b2 bd-c3      # Batch delete multiple wisps`,
+  bd mol burn bd-wisp-a1 bd-wisp-b2  # Batch delete multiple wisps`,
 	Args:          cobra.MinimumNArgs(1),
 	SilenceUsage:  true,
 	SilenceErrors: true,
