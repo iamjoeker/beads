@@ -962,11 +962,11 @@ func EnsureRunningDetailed(beadsDir string) (port int, startedByUs bool, err err
 				"  bd dolt status   # detailed external-server check",
 				host, cfg.Port, host, cfg.Port, host, cfg.Port)
 		}
-		return 0, false, fmt.Errorf("Dolt server is not running on port %d, and auto-start is suppressed "+
-			"because the server is externally managed (dolt.auto-start: false or explicit port configured).\n\n"+
-			"Start the external server, or enable auto-start to allow bd to manage the server.\n"+
-			"  To start manually: bd dolt start\n"+
-			"  To check status: bd dolt status", cfg.Port)
+		// A missing PID file is not evidence the port is idle: an externally
+		// managed server never writes one. Probe before saying anything about
+		// the server, and never advise enabling auto-start here — on a host
+		// where a supervisor owns the server, that starts a second one (bd-8ef).
+		return 0, false, errors.New(ExplainLocalServerNotStarted(cfg.Port, ReasonExternalMode))
 	}
 
 	// Defense-in-depth: if dolt.auto-start is explicitly disabled in
@@ -975,18 +975,9 @@ func EnsureRunningDetailed(beadsDir string) (port int, startedByUs bool, err err
 	if IsAutoStartDisabled() {
 		cfg := DefaultConfig(beadsDir)
 		if host, ok := externalNonLocalhostHost(beadsDir); ok {
-			return 0, false, fmt.Errorf("Configured Dolt server at %s:%d is unreachable, and auto-start "+
-				"is disabled (dolt.auto-start: false in config.yaml or BEADS_DOLT_AUTO_START=0).\n\n"+
-				"This is an external server; bd will not start it. Verify it is running:\n"+
-				"  nc -zv %s %d  # or curl %s:%d for an HTTP-style check\n"+
-				"  bd dolt status   # detailed external-server check",
-				host, cfg.Port, host, cfg.Port, host, cfg.Port)
+			return 0, false, errors.New(ExplainRemoteServerNotStarted(host, cfg.Port))
 		}
-		return 0, false, fmt.Errorf("Dolt server unreachable (port %d) and auto-start is disabled "+
-			"(dolt.auto-start: false in config.yaml or BEADS_DOLT_AUTO_START=0).\n\n"+
-			"Start the server manually or enable auto-start.\n"+
-			"  To start manually: bd dolt start\n"+
-			"  To check status: bd dolt status", cfg.Port)
+		return 0, false, errors.New(ExplainLocalServerNotStarted(cfg.Port, ReasonAutoStartOff))
 	}
 
 	s, err := Start(serverDir)
