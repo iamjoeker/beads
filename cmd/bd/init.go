@@ -608,7 +608,7 @@ Non-interactive mode (--non-interactive or BD_NON_INTERACTIVE=1):
 
 		if initProxiedServer {
 			if beadsDir := resolveInitBeadsDir(); beadsDir != "" {
-				if err := guardLegacyUpgradeWorkspace(beadsDir); err != nil {
+				if err := guardLegacyUpgradeRepairPath(beadsDir); err != nil {
 					return err
 				}
 			}
@@ -747,9 +747,11 @@ Non-interactive mode (--non-interactive or BD_NON_INTERACTIVE=1):
 
 		// Historical workspaces need an explicit sealed-copy bridge. This runs
 		// before init's existing-workspace checks so even --force cannot create
-		// or rewrite state beside a source that has not been preserved.
+		// or rewrite state beside a source that has not been preserved. Metadata
+		// that cannot be parsed names no such source, and bd init is the
+		// documented repair for it, so that case warns and continues.
 		if beadsDir := resolveInitBeadsDir(); beadsDir != "" {
-			if err := guardLegacyUpgradeWorkspace(beadsDir); err != nil {
+			if err := guardLegacyUpgradeRepairPath(beadsDir); err != nil {
 				return err
 			}
 		}
@@ -1032,7 +1034,11 @@ Non-interactive mode (--non-interactive or BD_NON_INTERACTIVE=1):
 		if fi, statErr := os.Stat(initDBPathAbs); statErr == nil && !fi.IsDir() {
 			initDBPathAbs = filepath.Dir(initDBPathAbs)
 		}
-		initGateHandle, gateErr := acquireExclusiveWorkspaceGates(rootCtx, beadsDirAbs, "bd init", initDBPathAbs)
+		// Repair variant: reaching this point with unreadable metadata implies
+		// reinitialization was explicitly requested, because checkExistingBeadsData
+		// above refuses a plain `bd init` on exactly that input. Gate what is
+		// knowable rather than locking init out of the file it is here to rewrite.
+		initGateHandle, gateErr := acquireExclusiveWorkspaceGatesForRepair(rootCtx, beadsDirAbs, "bd init", initDBPathAbs)
 		if gateErr != nil {
 			return fmt.Errorf("bd init refuses to run over live bd activity on this workspace: %w", gateErr)
 		}

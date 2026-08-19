@@ -272,21 +272,63 @@ func acquireExclusiveWorkspaceGates(ctx context.Context, beadsDir, reason string
 		// exclusivity on the workspace gate already excludes every gated
 		// opener. Out-of-.beads extraRoots are still gated when their
 		// parent exists.
-		wsGate, werr := workspacegate.ForWorkspace(beadsDir)
+		var werr error
+		gates, werr = metadataFreeGateSet(beadsDir, extraRoots...)
 		if werr != nil {
 			return nil, werr
 		}
-		gates = []workspacegate.Gate{wsGate}
-		for _, root := range extraRoots {
-			if _, serr := os.Stat(filepath.Dir(root)); serr != nil {
-				continue
-			}
-			g, gerr := workspacegate.ForPhysicalRoot(root)
-			if gerr != nil {
-				return nil, gerr
-			}
-			gates = append(gates, g)
+	}
+	return workspacegate.AcquireAll(ctx, workspacegate.Exclusive,
+		exclusiveGateOptions(reason), gates...)
+}
+
+// metadataFreeGateSet builds the gates that can be derived without reading
+// workspace metadata: the workspace gate, whose file lives BESIDE .beads, plus
+// each caller-supplied root whose parent directory exists.
+func metadataFreeGateSet(beadsDir string, extraRoots ...string) ([]workspacegate.Gate, error) {
+	wsGate, err := workspacegate.ForWorkspace(beadsDir)
+	if err != nil {
+		return nil, err
+	}
+	gates := []workspacegate.Gate{wsGate}
+	for _, root := range extraRoots {
+		if _, serr := os.Stat(filepath.Dir(root)); serr != nil {
+			continue
 		}
+		g, gerr := workspacegate.ForPhysicalRoot(root)
+		if gerr != nil {
+			return nil, gerr
+		}
+		gates = append(gates, g)
+	}
+	return gates, nil
+}
+
+// acquireExclusiveWorkspaceGatesForRepair is acquireExclusiveWorkspaceGates for
+// the one caller that is explicitly authorized to REWRITE this workspace's
+// metadata. Gate planning refuses to guess when metadata.json cannot be parsed,
+// which is right for every command that goes on to open a store — but the roots
+// it would have derived are exactly what the repair is about to replace, and
+// refusing there leaves a truncated metadata.json with no in-tool recovery at
+// all: the reinitialize path that the fail-closed checks name as the escape
+// hatch cannot itself run. Fall back to the gates that do not depend on that
+// file (the workspace gate plus the caller's own target root), which still
+// excludes every gated opener of this workspace. Contention, an unbuildable
+// gate file, and every other resolution failure stay hard errors.
+func acquireExclusiveWorkspaceGatesForRepair(ctx context.Context, beadsDir, reason string, extraRoots ...string) (*workspacegate.MultiHandle, error) {
+	handle, err := acquireExclusiveWorkspaceGates(ctx, beadsDir, reason, extraRoots...)
+	if err == nil || !errors.Is(err, doltserver.ErrUnresolvableWorkspaceMetadata) {
+		return handle, err
+	}
+	if ctx == nil {
+		ctx = context.Background()
+	}
+	if !quietFlag {
+		fmt.Fprintf(os.Stderr, "warning: %v; gating this workspace and the target database root only\n", err)
+	}
+	gates, gerr := metadataFreeGateSet(beadsDir, extraRoots...)
+	if gerr != nil {
+		return nil, gerr
 	}
 	return workspacegate.AcquireAll(ctx, workspacegate.Exclusive,
 		exclusiveGateOptions(reason), gates...)
