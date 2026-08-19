@@ -400,3 +400,94 @@ func TestCheckClassicArtifacts_WithArtifacts(t *testing.T) {
 		t.Errorf("expected name 'Classic Artifacts', got %q", check.Name)
 	}
 }
+
+// TestScanForArtifacts_OrphanEmbeddedStoresBesideRedirect covers the sweep half
+// of bd-cqv. A create that failed to follow a redirect materialized an embedded
+// database inside the redirect stub's own .beads; nothing reads it, and the
+// issue written into it was stranded there with exit 0 reported to the caller.
+//
+// The sweep must enumerate by directory presence: the reported incident left
+// TWO stores side by side and the second one had zero issues in it, so a
+// content-based probe would have called that directory clean.
+func TestScanForArtifacts_OrphanEmbeddedStoresBesideRedirect(t *testing.T) {
+	dir := t.TempDir()
+	beadsDir := filepath.Join(dir, ".beads")
+	targetDir := filepath.Join(dir, "target-beads")
+
+	if err := os.MkdirAll(targetDir, 0755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(targetDir, "metadata.json"), []byte(`{"database":"beads.db"}`), 0644); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.MkdirAll(beadsDir, 0755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(beadsDir, "redirect"), []byte(targetDir), 0644); err != nil {
+		t.Fatal(err)
+	}
+
+	// "hq" is the store that received the stranded write; "beads" is the empty
+	// sibling that a content-based check cannot see.
+	if err := os.MkdirAll(filepath.Join(beadsDir, "embeddeddolt", "hq", ".dolt"), 0755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.MkdirAll(filepath.Join(beadsDir, "embeddeddolt", "beads"), 0755); err != nil {
+		t.Fatal(err)
+	}
+	// A loose file in embeddeddolt/ is not a store and must not be reported.
+	if err := os.WriteFile(filepath.Join(beadsDir, "embeddeddolt", "README"), []byte("x"), 0644); err != nil {
+		t.Fatal(err)
+	}
+
+	report, err := ScanForArtifacts(dir)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	found := map[string]ArtifactFinding{}
+	for _, f := range report.RedirectIssues {
+		if f.Type == "orphan-embedded" {
+			found[filepath.Base(f.Path)] = f
+		}
+	}
+	if len(found) != 2 {
+		t.Fatalf("expected both embedded stores reported, got %d: %+v", len(found), report.RedirectIssues)
+	}
+	for _, name := range []string{"hq", "beads"} {
+		f, ok := found[name]
+		if !ok {
+			t.Errorf("embedded store %q beside the redirect was not reported", name)
+			continue
+		}
+		if f.SafeDelete {
+			t.Errorf("%q: SafeDelete must stay false — an orphan store can hold the only copy of a stranded issue", name)
+		}
+	}
+}
+
+// TestScanForArtifacts_EmbeddedStoreWithoutRedirectIsNotAnOrphan guards the
+// other side: .beads/embeddeddolt/ is where a normal embedded workspace keeps
+// its database. It is only unreachable when a redirect answers for the
+// directory instead.
+func TestScanForArtifacts_EmbeddedStoreWithoutRedirectIsNotAnOrphan(t *testing.T) {
+	dir := t.TempDir()
+	beadsDir := filepath.Join(dir, ".beads")
+
+	if err := os.MkdirAll(filepath.Join(beadsDir, "embeddeddolt", "beads", ".dolt"), 0755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(beadsDir, "metadata.json"), []byte(`{"database":"beads.db"}`), 0644); err != nil {
+		t.Fatal(err)
+	}
+
+	report, err := ScanForArtifacts(dir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, f := range report.RedirectIssues {
+		if f.Type == "orphan-embedded" {
+			t.Errorf("a live embedded workspace must not be reported as an orphan: %+v", f)
+		}
+	}
+}

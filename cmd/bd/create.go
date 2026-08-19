@@ -1000,6 +1000,20 @@ func resolveRepoTargetBeadsDir(repoPath string) (string, error) {
 // the source store (T010, T012: prefix inheritance). Callers pass the
 // redirect-resolved .beads directory (see resolveRepoTargetBeadsDir), not the
 // repository root.
+//
+// Auto-initialization is deliberately narrow (bd-cqv). Two shapes reach here
+// with no metadata.json and must NOT be materialized as a fresh embedded
+// database, because in both the created store is one no later read consults:
+//
+//  1. beadsDir still holds a redirect file. resolveRepoTargetBeadsDir already
+//     followed every redirect it could, so a redirect surviving to this point
+//     is one FollowRedirect refused (missing target, target with no database,
+//     or a chain) and fell back from. Initializing here writes an identity
+//     file next to that redirect — and an identity file beside a redirect wins
+//     over it for every other caller in that tree, not just for this create.
+//  2. This invocation is server-backed. A new embedded store under
+//     .beads/embeddeddolt/ is invisible to the shared Dolt server that every
+//     other agent in the target reads from.
 func ensureBeadsDirForPath(ctx context.Context, beadsDir string, sourceStore storage.DoltStorage) error {
 	metadataPath := filepath.Join(beadsDir, "metadata.json")
 
@@ -1007,6 +1021,14 @@ func ensureBeadsDirForPath(ctx context.Context, beadsDir string, sourceStore sto
 	// metadata.json is the canonical marker for an initialized beads dir.
 	if _, err := os.Stat(metadataPath); err == nil {
 		return nil
+	}
+
+	if _, err := os.Stat(filepath.Join(beadsDir, beads.RedirectFileName)); err == nil {
+		return fmt.Errorf("--repo target has a redirect at %s that bd could not resolve to a database; initializing one here instead would write an identity file beside the redirect, which overrides it for every command run in that tree — repair the redirect target, or run 'bd init' in the workspace it should point at", beadsDir)
+	}
+
+	if !isEmbeddedMode() {
+		return fmt.Errorf("--repo target has no beads workspace at %s, and this one is server-backed; the embedded database bd would create there is invisible to the shared server every other client reads from — run 'bd init' in the target repository first", beadsDir)
 	}
 
 	// Create .beads directory

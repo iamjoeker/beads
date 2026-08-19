@@ -232,9 +232,21 @@ func cleanSQLiteArtifacts(beadsDir string) (removed, skipped, errCount int) {
 	return
 }
 
+// doltStoreDirNames are the directories a Dolt database lives in under .beads:
+// embeddeddolt/ in embedded mode, dolt/ in server mode.
+var doltStoreDirNames = map[string]bool{"embeddeddolt": true, "dolt": true}
+
 // cleanCruftBeadsDirFiles removes everything from a .beads directory except
-// the redirect file, .gitkeep, and (when a redirect file is present)
-// metadata.json.
+// the redirect file, .gitkeep, (when a redirect file is present) metadata.json,
+// and any Dolt store directory.
+//
+// A Dolt store in a redirect-only location IS an artifact — nothing resolves to
+// it (see scanOrphanEmbeddedStores in the doctor package) — but it is not one
+// this function may delete. An orphan store can hold the only copy of a bead
+// that a mis-routed create stranded there, and the shape that produces these
+// stores reports success to the operator, so nobody knows to look first
+// (bd-cqv). The scan reports them with SafeDelete=false; deleting them here
+// anyway would contradict that and destroy the evidence unread.
 func cleanCruftBeadsDirFiles(beadsDir string) (removed, errCount int) {
 	entries, err := os.ReadDir(beadsDir)
 	if err != nil {
@@ -263,6 +275,11 @@ func cleanCruftBeadsDirFiles(beadsDir string) (removed, errCount int) {
 			continue
 		}
 		if name == "metadata.json" && hasRedirect {
+			continue
+		}
+		if entry.IsDir() && doltStoreDirNames[name] {
+			fmt.Printf("  Skipped: %s (Dolt store in a redirect-only dir; inspect it for stranded issues before removing)\n",
+				filepath.Join(beadsDir, name))
 			continue
 		}
 

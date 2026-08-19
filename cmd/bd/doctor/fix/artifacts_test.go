@@ -281,3 +281,50 @@ func TestIsRedirectExpectedLocation(t *testing.T) {
 		})
 	}
 }
+
+// TestClassicArtifacts_PreservesOrphanDoltStoreAlongsideRedirect covers bd-cqv:
+// an embedded database left in a redirect-only .beads is unreachable, but it can
+// hold the only copy of a bead that a mis-routed create stranded there — and
+// that create reported success, so nobody knows to look. `bd doctor --fix` must
+// report it, not delete it unread. Ordinary cruft in the same directory is
+// still cleaned.
+func TestClassicArtifacts_PreservesOrphanDoltStoreAlongsideRedirect(t *testing.T) {
+	dir := t.TempDir()
+	beadsDir := filepath.Join(dir, "polecats", "test", ".beads")
+	if err := os.MkdirAll(beadsDir, 0755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(beadsDir, "redirect"), []byte("../../mayor/rig/.beads"), 0644); err != nil {
+		t.Fatal(err)
+	}
+
+	// The store that received the stranded write, and the empty sibling that a
+	// content-based check would call clean.
+	strandedRow := filepath.Join(beadsDir, "embeddeddolt", "hq", ".dolt", "noms", "manifest")
+	if err := os.MkdirAll(filepath.Dir(strandedRow), 0755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(strandedRow, []byte("chunk"), 0644); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.MkdirAll(filepath.Join(beadsDir, "dolt"), 0755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(beadsDir, "extra.txt"), []byte("cruft"), 0644); err != nil {
+		t.Fatal(err)
+	}
+
+	if err := ClassicArtifacts(dir); err != nil {
+		t.Fatalf("expected no error, got: %v", err)
+	}
+
+	if _, err := os.Stat(strandedRow); err != nil {
+		t.Errorf("the orphan embedded store must survive --fix intact: %v", err)
+	}
+	if _, err := os.Stat(filepath.Join(beadsDir, "dolt")); err != nil {
+		t.Errorf("a server-mode store directory must survive --fix too: %v", err)
+	}
+	if _, err := os.Stat(filepath.Join(beadsDir, "extra.txt")); !os.IsNotExist(err) {
+		t.Error("ordinary cruft should still be removed")
+	}
+}

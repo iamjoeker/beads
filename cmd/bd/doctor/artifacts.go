@@ -10,7 +10,7 @@ import (
 // ArtifactFinding represents a single detected artifact that may need cleanup.
 type ArtifactFinding struct {
 	Path        string // Absolute path to the artifact
-	Type        string // "jsonl", "sqlite", "cruft-beads", "redirect"
+	Type        string // "jsonl", "sqlite", "cruft-beads", "redirect", "orphan-embedded"
 	Description string // Human-readable description
 	SafeDelete  bool   // Whether this is safe to delete without data loss
 }
@@ -187,6 +187,43 @@ func scanBeadsDir(beadsDir string, report *ArtifactReport) {
 	// 3. Validate redirect files
 	if hasRedirect {
 		validateRedirect(beadsDir, report)
+		scanOrphanEmbeddedStores(beadsDir, report)
+	}
+}
+
+// scanOrphanEmbeddedStores reports embedded Dolt stores that sit beside a
+// redirect file. The redirect is the answer for this directory, so a store
+// under .beads/embeddeddolt/ here is one nothing reads: whatever was written
+// into it is stranded, and it exists at all only because some path
+// materialized a database where it should have followed the redirect (bd-cqv).
+//
+// The sweep enumerates by DIRECTORY PRESENCE, not by content, on purpose. An
+// orphan that received no writes has zero issues in it, and a content-based
+// probe — the natural thing to write for this bug — reports exactly that store
+// as clean. The reported incident left two of these side by side and only the
+// non-empty one was visible.
+//
+// SafeDelete stays false for every finding: these directories can hold the
+// only copy of a stranded issue, and removing a Dolt store is never something
+// to do without reading it first.
+func scanOrphanEmbeddedStores(beadsDir string, report *ArtifactReport) {
+	embeddedDir := filepath.Join(beadsDir, "embeddeddolt")
+	entries, err := os.ReadDir(embeddedDir)
+	if err != nil {
+		return
+	}
+
+	for _, entry := range entries {
+		if !entry.IsDir() {
+			continue
+		}
+		report.RedirectIssues = append(report.RedirectIssues, ArtifactFinding{
+			Path: filepath.Join(embeddedDir, entry.Name()),
+			Type: "orphan-embedded",
+			Description: fmt.Sprintf("embedded database %q sits beside a redirect, so no read resolves to it; "+
+				"inspect it for stranded issues before removing", entry.Name()),
+			SafeDelete: false,
+		})
 	}
 }
 
