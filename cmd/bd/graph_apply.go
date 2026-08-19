@@ -722,6 +722,15 @@ func validateGraphApplyExplicitIDPrefixes(plan *GraphApplyPlan, dbPrefix, allowe
 // project (GH#2469) — except under --global, where the shared database's own
 // stored prefix wins (GH#4957).
 func loadEmbeddedIDPrefixes() (dbPrefix, allowedPrefixes string) {
+	return loadEmbeddedIDPrefixesWithOverlay(overlayYAMLPrefix(""))
+}
+
+// loadEmbeddedIDPrefixesWithOverlay is loadEmbeddedIDPrefixes for a caller
+// that has already resolved WHICH workspace's overlay applies to the store
+// this validation is about. `bd create --repo` swaps the global store to
+// another project's before validating, and the local overlay does not describe
+// that one (createTargetPrefixOverlay).
+func loadEmbeddedIDPrefixesWithOverlay(yamlPrefix string) (dbPrefix, allowedPrefixes string) {
 	var storePrefix string
 	if store != nil {
 		storePrefix, _ = store.GetConfig(rootCtx, "issue_prefix")         // Best effort: empty prefix is a valid fallback
@@ -729,7 +738,7 @@ func loadEmbeddedIDPrefixes() (dbPrefix, allowedPrefixes string) {
 	}
 	// Under --global the shared database's stored prefix wins over the
 	// project YAML overlay (GH#4957); selectCreateIDPrefix owns that rule.
-	dbPrefix = selectCreateIDPrefix(globalFlag, overlayYAMLPrefix(""), storePrefix)
+	dbPrefix = selectCreateIDPrefix(globalFlag, yamlPrefix, storePrefix)
 	return dbPrefix, allowedPrefixes
 }
 

@@ -396,6 +396,11 @@ var createCmd = &cobra.Command{
 
 		var targetStore storage.DoltStorage
 		var remoteCache *remotecache.Cache
+		// The .beads workspace a --repo create is routed to, once resolved.
+		// Stays empty for an unrouted create and for a remote --repo URL,
+		// whose config.yaml is not a local file to read (see
+		// createTargetPrefixOverlay).
+		var routedBeadsDir string
 		if !dryRun && repoPath != "." {
 			if remotecache.IsRemoteURL(repoPath) {
 				var err error
@@ -416,6 +421,7 @@ var createCmd = &cobra.Command{
 					return HandleError("%v", err)
 				}
 				debug.Logf("DEBUG: Routing to target repo: %s\n", targetBeadsDirPath)
+				routedBeadsDir = targetBeadsDirPath
 
 				if err := ensureBeadsDirForPath(rootCtx, targetBeadsDirPath, store); err != nil {
 					return HandleError("failed to initialize target repo: %v", err)
@@ -491,6 +497,11 @@ var createCmd = &cobra.Command{
 			return HandleError("%v", err)
 		}
 
+		// The workspace overlay that describes the database this create
+		// actually writes to: the local one normally, the TARGET's when --repo
+		// routed the write elsewhere (createTargetPrefixOverlay).
+		prefixOverlay := createTargetPrefixOverlay(repoPath, routedBeadsDir)
+
 		createCtx := rootCtx
 		if parentID != "" {
 			childID, err := store.GetNextChildID(rootCtx, parentID)
@@ -509,8 +520,9 @@ var createCmd = &cobra.Command{
 
 			// Validate prefix matches database prefix (YAML config takes
 			// precedence over DB, except under --global — see
-			// loadEmbeddedIDPrefixes).
-			dbPrefix, allowedPrefixes := loadEmbeddedIDPrefixes()
+			// loadEmbeddedIDPrefixes). `store` is already the --repo target
+			// here, so the overlay handed in has to be the target's too.
+			dbPrefix, allowedPrefixes := loadEmbeddedIDPrefixesWithOverlay(prefixOverlay)
 
 			if err := validation.ValidateIDPrefixAllowed(explicitID, dbPrefix, allowedPrefixes, forceCreate); err != nil {
 				return HandleError("%v", err)
@@ -589,7 +601,7 @@ var createCmd = &cobra.Command{
 			Dependencies:  createDependencyRequests(depSpecs),
 			WaitsFor:      waitsForRequest(waitsForSpec),
 			ForceIDPrefix: forceCreate,
-			IDPrefix:      createIDPrefixOverride(),
+			IDPrefix:      createIDPrefixOverrideFrom(prefixOverlay),
 		})
 		if err != nil {
 			// RULING R1: an occupied --id is a refusal, not a silent full-row
@@ -795,10 +807,44 @@ func mergeCreateLabels(labels, inheritedLabels []string) []string {
 // as CreateRequest.IDPrefix. Empty means "the substrate's prefix is right",
 // which is the ordinary case.
 func createIDPrefixOverride() string {
+	return createIDPrefixOverrideFrom(overlayYAMLPrefix(""))
+}
+
+// createIDPrefixOverrideFrom is createIDPrefixOverride for a caller that has
+// already resolved which workspace's overlay applies — see
+// createTargetPrefixOverlay, which is not always the workspace bd runs in.
+func createIDPrefixOverrideFrom(yamlPrefix string) string {
 	if globalFlag {
 		return ""
 	}
-	return overlayYAMLPrefix("")
+	return yamlPrefix
+}
+
+// createTargetPrefixOverlay resolves the config.yaml `issue-prefix` overlay
+// that describes the database a create writes to.
+//
+// The overlay above exists because the workspace bd runs in can know its
+// shared server's database better than that database knows itself (GH#4957).
+// That standing covers the local workspace and nothing else. A create routed
+// by --repo writes to another project's store, where the local config.yaml has
+// no authority at all — reading it there splits the store from the naming
+// exactly the way bd-5ut reported: an id carrying the target's own prefix is
+// refused as a mismatch against a prefix belonging to the workspace the
+// command was typed in, and under --force the same split writes a bead into
+// the target under a prefix that store never mints.
+//
+// So a routed create reads the TARGET's overlay, by the same rule and for the
+// same reason. beadsDir is empty for a remote --repo URL, whose config.yaml is
+// not a local file to read; that falls back to "" — the target substrate's own
+// prefix is authoritative, which is the ordinary answer anyway.
+func createTargetPrefixOverlay(repoPath, beadsDir string) string {
+	if repoPath == "." {
+		return overlayYAMLPrefix("")
+	}
+	if beadsDir == "" {
+		return ""
+	}
+	return strings.TrimSpace(config.GetStringFromDir(beadsDir, "issue-prefix"))
 }
 
 func selectCreateIDPrefix(global bool, yamlPrefix, storePrefix string) string {

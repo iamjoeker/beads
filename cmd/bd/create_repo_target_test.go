@@ -116,6 +116,68 @@ func TestResolveRepoTargetBeadsDir(t *testing.T) {
 	})
 }
 
+// TestCreateTargetPrefixOverlay covers which workspace's config.yaml decides
+// what an explicit --id must look like (bd-5ut). A routed create writes to
+// another project's store, so reading the LOCAL overlay there judges the id by
+// one workspace's prefix while writing to another's database — the same
+// store-vs-naming split that reported an hq-prefixed id from a create aimed at
+// a gastown store.
+func TestCreateTargetPrefixOverlay(t *testing.T) {
+	t.Parallel()
+
+	writeOverlay := func(t *testing.T, prefix string) string {
+		t.Helper()
+		beadsDir := filepath.Join(t.TempDir(), ".beads")
+		if err := os.MkdirAll(beadsDir, 0o750); err != nil {
+			t.Fatal(err)
+		}
+		if err := os.WriteFile(filepath.Join(beadsDir, "config.yaml"),
+			[]byte("issue-prefix: \""+prefix+"\"\n"), 0o600); err != nil {
+			t.Fatal(err)
+		}
+		return beadsDir
+	}
+
+	t.Run("unrouted_create_reads_the_local_overlay", func(t *testing.T) {
+		t.Parallel()
+		// Compared against overlayYAMLPrefix rather than a literal: the point
+		// is that an unrouted create is left exactly as it was, whatever the
+		// ambient config says.
+		if got, want := createTargetPrefixOverlay(".", ""), overlayYAMLPrefix(""); got != want {
+			t.Errorf("unrouted overlay = %q, want the local overlay %q", got, want)
+		}
+	})
+
+	t.Run("routed_create_reads_the_target_overlay", func(t *testing.T) {
+		t.Parallel()
+		beadsDir := writeOverlay(t, "gt")
+		if got := createTargetPrefixOverlay("../gastown", beadsDir); got != "gt" {
+			t.Errorf("routed overlay = %q, want the target's own %q", got, "gt")
+		}
+	})
+
+	t.Run("routed_create_with_no_target_overlay_defers_to_the_target_store", func(t *testing.T) {
+		t.Parallel()
+		// Empty is not "fall back to the local prefix" — it is "the target
+		// substrate's own prefix is authoritative", which selectCreateIDPrefix
+		// then reads off the store the create was routed to.
+		beadsDir := filepath.Join(t.TempDir(), ".beads")
+		if err := os.MkdirAll(beadsDir, 0o750); err != nil {
+			t.Fatal(err)
+		}
+		if got := createTargetPrefixOverlay("../gastown", beadsDir); got != "" {
+			t.Errorf("routed overlay = %q, want empty for a target with no overlay", got)
+		}
+	})
+
+	t.Run("remote_repo_url_has_no_local_overlay_to_read", func(t *testing.T) {
+		t.Parallel()
+		if got := createTargetPrefixOverlay("https://github.com/example/repo.git", ""); got != "" {
+			t.Errorf("remote overlay = %q, want empty", got)
+		}
+	})
+}
+
 // TestEnsureBeadsDirForPathRefusesToStrandAWrite covers the two shapes from
 // bd-cqv that reach ensureBeadsDirForPath with no metadata.json and must not be
 // answered by materializing a fresh embedded database. Both end the same way if
