@@ -390,6 +390,46 @@ func TestApplyConfigDefaults_EnvOverridesConfig(t *testing.T) {
 	}
 }
 
+// TestApplyConfigDefaults_ServerPortEnvShadowsLegacyPort pins the resolver
+// precedence that produced bd-799. BEADS_DOLT_SERVER_PORT is consulted before
+// the legacy BEADS_DOLT_PORT, and an env port overwrites whatever the caller
+// put in cfg.ServerPort. A test harness that starts a Dolt container and
+// publishes its port under the legacy var alone therefore never reaches bd:
+// the ambient BEADS_DOLT_SERVER_PORT (agent shells export the production 3307)
+// wins, the test-mode guard rewrites it to the unreachable sentinel port 1,
+// and the tests fail with a connection error that names neither the container
+// nor the environment. See testutil.publishDoltPortEnv, which now writes both.
+func TestApplyConfigDefaults_ServerPortEnvShadowsLegacyPort(t *testing.T) {
+	const containerPort = 54321
+
+	t.Run("legacy var alone loses to an ambient production port", func(t *testing.T) {
+		t.Setenv("BEADS_TEST_MODE", "1")
+		t.Setenv("BEADS_DOLT_SERVER_PORT", fmt.Sprintf("%d", DefaultSQLPort)) // ambient
+		t.Setenv("BEADS_DOLT_PORT", fmt.Sprintf("%d", containerPort))         // partial publish
+
+		// The caller passed the container port explicitly; env still wins.
+		cfg := &Config{ServerPort: containerPort}
+		applyConfigDefaults(cfg)
+
+		if cfg.ServerPort != 1 {
+			t.Errorf("expected sentinel port 1 (ambient production port shadows the legacy var), got %d", cfg.ServerPort)
+		}
+	})
+
+	t.Run("publishing both vars reaches the container", func(t *testing.T) {
+		t.Setenv("BEADS_TEST_MODE", "1")
+		t.Setenv("BEADS_DOLT_SERVER_PORT", fmt.Sprintf("%d", containerPort))
+		t.Setenv("BEADS_DOLT_PORT", fmt.Sprintf("%d", containerPort))
+
+		cfg := &Config{}
+		applyConfigDefaults(cfg)
+
+		if cfg.ServerPort != containerPort {
+			t.Errorf("expected container port %d, got %d", containerPort, cfg.ServerPort)
+		}
+	})
+}
+
 // TestApplyConfigDefaults_ProductionFallback verifies that without
 // BEADS_TEST_MODE and no env port, ServerPort stays 0 (ephemeral).
 // Auto-start (EnsureRunning) will allocate the port at connection time.
