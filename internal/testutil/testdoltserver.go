@@ -177,7 +177,40 @@ func terminateSharedContainer() {
 			_ = testcontainers.TerminateContainer(doltSingletonSrv.container)
 			doltSingletonSrv.container = nil
 		}
+		// The container is gone; retract its port from the environment so
+		// nothing dials a dead endpoint. Paired with publishDoltPortEnv.
+		clearDoltPortEnv()
 	})
+}
+
+// doltPortEnvVars are every environment variable bd consults for the Dolt
+// server port, in resolution order. Publishing a test container's port under
+// only some of them does not point bd at the container: the resolver takes the
+// first one that is set, so a var left at its ambient value shadows the one the
+// test wrote. Agent shells export BEADS_DOLT_SERVER_PORT=3307 (the production
+// server), and the BEADS_TEST_MODE guard rewrites that production port to the
+// unreachable sentinel port 1 — so a partial publish surfaces as every
+// store-backed test in the package failing with "Dolt server unreachable at
+// 127.0.0.1:1" rather than as anything naming the environment (bd-799).
+var doltPortEnvVars = []string{"BEADS_DOLT_SERVER_PORT", "BEADS_DOLT_PORT"}
+
+// publishDoltPortEnv points every port env var bd reads at the test container,
+// overwriting any ambient value.
+func publishDoltPortEnv(port string) error {
+	for _, key := range doltPortEnvVars {
+		if err := os.Setenv(key, port); err != nil {
+			return fmt.Errorf("set %s: %w", key, err)
+		}
+	}
+	return nil
+}
+
+// clearDoltPortEnv removes the port vars published by publishDoltPortEnv, so a
+// terminated container's port is not left behind for later code to dial.
+func clearDoltPortEnv() {
+	for _, key := range doltPortEnvVars {
+		_ = os.Unsetenv(key)
+	}
 }
 
 // StartIsolatedDoltContainer starts a per-test Dolt container and returns the
@@ -209,25 +242,26 @@ func StartIsolatedDoltContainer(t *testing.T) string {
 	}
 
 	portStr := port.Port()
-	t.Setenv("BEADS_DOLT_PORT", portStr)
+	for _, key := range doltPortEnvVars {
+		t.Setenv(key, portStr)
+	}
 	return portStr
 }
 
-// ensureSharedContainer starts the singleton container and sets BEADS_DOLT_PORT.
+// ensureSharedContainer starts the singleton container and publishes its port
+// to the Dolt port env vars.
 func ensureSharedContainer() {
 	doltServerOnce.Do(func() {
 		doltServerErr = startDoltContainer()
 		if doltServerErr == nil && doltTestPort != "" {
-			if err := os.Setenv("BEADS_DOLT_PORT", doltTestPort); err != nil {
-				doltServerErr = fmt.Errorf("set BEADS_DOLT_PORT: %w", err)
-			}
+			doltServerErr = publishDoltPortEnv(doltTestPort)
 		}
 	})
 }
 
 // EnsureDoltContainerForTestMain starts a shared Dolt container for use in
 // TestMain functions. Call TerminateDoltContainer() after m.Run() to clean up.
-// Sets BEADS_DOLT_PORT process-wide.
+// Sets the Dolt port env vars (see doltPortEnvVars) process-wide.
 func EnsureDoltContainerForTestMain() error {
 	if state := checkDolt(); state != doltReady {
 		return fmt.Errorf("%s", state)
