@@ -18,6 +18,17 @@ import (
 // (e.g., starting a shared test Dolt server). Returns a cleanup function.
 var beforeTestsHook func() func()
 
+// beforeTestsFailure is set by beforeTestsHook when setup did not produce the
+// environment the run was told to require. testMainInner turns it into a
+// non-zero exit instead of running a suite where every affected test
+// self-skips and the run still reports success (bd-9jl).
+var beforeTestsFailure string
+
+// requireDoltEnvVar is the opt-in that makes a missing Dolt test server fatal
+// rather than a package-wide skip. Declared here, outside the cgo build tag,
+// so the pure-Go guard test can name the same string the cgo hook reads.
+const requireDoltEnvVar = "BEADS_CMD_BD_REQUIRE_DOLT"
+
 // testTempRoot is the parent directory for per-process test temp dirs.
 // It is set by testMainInner and used by the package-level sync.Once
 // helpers (build binaries, isolated HOMEs) that previously called
@@ -195,6 +206,10 @@ func testMainInner(m *testing.M) int {
 	if beforeTestsHook != nil {
 		cleanup := beforeTestsHook()
 		defer cleanup()
+	}
+	if beforeTestsFailure != "" {
+		fmt.Fprintf(os.Stderr, "FATAL: %s\n", beforeTestsFailure)
+		return 1
 	}
 
 	if os.Getenv("BEADS_TEST_GUARD_DISABLE") != "" {
