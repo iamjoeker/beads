@@ -2207,7 +2207,23 @@ func validateWorkspaceIdentity(ctx context.Context, beadsDir string) error {
 		fmt.Fprintf(os.Stderr, "  • BEADS_DIR points to a different project's .beads/\n")
 		fmt.Fprintf(os.Stderr, "  • Dolt server endpoint changed and now serves a different database\n")
 		fmt.Fprintf(os.Stderr, "  • metadata.json was copied from another project\n\n")
-		fmt.Fprintf(os.Stderr, "Recovery: run 'bd doctor --fix' or 'bd bootstrap' to reconcile workspace metadata with the authoritative database when shared-server metadata drifted.\n")
+		// The recovery has to name a repair that works HERE. 'bd doctor --fix'
+		// and 'bd bootstrap' are server-mode repairs: in embedded mode doctor
+		// refuses (its embedded gate) and bootstrap finds a database that
+		// already exists, and BOTH exit 0 having done nothing. A silent no-op
+		// reads as "repaired", so the operator retries it, believes the
+		// workspace is fixed, and is left with the override as the only thing
+		// that changes anything (bd-92m). --reinit-local is not the answer
+		// either: the local data-safety guard refuses it on a workspace that
+		// still holds issues.
+		if isEmbeddedMode() {
+			fmt.Fprintf(os.Stderr, "Recovery: the database is the authoritative side here. Reconcile the file to it by setting\n")
+			fmt.Fprintf(os.Stderr, "          \"project_id\": \"%s\" in .beads/metadata.json.\n", dbProjectID)
+			fmt.Fprintf(os.Stderr, "          ('bd doctor --fix' and 'bd bootstrap' are server-mode repairs; in embedded mode they\n")
+			fmt.Fprintf(os.Stderr, "          exit 0 without changing anything.)\n")
+		} else {
+			fmt.Fprintf(os.Stderr, "Recovery: run 'bd doctor --fix' or 'bd bootstrap' to reconcile workspace metadata with the authoritative database when shared-server metadata drifted.\n")
+		}
 		fmt.Fprintf(os.Stderr, "To diagnose: bd context --json\n")
 		fmt.Fprintf(os.Stderr, "To override: set BEADS_SKIP_IDENTITY_CHECK=1\n")
 		return SilentExit()
