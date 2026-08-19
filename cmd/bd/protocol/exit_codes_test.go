@@ -41,11 +41,18 @@ func TestProtocol_UpdateNonexistentExitsNonZero(t *testing.T) {
 	}
 }
 
-// TestProtocol_ClosePartialFailureExitsZero verifies that when closing
+// TestProtocol_ClosePartialFailureExitsNonZero verifies that when closing
 // multiple issues where some succeed and some fail (e.g., blocked), the
-// command exits zero (partial success counts as success) and still closes
-// the closeable ones.
-func TestProtocol_ClosePartialFailureExitsZero(t *testing.T) {
+// command exits 1 — a partial batch is a failure, not a success — while still
+// closing (and committing) the closeable ones.
+//
+// This test used to pin the opposite contract, under the name
+// ...ExitsZero: partial success exited 0 (GH#2014, Feb 2026). bd-gq7 reversed
+// it deliberately, because every caller that checks exit status — the refinery
+// retiring merged MRs, the wisp reaper — read a 0 as "the whole batch closed"
+// while siblings were still open. The closes themselves are per-ID and are NOT
+// rolled back, so the assertions below still pin that half.
+func TestProtocol_ClosePartialFailureExitsNonZero(t *testing.T) {
 	t.Parallel()
 	w := newWorkspace(t)
 
@@ -55,8 +62,14 @@ func TestProtocol_ClosePartialFailureExitsZero(t *testing.T) {
 	w.run("dep", "add", blocked, blocker, "--type=blocks")
 
 	// Close both: closeable should succeed, blocked should fail.
-	// Partial success (closedCount > 0) exits 0.
-	w.run("close", closeable, blocked)
+	// A partial batch (some closed, some refused) exits 1.
+	out0, code := w.runExpectError("close", closeable, blocked)
+	if code != 1 {
+		t.Errorf("expected exit code 1, got %d", code)
+	}
+	if !strings.Contains(out0, "1 of 2 issues failed to close") {
+		t.Errorf("expected the per-ID failure summary naming the refused ID, got:\n%s", out0)
+	}
 
 	// Verify the closeable one was actually closed despite partial failure
 	out := w.run("show", closeable, "--json")
