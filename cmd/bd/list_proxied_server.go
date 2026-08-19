@@ -84,6 +84,7 @@ func runListProxiedPage(ctx context.Context, out io.Writer, in listInput) error 
 		if err != nil {
 			return err
 		}
+		noticeEmptyLabelledProxiedList(ctx, in, len(page.Items))
 		return emitProxiedListJSONResult(page.Items, in, page.HasMore)
 	}
 
@@ -97,7 +98,41 @@ func runListProxiedPage(ctx context.Context, out io.Writer, in listInput) error 
 		return err
 	}
 	issues, hasMore := listPageIssues(page)
+	noticeEmptyLabelledProxiedList(ctx, in, len(issues))
 	return renderProxiedListText(ctx, out, issues, in, hasMore)
+}
+
+// noticeEmptyLabelledProxiedList is the proxied twin of the direct route's
+// wisp-table notice: a labeled listing that came back empty gets the same
+// disclosure here, because the route a command took is not something the reader
+// of a false zero knows or should have to know (bd-nc4).
+//
+// Only the LABEL predicates are carried over. This probe asks one question —
+// "do wisps carry these labels?" — and inheriting the status scope would
+// reproduce the closed-wisp filter that manufactures the zero.
+func noticeEmptyLabelledProxiedList(ctx context.Context, in listInput, resultCount int) {
+	if resultCount > 0 || isQuiet() {
+		return
+	}
+	predicates := listLabelPredicates{
+		Labels:    in.Labels,
+		LabelsAny: in.LabelsAny,
+		Pattern:   in.LabelPattern,
+		Regex:     in.LabelRegex,
+	}
+	if _, ok := predicates.terms(); !ok {
+		return
+	}
+	uw, err := openProxiedListUOW(ctx)
+	if err != nil {
+		// The probe could not run; the structural half of the notice is still
+		// true and printEmptyLabelledListNotice says only that much when it has
+		// no store to ask.
+		printEmptyLabelledListNotice(ctx, nil, predicates, resultCount, "")
+		return
+	}
+	defer uw.Close(ctx)
+	printEmptyLabelledListNotice(ctx, uowMolReader{uw: uw}, predicates, resultCount, "")
 }
 
 func runListProxiedWatch(_ *cobra.Command, ctx context.Context, in listInput) error {

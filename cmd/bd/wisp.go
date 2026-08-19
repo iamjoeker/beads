@@ -85,7 +85,25 @@ type WispListItem struct {
 	Labels    []string  `json:"labels,omitempty"`
 	CreatedAt time.Time `json:"created_at"`
 	UpdatedAt time.Time `json:"updated_at"`
-	Old       bool      `json:"old,omitempty"` // Not updated in 24+ hours
+	Old       bool      `json:"old,omitempty"`   // Not updated in 24+ hours
+	Store     string    `json:"store,omitempty"` // database the row came from; set when more than one was queried
+}
+
+// WispListStore records one store the listing actually queried, so the counts
+// on screen can be attributed to a named database instead of standing for
+// "everywhere". A store that could not be opened appears here WITH its error
+// rather than being dropped: a store that never answered must never be
+// summarized as a store that answered nothing (bd-nc4).
+type WispListStore struct {
+	Database  string `json:"database,omitempty"`
+	BeadsDir  string `json:"beads_dir,omitempty"`
+	Rig       string `json:"rig,omitempty"`
+	Current   bool   `json:"current,omitempty"`
+	Shown     int    `json:"shown"`               // rows this store contributed after the status scope
+	Total     int    `json:"total"`               // wisps it holds matching the type filter, closed included
+	Closed    int    `json:"closed"`              // of Total, how many are closed
+	Truncated bool   `json:"truncated,omitempty"` // the per-store query hit its row cap
+	Error     string `json:"error,omitempty"`     // the store did not answer
 }
 
 // WispListResult is the JSON output for wisp list
@@ -93,6 +111,15 @@ type WispListResult struct {
 	Wisps    []WispListItem `json:"wisps"`
 	Count    int            `json:"count"`
 	OldCount int            `json:"old_count,omitempty"`
+
+	// The scope of the listing, always emitted, because the two filters that
+	// produce a false zero here are both invisible in the rows themselves: the
+	// store the query went to, and the closed wisps the default hides.
+	IncludedClosed bool            `json:"included_closed"`
+	HiddenClosed   int             `json:"hidden_closed,omitempty"`
+	AllStores      bool            `json:"all_stores,omitempty"`
+	RoutesFile     string          `json:"routes_file,omitempty"`
+	Stores         []WispListStore `json:"stores,omitempty"`
 }
 
 // OldThreshold is how old a wisp must be to be flagged as old (time-based, for ephemeral cleanup)
@@ -389,37 +416,58 @@ func resolvePartialIDDirect(ctx context.Context, partial string) (string, error)
 
 var wispListCmd = &cobra.Command{
 	Use:   "list",
-	Short: "List all wisps in current context",
-	Long: `List all wisps (ephemeral molecules) in the current context.
+	Short: "List OPEN wisps in ONE store (the current one unless --rig/--all-stores)",
+	Long: `List wisps (ephemeral molecules).
 
-Wisps are issues with Ephemeral=true in the main database. They are stored
-locally but not synced via git.
+SCOPE — the default listing is narrower than "all wisps", in two ways that the
+rows themselves cannot show, so both are named in the output:
+
+  ONE STORE. Wisps live in a per-database wisps table and nothing federates
+  them. This reads the store the current directory resolves to; wisps in any
+  other rig are not missing, they are elsewhere. --rig picks a different store,
+  --all-stores queries every store routes.jsonl knows about.
+
+  OPEN ONLY. Closed wisps are hidden unless --all is passed. Every MERGED
+  merge-request wisp is closed by definition, so a default listing is the wrong
+  instrument for asking whether one exists.
+
+Wisps are issues with Ephemeral=true. They are stored locally, never synced via
+git, and never returned by 'bd list' — that command queries the issues table,
+which is a different table.
 
 The list shows:
   - ID: Issue ID of the wisp
-  - Title: Wisp title
-  - Status: Current status (open, in_progress, closed)
-  - Started: When the wisp was created
-  - Updated: Last modification time
+  - Status: the wisp's own status field (open, in_progress, closed) — this is a
+    per-row VALUE, not the scope of the listing; see --all above
+  - Priority, type and title
+  - Updated: last modification time
 
 Old wisp detection:
   - Old wisps haven't been updated in 24+ hours
   - Use 'bd mol wisp gc' to clean up old/abandoned wisps
 
 Examples:
-  bd mol wisp list              # List all wisps
-  bd mol wisp list --json       # JSON output for programmatic use
-  bd mol wisp list --all        # Include closed wisps`,
+  bd mol wisp list                    # Open wisps in the current store
+  bd mol wisp list --all              # ...including closed ones
+  bd mol wisp list --all --all-stores # Every wisp in the town (audit)
+  bd mol wisp list --rig gastown      # A named store instead of the current one
+  bd mol wisp list --json             # JSON output, including the stores queried`,
 	SilenceUsage:  true,
 	SilenceErrors: true,
 	RunE:          runWispList,
 }
 
+// wispListRowCap bounds a single store's wisp query. Hitting it is reported
+// (WispListStore.Truncated) rather than silently shortening the listing: a
+// capped page that looks complete is the same defect as a wrong-store zero that
+// looks like an answer.
+const wispListRowCap = 5000
+
 func wispListFilter(typeFilter string) types.IssueFilter {
 	ephemeralFlag := true
 	filter := types.IssueFilter{
 		Ephemeral: &ephemeralFlag,
-		Limit:     5000,
+		Limit:     wispListRowCap,
 	}
 	if typeFilter != "" {
 		it := types.IssueType(typeFilter)
@@ -428,48 +476,162 @@ func wispListFilter(typeFilter string) types.IssueFilter {
 	return filter
 }
 
+// wispStoreResult is one store's answer, including the case where it did not
+// answer at all. Err and Issues are kept apart on purpose: an error must never
+// be rendered as an empty result set.
+type wispStoreResult struct {
+	Ref    wispStoreRef
+	Issues []*types.Issue
+	Err    error
+}
+
 func buildWispListResult(issues []*types.Issue, showAll bool) WispListResult {
-	if !showAll {
-		var filtered []*types.Issue
-		for _, issue := range issues {
-			if issue.Status != types.StatusClosed {
-				filtered = append(filtered, issue)
-			}
-		}
-		issues = filtered
-	}
+	return buildWispListResultFromStores([]wispStoreResult{{Issues: issues}}, showAll, false, "")
+}
 
+// buildWispListResultFromStores assembles the listing and, alongside it, the
+// evidence needed to read the listing: which stores answered, how many wisps
+// each one holds in total, and how many rows the open-only default hid.
+//
+// Those counts are the positive control. A store holding zero wisps is the
+// wrong store; a store holding hundreds of which all matched are closed really
+// does have nothing open. Without them the two are the same empty screen — the
+// whole of bd-nc4.
+func buildWispListResultFromStores(results []wispStoreResult, showAll, allStores bool, routesFile string) WispListResult {
 	now := time.Now()
-	items := make([]WispListItem, 0, len(issues))
-	oldCount := 0
+	items := make([]WispListItem, 0)
+	stores := make([]WispListStore, 0, len(results))
+	oldCount, hiddenClosed := 0, 0
+	// Attribute rows to a store only when more than one could have produced
+	// them; a single-store listing already names its store in the header.
+	attribute := len(results) > 1
 
-	for _, issue := range issues {
-		item := WispListItem{
-			ID:        issue.ID,
-			Title:     issue.Title,
-			Status:    string(issue.Status),
-			Priority:  issue.Priority,
-			Type:      string(issue.IssueType),
-			Labels:    issue.Labels,
-			CreatedAt: issue.CreatedAt,
-			UpdatedAt: issue.UpdatedAt,
+	for _, res := range results {
+		summary := WispListStore{
+			Database: res.Ref.Database,
+			BeadsDir: res.Ref.BeadsDir,
+			Rig:      res.Ref.Rig,
+			Current:  res.Ref.Current,
 		}
-		if now.Sub(issue.UpdatedAt) > OldThreshold {
-			item.Old = true
-			oldCount++
+		if res.Err != nil {
+			summary.Error = res.Err.Error()
+			stores = append(stores, summary)
+			continue
 		}
-		items = append(items, item)
+		summary.Total = len(res.Issues)
+		summary.Truncated = len(res.Issues) >= wispListRowCap
+		for _, issue := range res.Issues {
+			if issue.Status == types.StatusClosed {
+				summary.Closed++
+				if !showAll {
+					hiddenClosed++
+					continue
+				}
+			}
+			item := WispListItem{
+				ID:        issue.ID,
+				Title:     issue.Title,
+				Status:    string(issue.Status),
+				Priority:  issue.Priority,
+				Type:      string(issue.IssueType),
+				Labels:    issue.Labels,
+				CreatedAt: issue.CreatedAt,
+				UpdatedAt: issue.UpdatedAt,
+			}
+			if attribute {
+				item.Store = res.Ref.Database
+			}
+			if now.Sub(issue.UpdatedAt) > OldThreshold {
+				item.Old = true
+				oldCount++
+			}
+			items = append(items, item)
+			summary.Shown++
+		}
+		stores = append(stores, summary)
 	}
 
 	slices.SortFunc(items, func(a, b WispListItem) int {
 		return b.UpdatedAt.Compare(a.UpdatedAt)
 	})
 
-	return WispListResult{
-		Wisps:    items,
-		Count:    len(items),
-		OldCount: oldCount,
+	result := WispListResult{
+		Wisps:          items,
+		Count:          len(items),
+		OldCount:       oldCount,
+		IncludedClosed: showAll,
+		HiddenClosed:   hiddenClosed,
+		AllStores:      allStores,
+		RoutesFile:     routesFile,
 	}
+	// A store with neither a name nor a directory is the legacy single-store
+	// call from the proxied path, which has nothing to disclose.
+	for _, s := range stores {
+		if s.Database != "" || s.BeadsDir != "" || s.Error != "" {
+			result.Stores = stores
+			break
+		}
+	}
+	return result
+}
+
+// wispListScopeLines states what the listing covered, in the terms that decide
+// whether an empty screen is news: the store(s) queried and their totals, the
+// closed rows the default hid, and any store that failed to answer.
+//
+// Every line is printed whether or not rows were found. The command was
+// unfalsifiable without them — it names no store and prints a plausible row
+// count from whichever store it landed in, so a wrong-store zero and a real
+// zero were the same output (bd-nc4).
+func wispListScopeLines(result WispListResult) []string {
+	var lines []string
+
+	switch {
+	case len(result.Stores) == 0:
+		// The proxied path, which holds a connection rather than a directory.
+		lines = append(lines, "Store: the workspace's proxied server (one store; --all-stores is unavailable in proxied-server mode)")
+	case len(result.Stores) == 1:
+		s := result.Stores[0]
+		lines = append(lines, "Store: "+wispStoreSummaryLine(s))
+	default:
+		lines = append(lines, fmt.Sprintf("Stores queried (%d):", len(result.Stores)))
+		for _, s := range result.Stores {
+			lines = append(lines, "  "+wispStoreSummaryLine(s))
+		}
+	}
+
+	if result.IncludedClosed {
+		lines = append(lines, "Scope: open, in_progress AND closed wisps (--all)")
+	} else if result.HiddenClosed > 0 {
+		lines = append(lines, fmt.Sprintf(
+			"Scope: open and in_progress only — %d closed wisp(s) hidden; a MERGED merge-request is closed, so use --all to see one",
+			result.HiddenClosed))
+	} else {
+		lines = append(lines, "Scope: open and in_progress only (--all also lists closed wisps)")
+	}
+
+	if !result.AllStores {
+		lines = append(lines, "Reach: this store only — wisps are per-database and nothing federates them; --all-stores queries every store in routes.jsonl")
+	} else if result.RoutesFile != "" {
+		lines = append(lines, "Reach: every store in "+result.RoutesFile+" — a store absent from that file is not covered")
+	}
+
+	return lines
+}
+
+// wispStoreSummaryLine names one store and what it held. A store that failed to
+// answer says so; it is never folded into the zero.
+func wispStoreSummaryLine(s WispListStore) string {
+	ref := wispStoreRef{Database: s.Database, BeadsDir: s.BeadsDir, Rig: s.Rig, Current: s.Current}
+	name := ref.describe()
+	if s.Error != "" {
+		return fmt.Sprintf("%s — %s (NOT searched)", name, ui.RenderWarn("ERROR: "+s.Error))
+	}
+	line := fmt.Sprintf("%s — %d shown of %d wisp(s), %d closed", name, s.Shown, s.Total, s.Closed)
+	if s.Truncated {
+		line += fmt.Sprintf(" (TRUNCATED at the %d-row cap; counts are floors)", wispListRowCap)
+	}
+	return line
 }
 
 func renderWispListResult(result WispListResult) error {
@@ -477,12 +639,21 @@ func renderWispListResult(result WispListResult) error {
 		return outputJSON(result)
 	}
 
+	scope := wispListScopeLines(result)
+
 	if len(result.Wisps) == 0 {
-		fmt.Println("No wisps found")
+		fmt.Println("No wisps matched.")
+		for _, line := range scope {
+			fmt.Println("  " + line)
+		}
 		return nil
 	}
 
-	fmt.Printf("Wisps (%d):\n\n", len(result.Wisps))
+	fmt.Printf("Wisps (%d):\n", len(result.Wisps))
+	for _, line := range scope {
+		fmt.Println("  " + line)
+	}
+	fmt.Println()
 	fmt.Printf("%-12s %-10s %-4s %-10s %-46s %s\n",
 		"ID", "STATUS", "PRI", "TYPE", "TITLE", "UPDATED")
 	fmt.Println(strings.Repeat("-", 100))
@@ -496,6 +667,12 @@ func renderWispListResult(result WispListResult) error {
 		updated := formatTimeAgo(item.UpdatedAt)
 		if item.Old {
 			updated = ui.RenderWarn(updated + " ⚠")
+		}
+		if item.Store != "" {
+			title = "[" + item.Store + "] " + title
+			if len(title) > 44 {
+				title = title[:41] + "..."
+			}
 		}
 		fmt.Printf("%-12s %-10s P%-3d %-10s %-46s %s\n",
 			item.ID, status, item.Priority, item.Type, title, updated)
@@ -519,8 +696,20 @@ func runWispList(cmd *cobra.Command, args []string) error {
 
 	showAll, _ := cmd.Flags().GetBool("all")
 	typeFilter, _ := cmd.Flags().GetString("type")
+	allStores, _ := cmd.Flags().GetBool("all-stores")
+	rig, _ := cmd.Flags().GetString("rig")
+
+	if allStores && strings.TrimSpace(rig) != "" {
+		return HandleError("--rig and --all-stores are mutually exclusive: one names a store, the other means every store")
+	}
 
 	if usesProxiedServer() {
+		// Refuse rather than answer about one store while the flag asks for
+		// every store. Proxied-server mode holds a connection to a single
+		// workspace's server, so the sweep is not available through it.
+		if allStores || strings.TrimSpace(rig) != "" {
+			return HandleError("--rig/--all-stores are not available in proxied-server mode (it serves one store); run bd from the rig instead")
+		}
 		return runWispListProxiedServer(rootCtx, showAll, typeFilter)
 	}
 
@@ -537,12 +726,50 @@ func runWispList(cmd *cobra.Command, args []string) error {
 		return nil
 	}
 
-	issues, err := store.SearchIssues(ctx, "", wispListFilter(typeFilter))
-	if err != nil {
-		return HandleError("listing wisps: %v", err)
+	currentBeadsDir := resolveCommandBeadsDir(dbPath)
+	// The default listing reads the store this command already opened, named
+	// from that store and nothing else. Discovery runs only for the flags that
+	// ask to leave it, so no amount of routing configuration can quietly move
+	// the default somewhere else.
+	stores := []wispStoreRef{{
+		Database: readDoltDatabase(currentBeadsDir),
+		BeadsDir: currentBeadsDir,
+		Current:  true,
+	}}
+	routesFile := ""
+
+	if allStores || strings.TrimSpace(rig) != "" {
+		discovered, file := discoverWispStores(currentBeadsDir)
+		routesFile = file
+		if len(discovered) > 0 {
+			stores = discovered
+		}
+		if strings.TrimSpace(rig) != "" {
+			selected, err := selectWispStores(stores, rig)
+			if err != nil {
+				return HandleError("%v", err)
+			}
+			stores = selected
+		}
 	}
 
-	return renderWispListResult(buildWispListResult(issues, showAll))
+	results := make([]wispStoreResult, 0, len(stores))
+	for _, ref := range stores {
+		issues, err := queryWispStore(ctx, ref, store, typeFilter)
+		if err != nil {
+			// One unreachable store must not fail the whole sweep, and must
+			// not vanish from it either: it is recorded as a store that did
+			// NOT answer (bd-nc4).
+			if len(stores) == 1 {
+				return HandleError("listing wisps in %s: %v", ref.describe(), err)
+			}
+			results = append(results, wispStoreResult{Ref: ref, Err: err})
+			continue
+		}
+		results = append(results, wispStoreResult{Ref: ref, Issues: issues})
+	}
+
+	return renderWispListResult(buildWispListResultFromStores(results, showAll, allStores, routesFile))
 }
 
 // formatTimeAgo returns a human-readable relative time
@@ -1099,8 +1326,10 @@ func init() {
 	wispCreateCmd.Flags().Bool("dry-run", false, "Preview what would be created")
 	wispCreateCmd.Flags().Bool("root-only", false, "Create only the root issue (no child step issues)")
 
-	wispListCmd.Flags().Bool("all", false, "Include closed wisps")
+	wispListCmd.Flags().Bool("all", false, "Include closed wisps (a MERGED merge-request wisp is closed)")
 	wispListCmd.Flags().String("type", "", "Filter by issue type (e.g., agent, task, patrol)")
+	wispListCmd.Flags().Bool("all-stores", false, "Query every store in routes.jsonl, not just the current one")
+	wispListCmd.Flags().String("rig", "", "Query one named store instead of the current one (rig path or database name)")
 
 	wispGCCmd.Flags().Bool("dry-run", false, "Preview what would be cleaned")
 	wispGCCmd.Flags().String("age", "1h", "Age threshold for abandoned wisp detection")

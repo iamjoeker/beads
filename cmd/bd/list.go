@@ -229,14 +229,19 @@ func runListCore(cmd *cobra.Command, _ []string) error {
 	ctx := rootCtx
 
 	activeStore := store
-	routedStore, routed, routingRule, err := openRoutedReadStore(ctx, activeStore)
+	// The routed TARGET, not just the handle: a zero has to be able to name the
+	// database that produced it, and after a routing swap that is the routed
+	// store rather than the local one (bd-nc4).
+	searchedStore := describeLocalSearchedStore()
+	routedStore, routedTo, err := openRoutedStoreTarget(ctx, activeStore, false)
 	if err != nil {
 		return HandleError("%v", err)
 	}
-	if routed {
+	if routedTo != nil {
 		defer func() { _ = routedStore.Close() }()
-		printContributorRoutingNotice(ctx, activeStore, routingRule)
+		printContributorRoutingNotice(ctx, activeStore, routedTo.Rule)
 		activeStore = routedStore
+		searchedStore = describeDatabaseAt(routedTo.BeadsDir)
 	}
 
 	if in.watchMode {
@@ -270,6 +275,14 @@ func runListCore(cmd *cobra.Command, _ []string) error {
 			}
 			return HandleError("%v", err)
 		}
+		// An empty [] is the same ambiguous answer in JSON as on screen, and the
+		// notice goes to stderr, so the document stays parseable (bd-nc4).
+		printEmptyLabelledListNotice(ctx, activeStore, listLabelPredicates{
+			Labels:    in.Labels,
+			LabelsAny: in.LabelsAny,
+			Pattern:   in.LabelPattern,
+			Regex:     in.LabelRegex,
+		}, len(page.Items), searchedStore)
 		if in.SkipLabels {
 			if err := outputJSON(newSkipLabelsListJSONResponse(page.Items)); err != nil {
 				return err
@@ -297,6 +310,19 @@ func runListCore(cmd *cobra.Command, _ []string) error {
 		return HandleError("%v", err)
 	}
 	issues, truncated := listPageIssues(page)
+
+	// A label filter that returned nothing gets the wisp-table notice before any
+	// rendering path prints its empty screen. --parent is excluded because that
+	// branch answers from its own hierarchical query below, so this page being
+	// empty would not be the answer the user sees.
+	if in.ParentID == "" {
+		printEmptyLabelledListNotice(ctx, activeStore, listLabelPredicates{
+			Labels:    in.Labels,
+			LabelsAny: in.LabelsAny,
+			Pattern:   in.LabelPattern,
+			Regex:     in.LabelRegex,
+		}, len(issues), searchedStore)
+	}
 
 	if in.prettyFormat && !jsonOutput {
 		if in.ParentID != "" && !in.ReadyFlag {
