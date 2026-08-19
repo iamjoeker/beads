@@ -13,6 +13,7 @@ import (
 func (s *testSuite) TestIssueGetReadyWork() {
 	s.Run("ReturnsOpenAndInProgress", s.readyOpenAndInProgress)
 	s.Run("ExcludesClosed", s.readyExcludesClosed)
+	s.Run("StatusDecidesReadinessNotIDPrefix", s.readyStatusDecidesNotIDPrefix)
 	s.Run("ExcludesPinned", s.readyExcludesPinned)
 	s.Run("ExcludesBlocked", s.readyExcludesBlocked)
 	s.Run("ExcludesEphemeralByDefault", s.readyExcludesEphemeral)
@@ -64,6 +65,49 @@ func (s *testSuite) readyExcludesClosed() {
 	out, err := r.GetReadyWork(s.Ctx(), types.WorkFilter{})
 	s.Require().NoError(err)
 	s.NotContains(issueIDsFrom(out), "bd-rdy-cls-1")
+}
+
+// readyStatusDecidesNotIDPrefix pins both halves of the contract a store holding
+// more than one ID prefix depends on: the status predicate applies to every row,
+// and the ID prefix narrows nothing (bd-99f).
+//
+// A store accumulates foreign-prefix rows legitimately — a bead filed in one rig
+// and moved to the rig that owns the work keeps the ID it was filed under. Those
+// rows are the rig's real backlog, and the copy left behind in the originating
+// store is closed independently. So a reader comparing the two stores sees one ID
+// open here and closed there, which reads like ready work leaking closed rows and
+// invites a "filter ready by the store's own prefix" fix. That fix would drop
+// live work on the floor. Both assertions below have to hold together: dropping
+// either one alone still passes a test that only checks the other.
+func (s *testSuite) readyStatusDecidesNotIDPrefix() {
+	r := s.issueRepo()
+
+	ownOpen := newTestIssue("bd-rdy-pfx-own-open", "own prefix, open")
+	s.Require().NoError(r.Insert(s.Ctx(), ownOpen, "tester", domain.InsertIssueOpts{}))
+
+	ownClosed := newTestIssue("bd-rdy-pfx-own-closed", "own prefix, closed")
+	ownClosed.Status = types.StatusClosed
+	s.Require().NoError(r.Insert(s.Ctx(), ownClosed, "tester", domain.InsertIssueOpts{}))
+
+	foreignOpen := newTestIssue("dn-rdy-pfx-foreign-open", "foreign prefix, open")
+	s.Require().NoError(r.Insert(s.Ctx(), foreignOpen, "tester", domain.InsertIssueOpts{}))
+
+	foreignClosed := newTestIssue("dn-rdy-pfx-foreign-closed", "foreign prefix, closed")
+	foreignClosed.Status = types.StatusClosed
+	s.Require().NoError(r.Insert(s.Ctx(), foreignClosed, "tester", domain.InsertIssueOpts{}))
+
+	out, err := r.GetReadyWork(s.Ctx(), types.WorkFilter{})
+	s.Require().NoError(err)
+	got := issueIDsFrom(out)
+
+	// Closed is closed whatever the prefix.
+	s.NotContains(got, "bd-rdy-pfx-own-closed")
+	s.NotContains(got, "dn-rdy-pfx-foreign-closed")
+
+	// Open is ready whatever the prefix — a foreign-prefix row is not a
+	// second-class row.
+	s.Contains(got, "bd-rdy-pfx-own-open")
+	s.Contains(got, "dn-rdy-pfx-foreign-open")
 }
 
 func (s *testSuite) readyExcludesPinned() {
