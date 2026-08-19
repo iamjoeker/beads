@@ -97,6 +97,12 @@ func ResolvePartialID(ctx context.Context, store PartialIDResolverStore, input s
 
 	var normalizedID string
 
+	// Whether the input itself carried a prefix. A prefixed id names a plane
+	// ("hq-gyn" asks the issue plane, "hq-wisp-gyn" asks the wisp plane); a
+	// bare hash names none. The wisp fallback below reads this to decide
+	// whether it may drop the "wisp-" plane marker while matching (bd-qsw).
+	inputNamedPlane := true
+
 	if strings.HasPrefix(input, prefixWithHyphen) {
 		// Already has configured prefix with hyphen: "bd-a3f8e9"
 		normalizedID = input
@@ -110,6 +116,7 @@ func ResolvePartialID(ctx context.Context, store PartialIDResolverStore, input s
 	} else {
 		// Bare hash or prefix without hyphen: "a3f8e9", "07b8c8", "bda3f8e9" → all get prefix with hyphen added
 		normalizedID = prefixWithHyphen + input
+		inputNamedPlane = false
 	}
 
 	// Try exact match on normalized ID using SearchIssues (GH#942)
@@ -184,6 +191,9 @@ func ResolvePartialID(ctx context.Context, store PartialIDResolverStore, input s
 		ephTrue := true
 		wispFilter := types.IssueFilter{Ephemeral: &ephTrue}
 		if wispIDs, wispErr := store.SearchIssueIDs(ctx, searchPart, wispFilter); wispErr == nil {
+			// Wisps that would only match once the "wisp-" plane marker is
+			// dropped, for input that named a plane. Reported, never returned.
+			var crossPlane []string
 			for _, wID := range wispIDs {
 				if wID == input {
 					return wID, nil
@@ -194,19 +204,42 @@ func ResolvePartialID(ctx context.Context, store PartialIDResolverStore, input s
 				} else {
 					wHash = wID
 				}
-				// Wisp IDs are shaped "<prefix>-wisp-<hash>", so wHash here is
-				// the composite "wisp-<hash>". Strip the literal "wisp-" infix
-				// before comparing so bare-hash lookups (e.g. "t3st") resolve
-				// against the isolated hash, not the full "wisp-t3st" string.
-				wispHash := strings.TrimPrefix(wHash, "wisp-")
-				if wHash == hashPart || wispHash == hashPart {
+				// Auto-minted wisp IDs are shaped "<prefix>-wisp-<hash>", so
+				// wHash here is the composite "wisp-<hash>". Match against it
+				// first: that keeps the plane marker, exactly as the issues
+				// loop above does, so "hq-wisp-gyn" abbreviates a wisp.
+				//
+				// Dropping the "wisp-" infix also drops the plane marker, which
+				// made "hq-gyn" — an issue-plane lookup — answer with the
+				// unrelated wisp "hq-wisp-gyn1c8" (bd-qsw). A near miss that
+				// reads as a hit is worse than a miss, so drop the marker only
+				// for a bare hash, which names no plane at all.
+				switch {
+				case wHash == hashPart:
 					exactMatch = wID
-				} else if strings.HasPrefix(wispHash, hashPart) {
+				case strings.HasPrefix(wHash, hashPart):
 					matches = append(matches, wID)
+				case inputNamedPlane:
+					if strings.HasPrefix(strings.TrimPrefix(wHash, "wisp-"), hashPart) {
+						crossPlane = append(crossPlane, wID)
+					}
+				default:
+					wispHash := strings.TrimPrefix(wHash, "wisp-")
+					if wispHash == hashPart {
+						exactMatch = wID
+					} else if strings.HasPrefix(wispHash, hashPart) {
+						matches = append(matches, wID)
+					}
 				}
 			}
 			if exactMatch != "" {
 				return exactMatch, nil
+			}
+			// Say the cross-plane near miss out loud rather than answering with
+			// it: the caller asked one plane and only the other has a candidate.
+			if len(matches) == 0 && len(crossPlane) > 0 {
+				sort.Strings(crossPlane)
+				return "", fmt.Errorf("no issue found matching %q; the wisp plane has %v\nA wisp ID carries a \"wisp-\" marker — address it by that ID", input, crossPlane)
 			}
 		}
 	}
