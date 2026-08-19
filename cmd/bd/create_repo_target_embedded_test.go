@@ -70,3 +70,53 @@ func TestEmbeddedCreateRepoTargetResolution(t *testing.T) {
 		}
 	})
 }
+
+// TestEmbeddedCreateRepoExplicitIDPrefix is the end-to-end half of bd-5ut: an
+// explicit --id on a routed create was judged against the prefix of the
+// workspace bd was RUN in, not the one it writes to. The target's own prefix
+// came back "prefix mismatch: database uses 'hq-'" while the database being
+// written was the gt one, and the local prefix passed a front door that the
+// storage layer then had to catch — with --force, not even that.
+func TestEmbeddedCreateRepoExplicitIDPrefix(t *testing.T) {
+	if os.Getenv("BEADS_TEST_EMBEDDED_DOLT") != "1" {
+		t.Skip("set BEADS_TEST_EMBEDDED_DOLT=1 to run embedded dolt create tests")
+	}
+	t.Parallel()
+
+	bd := buildEmbeddedBD(t)
+
+	// A local workspace with a config.yaml overlay of its own — the shape that
+	// made the split visible, since the overlay outranks the store's prefix.
+	localDir, localBeadsDir, _ := bdInit(t, bd, "--prefix", "hq")
+	if err := os.WriteFile(filepath.Join(localBeadsDir, "config.yaml"),
+		[]byte("issue-prefix: \"hq\"\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	targetDir, targetBeadsDir, _ := bdInit(t, bd, "--prefix", "gt")
+
+	t.Run("target_prefixed_id_is_accepted", func(t *testing.T) {
+		issue := bdCreate(t, bd, localDir, "Routed with the target's own prefix",
+			"--repo", targetDir, "--id", "gt-tgt1")
+		if issue.ID != "gt-tgt1" {
+			t.Errorf("ID = %q, want gt-tgt1", issue.ID)
+		}
+		assertIssueInStore(t, targetBeadsDir, "gt", "gt-tgt1")
+	})
+
+	t.Run("local_prefixed_id_is_refused_naming_the_target_prefix", func(t *testing.T) {
+		out := bdCreateFail(t, bd, localDir, "--repo", targetDir, "--id", "hq-tgt2",
+			"Routed with the local workspace's prefix")
+		if !strings.Contains(out, "gt-") {
+			t.Errorf("refusal should name the TARGET's prefix gt-, got:\n%s", out)
+		}
+		assertIssueNotInStore(t, targetBeadsDir, "gt", "hq-tgt2")
+	})
+
+	t.Run("auto_minted_id_carries_the_target_prefix", func(t *testing.T) {
+		issue := bdCreate(t, bd, localDir, "Routed with no explicit id", "--repo", targetDir)
+		if !strings.HasPrefix(issue.ID, "gt-") {
+			t.Errorf("ID %q should carry the target's prefix gt-", issue.ID)
+		}
+		assertIssueInStore(t, targetBeadsDir, "gt", issue.ID)
+	})
+}
