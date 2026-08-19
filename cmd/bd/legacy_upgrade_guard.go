@@ -27,7 +27,7 @@ func guardLegacyUpgradeWorkspace(beadsDir string) error {
 	}
 	cfg, err := configfile.LoadForDiscovery(beadsDir)
 	if err != nil {
-		return fmt.Errorf("loading config: %w", err)
+		return legacyUpgradeUnclassifiedError{err: err}
 	}
 	if isHistoricalSQLiteWorkspace(beadsDir, cfg) {
 		return legacyUpgradeRefusal("historical SQLite workspace")
@@ -298,4 +298,44 @@ func (err legacyUpgradeRefusalError) Error() string {
 func isLegacyUpgradeRefusal(err error) bool {
 	_, ok := err.(legacyUpgradeRefusalError)
 	return ok
+}
+
+// legacyUpgradeUnclassifiedError reports that the guard could not classify the
+// workspace at all, because its discovery metadata is unreadable. It is not a
+// refusal: nothing was recognized as a legacy shape, so the migration
+// instructions a refusal carries — preserve .beads, run a cross-era upgrade —
+// are the wrong advice for a truncated file. Callers that go on to select a
+// store still treat it as fatal, since an unparseable metadata.json must never
+// fall through to the embedded store and answer false-empty; what the distinct
+// type buys is that the two callers who can do better — doctor, which explains
+// the fault, and init, which repairs it — can tell the cases apart.
+type legacyUpgradeUnclassifiedError struct{ err error }
+
+func (err legacyUpgradeUnclassifiedError) Error() string {
+	return fmt.Sprintf("loading config: %v", err.err)
+}
+
+func (err legacyUpgradeUnclassifiedError) Unwrap() error { return err.err }
+
+func isLegacyUpgradeUnclassified(err error) bool {
+	_, ok := err.(legacyUpgradeUnclassifiedError)
+	return ok
+}
+
+// guardLegacyUpgradeRepairPath applies the legacy-upgrade guard on behalf of
+// bd init, whose job is to rewrite workspace metadata. A genuine legacy refusal
+// stays fatal there — the sealed-copy bridge is not optional — but an unreadable
+// metadata.json leaves the guard nothing to classify, and refusing on it stops
+// init at the file it is there to repair, before init's own safety checks can
+// decide whether this caller is authorized to rewrite it. Warn and continue,
+// matching the posture main.go already takes for commands that select no store;
+// the authorization question belongs to checkExistingBeadsData and ADR 0002,
+// not to a classifier that could not read the input.
+func guardLegacyUpgradeRepairPath(beadsDir string) error {
+	err := guardLegacyUpgradeWorkspace(beadsDir)
+	if !isLegacyUpgradeUnclassified(err) {
+		return err
+	}
+	fmt.Fprintf(os.Stderr, "warning: %v; workspace shape is unknown and no storage database was opened or modified, continuing so this command can repair it\n", err)
+	return nil
 }

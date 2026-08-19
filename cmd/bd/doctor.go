@@ -2,6 +2,7 @@ package main
 
 import (
 	"encoding/json"
+	"errors"
 	"fmt"
 	"os"
 	"path/filepath"
@@ -362,16 +363,33 @@ func shouldSkipDoctorNetworkChecks() bool {
 // selects a removed or unknown implementation or cannot be parsed. Doctor contains
 // direct diagnostic store paths and may run under shared-server mode, so corrupt
 // metadata must be rejected before version tracking or any database check begins.
+//
+// Rejecting is not the same as leaving the operator stranded: unreadable metadata
+// is a diagnosis in itself, so that case says how to repair the workspace rather
+// than reporting a bare parse failure. Doctor does not perform the repair — it
+// would have to write the file it cannot read.
 func validateDoctorWorkspaceBackend(path string) error {
 	beadsDir := doctor.ResolveBeadsDirForRepo(path)
-	if err := guardLegacyUpgradeWorkspace(beadsDir); err != nil {
-		return err
+	guardErr := guardLegacyUpgradeWorkspace(beadsDir)
+	if isLegacyUpgradeUnclassified(guardErr) {
+		return unreadableWorkspaceMetadataError(beadsDir, errors.Unwrap(guardErr))
+	}
+	if guardErr != nil {
+		return guardErr
 	}
 	cfg, err := configfile.LoadForDiscovery(beadsDir)
 	if err != nil {
-		return fmt.Errorf("failed to load %s: %w; no storage database was opened or modified; fix or restore metadata.json and retry", configfile.ConfigPath(beadsDir), err)
+		return unreadableWorkspaceMetadataError(beadsDir, err)
 	}
 	return validateConfiguredBackend(cfg)
+}
+
+// unreadableWorkspaceMetadataError names the file, states that nothing was
+// opened or modified, and points at the one command that can rewrite it. The
+// bare parse error alone reads as a dead end — the workspace looks unrecoverable
+// when it is not.
+func unreadableWorkspaceMetadataError(beadsDir string, cause error) error {
+	return fmt.Errorf("failed to load %s: %w; no storage database was opened or modified; restore the file, or reinitialize this workspace with bd init --reinit-local after safeguarding existing data", configfile.ConfigPath(beadsDir), cause)
 }
 
 // printLegacyUpgradeDiagnostic preserves doctor as a store-free repair path:

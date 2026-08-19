@@ -64,12 +64,17 @@ func TestLoadServerModeFromBeadsDirCorruptMetadataReturnsError(t *testing.T) {
 	}
 }
 
-// End-to-end contract for a corrupt metadata.json, exercised through the
-// real binary: diagnostic and repair commands still run (warn-and-continue),
-// data commands fail loud instead of answering false-empty from the embedded
-// fallback, and bd init can rewrite the file — after which data commands work
-// again. Guards the scoping of the fail-loud behavior: fatal only where a
-// store is actually selected, never on the repair path itself.
+// End-to-end contract for a corrupt metadata.json, exercised through the real
+// binary. Every command that could select a store refuses — data commands must
+// never answer false-empty from the embedded fallback — but refusing is only
+// half a contract. The other half, and the one this test exists to hold, is
+// that a route out of the corruption stays open and reachable: each refusal
+// names the flag that repairs the workspace, and that flag then works.
+//
+// A plain `bd init` deliberately stays refused too. Unreadable metadata may be
+// the only pointer to an external or otherwise nonlocal database, so no flag
+// names the winner and ADR 0002 invariant 1 makes that a refusal. Only
+// --reinit-local, which says which source wins, may rewrite the file.
 func TestCorruptMetadataDiagnosticsRunAndDataFailsLoud(t *testing.T) {
 	if os.Getenv("BEADS_TEST_EMBEDDED_DOLT") != "1" {
 		t.Skip("set BEADS_TEST_EMBEDDED_DOLT=1 to run embedded dolt tests")
@@ -91,15 +96,28 @@ func TestCorruptMetadataDiagnosticsRunAndDataFailsLoud(t *testing.T) {
 		return string(out), err
 	}
 
-	// Diagnostic / repair-path commands must keep working.
-	for _, args := range [][]string{{"version"}, {"doctor"}} {
-		if out, err := run(args...); err != nil {
-			t.Errorf("bd %s with corrupt metadata.json: want success, got %v\n%s", strings.Join(args, " "), err, out)
+	// Store-free commands that read nothing from metadata must keep working.
+	if out, err := run("version"); err != nil {
+		t.Errorf("bd version with corrupt metadata.json: want success, got %v\n%s", err, out)
+	}
+
+	// bd doctor reaches direct diagnostic store paths and may run under
+	// shared-server mode, so it rejects rather than diagnosing blind
+	// (TestDoctorRejectsCorruptMetadataBeforeSharedServerChecks pins the
+	// no-side-effects half of that). Rejecting must still leave the operator
+	// somewhere to go: the report names the file and the flag that repairs it.
+	out, err := run("doctor")
+	if err == nil {
+		t.Fatalf("bd doctor with corrupt metadata.json: want refusal, got success:\n%s", out)
+	}
+	for _, want := range []string{"metadata.json", "--reinit-local"} {
+		if !strings.Contains(out, want) {
+			t.Fatalf("bd doctor refusal should name %q:\n%s", want, out)
 		}
 	}
 
 	// Data commands must fail loud, naming the file — not answer false-empty.
-	out, err := run("list", "--json")
+	out, err = run("list", "--json")
 	if err == nil {
 		t.Fatalf("bd list with corrupt metadata.json: want loud failure, got success:\n%s", out)
 	}
@@ -107,11 +125,21 @@ func TestCorruptMetadataDiagnosticsRunAndDataFailsLoud(t *testing.T) {
 		t.Fatalf("bd list error should name metadata.json:\n%s", out)
 	}
 
-	// bd init is the documented repair path: it must run, rewrite the file,
-	// and restore data commands.
-	runBDInit(t, bd, dir, "--prefix", "cm")
+	// A plain bd init must refuse — and say what to run instead, or the
+	// workspace has no recovery a reader can find.
+	out, err = run("init", "--quiet", "--prefix", "cm")
+	if err == nil {
+		t.Fatalf("bd init with corrupt metadata.json: want refusal, got success:\n%s", out)
+	}
+	if !strings.Contains(out, "--reinit-local") {
+		t.Fatalf("bd init refusal must name the repair flag:\n%s", out)
+	}
+
+	// bd init --reinit-local is that repair path: it must run past the guard
+	// and the workspace gate, rewrite the file, and restore data commands.
+	runBDInit(t, bd, dir, "--reinit-local", "--prefix", "cm")
 	if out, err := run("list", "--json"); err != nil {
-		t.Fatalf("bd list after bd init repair: %v\n%s", err, out)
+		t.Fatalf("bd list after bd init --reinit-local repair: %v\n%s", err, out)
 	}
 }
 

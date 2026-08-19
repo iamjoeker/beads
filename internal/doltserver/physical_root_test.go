@@ -1,6 +1,7 @@
 package doltserver
 
 import (
+	"errors"
 	"os"
 	"path/filepath"
 	"testing"
@@ -493,4 +494,23 @@ func jsonEscapePath(p string) string {
 		}
 	}
 	return string(out)
+}
+
+// Gate planning still refuses to guess a root from unparseable metadata, but
+// the refusal must be identifiable: bd init --reinit-local is authorized to
+// rewrite that very file, and a bare error string would leave it locked out of
+// the only repair. The sentinel is what lets that one caller answer it without
+// loosening the refusal for every store-opening command.
+func TestResolvePhysicalRootsUnreadableMetadataIsIdentifiable(t *testing.T) {
+	resetPhysicalRootEnv(t)
+	beadsDir := newTestBeadsDir(t)
+	writeBeadsMetadata(t, beadsDir, `{"dolt_mode":"serv`)
+
+	_, err := ResolvePhysicalRoots(beadsDir)
+	if err == nil {
+		t.Fatal("ResolvePhysicalRoots() = nil error, want refusal to guess a root")
+	}
+	if !errors.Is(err, ErrUnresolvableWorkspaceMetadata) {
+		t.Fatalf("ResolvePhysicalRoots() = %v, want ErrUnresolvableWorkspaceMetadata", err)
+	}
 }

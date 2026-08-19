@@ -1,6 +1,7 @@
 package doltserver
 
 import (
+	"errors"
 	"fmt"
 	"os"
 	"path/filepath"
@@ -8,6 +9,14 @@ import (
 
 	"github.com/steveyegge/beads/internal/configfile"
 )
+
+// ErrUnresolvableWorkspaceMetadata marks the one gate-resolution failure that a
+// repair command can legitimately proceed past: metadata.json is present but
+// unparseable, so there is no root to derive. Gate planning still refuses to
+// guess for every normal caller. It is a distinct sentinel rather than a bare
+// error string so the refusal can be answered precisely — by the command whose
+// job is to rewrite that file — instead of being loosened for everyone.
+var ErrUnresolvableWorkspaceMetadata = errors.New("workspace metadata is unreadable, so no database root can be resolved")
 
 // PhysicalRoots describes the local physical database root(s) a store open
 // for the given workspace will actually touch, so the workspace-gate wiring
@@ -260,7 +269,11 @@ func ResolvePhysicalRoots(beadsDir string) (PhysicalRoots, error) {
 		if loadErr != nil {
 			// A present-but-broken metadata.json is authoritative: the open
 			// path refuses to fall back, so gate planning refuses to guess.
-			return PhysicalRoots{}, fmt.Errorf("loading config for gate resolution: %w", loadErr)
+			// ErrUnresolvableWorkspaceMetadata separates this from every other
+			// resolution failure, so a caller that is authorized to REWRITE
+			// that file can gate what it does know instead of being locked out
+			// of the repair (see acquireExclusiveWorkspaceGatesForRepair).
+			return PhysicalRoots{}, fmt.Errorf("loading config for gate resolution: %w: %w", ErrUnresolvableWorkspaceMetadata, loadErr)
 		}
 		cfg = loaded
 	}
