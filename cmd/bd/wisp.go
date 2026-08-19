@@ -5,6 +5,7 @@ import (
 	"errors"
 	"fmt"
 	"slices"
+	"sort"
 	"strings"
 	"time"
 
@@ -14,6 +15,7 @@ import (
 	"github.com/steveyegge/beads/internal/storage"
 	"github.com/steveyegge/beads/internal/types"
 	"github.com/steveyegge/beads/internal/ui"
+	"github.com/steveyegge/beads/internal/workapi"
 )
 
 // Wisp commands - manage ephemeral molecules
@@ -619,13 +621,19 @@ A wisp is considered abandoned if:
     configured category, so only plain open (active) and closed (done) steps
     are age-reclaimable. If the blocked set or the custom-status list cannot be
     read, the GC aborts rather than risk reclaiming live steps.
+  - AND it does not carry a GC-protected label. Protection is by LABEL rather
+    than status, so it survives the close that puts everything else in the
+    delete set; see 'gc.protected_labels' (default: merge-request and message
+    records). No flag overrides it — delete one deliberately with 'bd delete'.
 
 Abandoned wisps are deleted without creating a digest. Use 'bd mol squash'
 if you want to preserve a summary before garbage collection.
 
-Use --closed to purge ALL closed wisps (regardless of age). This is the
-fastest way to reclaim space from accumulated wisp bloat. Safe by default:
-requires --force to actually delete.
+Use --closed to purge closed wisps regardless of age. This is the fastest way
+to reclaim space from accumulated wisp bloat. Safe by default: requires
+--force to actually delete. Closed does NOT mean safe to delete for every
+wisp — a merge-request record closed without merging is the only record that
+the work did not land — which is what gc.protected_labels holds back.
 
 Note: This uses time-based cleanup, appropriate for ephemeral wisps.
 For graph-pressure staleness detection (blocking other work), see 'bd mol stale'.
@@ -636,7 +644,7 @@ Examples:
   bd mol wisp gc --age 24h                          # Custom age threshold
   bd mol wisp gc --all                              # Also clean closed wisps older than threshold
   bd mol wisp gc --closed                           # Preview closed wisp deletion
-  bd mol wisp gc --closed --force                   # Delete all closed wisps
+  bd mol wisp gc --closed --force                   # Delete closed, unprotected wisps
   bd mol wisp gc --closed --dry-run                 # Explicit dry-run (same as no --force)
   bd mol wisp gc --exclude-type agent,rig           # Protect agent and rig wisps from GC
   bd mol wisp gc --closed --force --exclude-type mol # Delete closed wisps except mol type`,
@@ -696,16 +704,26 @@ func protectedWispStatuses(ctx context.Context, r molReader) (map[types.Status]b
 	return protected, nil
 }
 
-// isProtectedWisp reports whether a wisp is live work that age-based GC must
-// never reclaim. A wisp is protected if it is explicitly pinned, if it is
+// isProtectedWisp reports whether a wisp is live work or a durable record that
+// age-based GC must never reclaim. A wisp is protected if it carries one of
+// the workspace's GC-protected labels, if it is explicitly pinned, if it is
 // blocked on an open dependency (blockedSet, derived from is_blocked), or if
 // its status falls in a protected category. Reclaiming any of these
 // mid-execution destroys active molecules (GH#4394).
 //
+// THE LABEL CHECK IS THE ONE THAT DOES NOT DEPEND ON STATUS, and that is the
+// point: the other three protect work that is still running, while a
+// merge-request or message record needs protecting precisely once it is
+// finished with. See workapi's gcprotect.go for why status flags failed as a
+// control for that class (bd-czf).
+//
 // Named isProtectedWisp rather than isActiveWisp to avoid confusion with
 // (*DoltStore).isActiveWisp in internal/storage/dolt, which is in this same
 // delete path but means only "a row for this ID exists in the wisps table".
-func isProtectedWisp(issue *types.Issue, blockedSet map[string]bool, protectedStatuses map[types.Status]bool) bool {
+func isProtectedWisp(issue *types.Issue, blockedSet map[string]bool, protectedStatuses map[types.Status]bool, protectedLabels workapi.GCProtectedLabels) bool {
+	if protectedLabels.Protects(issue) {
+		return true
+	}
 	// The pinned flag is independent of the pinned status; the closed-purge
 	// branch of this same command already honors it (see runWispPurgeClosed).
 	if issue.Pinned {
@@ -762,13 +780,14 @@ func runWispGC(cmd *cobra.Command, args []string) error {
 		return runWispPurgeClosed(ctx, dryRun, force, excludeTypes)
 	}
 
-	abandoned, err := findAbandonedWisps(ctx, store, cleanAll, ageThreshold, excludeTypes)
+	abandoned, labelProtected, err := findAbandonedWisps(ctx, store, cleanAll, ageThreshold, excludeTypes)
 	if err != nil && abandoned == nil {
 		return HandleError("%v", err)
 	}
 	if err != nil {
 		fmt.Fprintf(cmd.ErrOrStderr(), "Warning: cascade expansion incomplete: %v\n", err)
 	}
+	reportWispLabelProtected(labelProtected, resolveGCProtectedLabels(ctx, store))
 
 	if len(abandoned) == 0 {
 		if jsonOutput {
@@ -821,7 +840,12 @@ func runWispGC(cmd *cobra.Command, args []string) error {
 	return nil
 }
 
-func findAbandonedWisps(ctx context.Context, r molReader, cleanAll bool, ageThreshold time.Duration, excludeTypes []types.IssueType) ([]*types.Issue, error) {
+// findAbandonedWisps returns the age-reclaimable wisps and, separately, how
+// many candidates a protected label held back. The count is returned rather
+// than logged here so the caller can report a protection that FIRED: a sweep
+// that kept a merge request back and a sweep that had none to keep back print
+// the same thing otherwise.
+func findAbandonedWisps(ctx context.Context, r molReader, cleanAll bool, ageThreshold time.Duration, excludeTypes []types.IssueType) ([]*types.Issue, int, error) {
 	ephemeralFlag := true
 	filter := types.IssueFilter{
 		Ephemeral:    &ephemeralFlag,
@@ -830,12 +854,12 @@ func findAbandonedWisps(ctx context.Context, r molReader, cleanAll bool, ageThre
 	}
 	issues, err := r.SearchIssues(ctx, "", filter)
 	if err != nil {
-		return nil, err
+		return nil, 0, err
 	}
 
 	blocked, err := r.GetBlockedIssues(ctx, types.WorkFilter{})
 	if err != nil {
-		return nil, fmt.Errorf("determining blocked wisps for age GC: %w", err)
+		return nil, 0, fmt.Errorf("determining blocked wisps for age GC: %w", err)
 	}
 	blockedSet := make(map[string]bool, len(blocked))
 	for _, b := range blocked {
@@ -844,10 +868,15 @@ func findAbandonedWisps(ctx context.Context, r molReader, cleanAll bool, ageThre
 
 	protectedStatuses, err := protectedWispStatuses(ctx, r)
 	if err != nil {
-		return nil, err
+		return nil, 0, err
 	}
+	protectedLabels := resolveGCProtectedLabels(ctx, r)
 
 	now := time.Now()
+	// Counted as a SET, not a counter: the cascade pass below re-examines
+	// wisps the first pass already ruled on, and a protection reported twice
+	// for one bead reads as two records saved.
+	labelProtected := make(map[string]bool)
 	var abandoned []*types.Issue
 	for _, issue := range issues {
 		if r.IsInfraTypeCtx(ctx, issue.IssueType) {
@@ -856,7 +885,14 @@ func findAbandonedWisps(ctx context.Context, r molReader, cleanAll bool, ageThre
 		if issue.Status == types.StatusClosed && !cleanAll {
 			continue
 		}
-		if isProtectedWisp(issue, blockedSet, protectedStatuses) {
+		if isProtectedWisp(issue, blockedSet, protectedStatuses, protectedLabels) {
+			// Counted only for the ones the age window would otherwise have
+			// taken: a label-protected wisp younger than the threshold was
+			// never a candidate, and reporting it would make the protection
+			// look like it fired on every run.
+			if protectedLabels.Protects(issue) && now.Sub(issue.UpdatedAt) > ageThreshold {
+				labelProtected[issue.ID] = true
+			}
 			continue
 		}
 		if now.Sub(issue.UpdatedAt) > ageThreshold {
@@ -865,7 +901,7 @@ func findAbandonedWisps(ctx context.Context, r molReader, cleanAll bool, ageThre
 	}
 
 	if len(abandoned) == 0 {
-		return abandoned, nil
+		return abandoned, len(labelProtected), nil
 	}
 
 	parentIDs := make([]string, len(abandoned))
@@ -891,14 +927,92 @@ func findAbandonedWisps(ctx context.Context, r molReader, cleanAll bool, ageThre
 				if r.IsInfraTypeCtx(ctx, child.IssueType) {
 					continue
 				}
-				if isProtectedWisp(child, blockedSet, protectedStatuses) {
+				if isProtectedWisp(child, blockedSet, protectedStatuses, protectedLabels) {
+					if protectedLabels.Protects(child) {
+						labelProtected[child.ID] = true
+					}
 					continue
 				}
 				abandoned = append(abandoned, child)
 			}
 		}
 	}
-	return abandoned, cascadeErr
+	return abandoned, len(labelProtected), cascadeErr
+}
+
+// closedWispPurgeSkips counts the closed wisps a purge held back, by reason.
+type closedWispPurgeSkips struct {
+	// Pinned and Infra are the two protections this command already had.
+	Pinned int
+	Infra  int
+	// LabelProtected counts wisps carrying one of the workspace's GC-protected
+	// labels. Unlike the other two it is not a property of the wisp's plane or
+	// of a flag someone set on it: it is the class of record for which CLOSED
+	// means "the only copy of what did not happen" (bd-czf).
+	LabelProtected int
+	// Labels names the protection that fired, so the message can say which
+	// setting kept the beads back.
+	Labels workapi.GCProtectedLabels
+}
+
+// filterClosedWispPurgeCandidates keeps the closed wisps a purge may delete.
+//
+// It is ONE function for both routes deliberately. The direct store path and
+// the proxied-server path each had their own copy of this loop, and a
+// protection added to one of them would have left `bd mol wisp gc --closed
+// --force` destructive on the other while reading as fixed — which is the
+// failure mode the protection is for.
+func filterClosedWispPurgeCandidates(ctx context.Context, r molReader, closed []*types.Issue) ([]*types.Issue, closedWispPurgeSkips) {
+	skips := closedWispPurgeSkips{Labels: resolveGCProtectedLabels(ctx, r)}
+	kept := make([]*types.Issue, 0, len(closed))
+	for _, issue := range closed {
+		switch {
+		case skips.Labels.Protects(issue):
+			skips.LabelProtected++
+		case issue.Pinned:
+			skips.Pinned++
+		case r.IsInfraTypeCtx(ctx, issue.IssueType):
+			skips.Infra++
+		default:
+			kept = append(kept, issue)
+		}
+	}
+	return kept, skips
+}
+
+// reportClosedWispPurgeSkips prints what the purge held back. The
+// label-protected line goes to stderr rather than stdout so it survives
+// --json, because it is the line that distinguishes "your merge request was
+// kept" from "there was nothing to keep".
+func reportClosedWispPurgeSkips(skips closedWispPurgeSkips) {
+	if skips.LabelProtected > 0 {
+		labels := skips.Labels.Labels()
+		sort.Strings(labels)
+		WarnError("kept %d label-protected wisp(s) (%s); delete one deliberately with `bd delete <id>`",
+			skips.LabelProtected, strings.Join(labels, ", "))
+	}
+	if jsonOutput {
+		return
+	}
+	if skips.Pinned > 0 {
+		fmt.Printf("Skipping %d pinned issue(s) (protected from cleanup)\n", skips.Pinned)
+	}
+	if skips.Infra > 0 {
+		fmt.Printf("Skipping %d configured infra issue(s) protected from GC\n", skips.Infra)
+	}
+}
+
+// reportWispLabelProtected says when the age sweep held a durable record back.
+// Same reason as reportClosedWispPurgeSkips: without it, "kept your merge
+// request" and "found nothing" are the same output.
+func reportWispLabelProtected(count int, protected workapi.GCProtectedLabels) {
+	if count == 0 {
+		return
+	}
+	labels := protected.Labels()
+	sort.Strings(labels)
+	WarnError("kept %d label-protected wisp(s) (%s); delete one deliberately with `bd delete <id>`",
+		count, strings.Join(labels, ", "))
 }
 
 func runWispPurgeClosed(ctx context.Context, dryRun bool, force bool, excludeTypes []types.IssueType) error {
@@ -916,29 +1030,8 @@ func runWispPurgeClosed(ctx context.Context, dryRun bool, force bool, excludeTyp
 		return HandleError("listing closed wisps: %v", err)
 	}
 
-	// Filter out pinned and infra issues (protected from cleanup)
-	pinnedCount := 0
-	infraCount := 0
-	filtered := make([]*types.Issue, 0, len(closedIssues))
-	for _, issue := range closedIssues {
-		if issue.Pinned {
-			pinnedCount++
-			continue
-		}
-		if store.IsInfraTypeCtx(ctx, issue.IssueType) {
-			infraCount++
-			continue
-		}
-		filtered = append(filtered, issue)
-	}
-	closedIssues = filtered
-
-	if pinnedCount > 0 && !jsonOutput {
-		fmt.Printf("Skipping %d pinned issue(s) (protected from cleanup)\n", pinnedCount)
-	}
-	if infraCount > 0 && !jsonOutput {
-		fmt.Printf("Skipping %d configured infra issue(s) protected from GC\n", infraCount)
-	}
+	closedIssues, skips := filterClosedWispPurgeCandidates(ctx, store, closedIssues)
+	reportClosedWispPurgeSkips(skips)
 
 	if len(closedIssues) == 0 {
 		if jsonOutput {

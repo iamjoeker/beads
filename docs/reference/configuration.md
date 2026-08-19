@@ -274,6 +274,7 @@ These are written to the Dolt database by `bd config set` and have no env var ov
 | `status.custom` | Custom statuses with optional behavior categories (see [below](#custom-statuses-and-types)) |
 | `types.custom` | Comma-separated list of custom issue types |
 | `types.infra` | Infra types routed to the wisps table instead of the versioned issues table |
+| `gc.protected_labels` | Labels that hold a bead back from every bulk deletion (see [below](#protecting-beads-from-bulk-deletion)) |
 | `compact_tier1_days`, `compact_tier2_days` | Age thresholds in days for `bd admin compact` tier eligibility (defaults `30` and `90`) |
 | `issue_id_mode` | `hash` (default) \| `counter` (see [below](#sequential-counter-ids)) |
 | `min_hash_length`, `max_hash_length` | Adaptive ID bounds (defaults `3` and `8`) |
@@ -307,6 +308,30 @@ bd config set types.custom "agent,molecule,event"
 ```
 
 Use `bd statuses` and `bd types` to list everything configured.
+
+### Protecting Beads from Bulk Deletion
+
+`bd purge`, `bd gc` and `bd mol wisp gc` select what to delete by status: closed beads of one tier. For most beads that is right — a closed patrol step is finished with. For some it is exactly backwards. A merge-request bead closed *without* merging is the only record that the work never landed, and a message bead is closed by being successfully delivered; both are records *about* work rather than work itself, and both are destroyed by the sweep that reads them as done.
+
+Beads carrying a protected label are held back by every bulk deletion — at any age, in any status, with or without `--force`:
+
+```bash
+bd config set gc.protected_labels "gt:merge-request,gt:message"
+```
+
+The default protects `gt:merge-request` and `gt:message`. Setting the key replaces that list rather than adding to it, so name every label you want protected. An empty value is treated as unset.
+
+```console
+$ bd mol wisp gc --closed --force
+kept 1 label-protected wisp(s) (gt:merge-request); delete one deliberately with `bd delete <id>`
+✓ Deleted 12 issue(s)
+```
+
+Protection is by label rather than status because a status is not durable: anything that closes a bead returns it to the delete set, while a label survives the close. To delete a protected bead, name it to `bd delete <id>` — the protection covers bulk sweeps, not deliberate single deletions.
+
+<Warning>
+Wisps live in tables the version-control plane ignores, so a deleted wisp has no history and no backup to restore from. Keep durable records — merge requests, decisions, incident notes — on regular beads rather than wisps.
+</Warning>
 
 ### Sequential Counter IDs
 

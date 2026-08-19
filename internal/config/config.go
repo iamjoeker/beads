@@ -1094,6 +1094,15 @@ func GetInfraTypesFromYAML() []string {
 	return getConfigList("types.infra")
 }
 
+// GetGCProtectedLabelsFromYAML retrieves the labels that hold a bead back from
+// every bulk deletion (`bd gc`, `bd purge`, `bd prune`, `bd mol wisp gc`) from
+// config.yaml. Returns nil if none are configured there, in which case the
+// caller layers the stored setting and the built-in defaults
+// (workapi.ResolveGCProtectedLabels).
+func GetGCProtectedLabelsFromYAML() []string {
+	return getConfigList("gc.protected_labels")
+}
+
 // GetCustomStatusesFromYAML retrieves custom statuses from config.yaml.
 // This is used as a fallback when the database doesn't have status.custom set yet
 // or when the database connection is temporarily unavailable.

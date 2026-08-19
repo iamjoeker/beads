@@ -49,10 +49,15 @@ var purgeCmd = &cobra.Command{
 	Long: `Permanently delete closed ephemeral beads and their associated data.
 
 Closed ephemeral beads (wisps, transient molecules) accumulate rapidly and
-have no value once closed. This command removes them to reclaim storage.
+most of them have no value once closed. This command removes those to reclaim
+storage.
 
 Deletes: issues, dependencies, labels, events, and comments for matching beads.
-Skips: pinned beads (protected).
+Skips: pinned beads, and beads carrying a GC-protected label
+(` + "`gc.protected_labels`" + `, default: merge-request and message records).
+Those are held back at any age and with --force: closure is a normal part of
+their life and the bead is the only record of what it describes. Delete one
+deliberately with ` + "`bd delete <id>`" + `.
 
 To delete closed non-ephemeral beads (regular tasks, features, bugs, etc.)
 use ` + "`bd prune`" + ` instead.
@@ -162,6 +167,7 @@ func runPurgeOrPrune(cmd *cobra.Command, scope purgeScope) error {
 	}
 
 	warnSweepDefenseSkips(result.Skipped)
+	warnSweepLabelProtected(result.Skipped)
 
 	switch {
 	case result.Swept == 0:
@@ -194,6 +200,27 @@ func warnSweepDefenseSkips(skips issueops.SweepSkips) {
 	)
 }
 
+// warnSweepLabelProtected reports the protection that no request field
+// overrides. It is announced on EVERY outcome — including the empty one, which
+// is why it lives beside the role call rather than in the four emit branches:
+// "nothing to purge" and "nothing to purge except the merge-request record you
+// came here to clean up" are the same sentence otherwise. stderr so it survives
+// --json.
+func warnSweepLabelProtected(skips issueops.SweepSkips) {
+	if skips.LabelProtected == 0 {
+		return
+	}
+	WarnError("kept %d label-protected bead(s) (see `gc.protected_labels`); delete one deliberately with `bd delete <id>`",
+		skips.LabelProtected)
+}
+
+// addLabelProtectedStats attaches the protection count to a --json payload.
+func addLabelProtectedStats(stats map[string]interface{}, result issueops.SweepResult) {
+	if result.Skipped.LabelProtected > 0 {
+		stats["label_protected_skipped"] = result.Skipped.LabelProtected
+	}
+}
+
 // addReferenceStats attaches the reference-skip members to a --json payload.
 // `bd prune` publishes them whether or not the protection was asked for, which
 // is the shipped shape; `bd purge` never does.
@@ -214,6 +241,7 @@ func emitSweepEmpty(scope purgeScope, olderThan, pattern string, result issueops
 			scope.countKey: 0,
 			"message":      fmt.Sprintf("No %ss to %s", scope.subjectNoun, scope.cmdName),
 		}
+		addLabelProtectedStats(stats, result)
 		addReferenceStats(scope, stats, result)
 		return outputJSON(stats)
 	}
@@ -225,6 +253,10 @@ func emitSweepEmpty(scope purgeScope, olderThan, pattern string, result issueops
 		msg += fmt.Sprintf(" (matching %q)", pattern)
 	}
 	fmt.Println(msg)
+	if result.Skipped.LabelProtected > 0 {
+		fmt.Println(ui.MutedStyle.Render(fmt.Sprintf(
+			"  (%d closed bead(s) protected by gc.protected_labels)", result.Skipped.LabelProtected)))
+	}
 	if result.Skipped.Referenced > 0 {
 		fmt.Println(ui.MutedStyle.Render(fmt.Sprintf(
 			"  (%d closed bead(s) protected by open-bead references — use --ignore-references to override)",
@@ -245,6 +277,7 @@ func emitSweepDryRun(scope purgeScope, result issueops.SweepResult) error {
 		if result.Skipped.Pinned > 0 {
 			stats["pinned_skipped"] = result.Skipped.Pinned
 		}
+		addLabelProtectedStats(stats, result)
 		addReferenceStats(scope, stats, result)
 		return outputJSON(stats)
 	}
@@ -252,6 +285,9 @@ func emitSweepDryRun(scope purgeScope, result issueops.SweepResult) error {
 	fmt.Printf("  Dependencies: %d\n", result.Dependencies)
 	fmt.Printf("  Labels:       %d\n", result.Labels)
 	fmt.Printf("  Events:       %d\n", result.Events)
+	if result.Skipped.LabelProtected > 0 {
+		fmt.Printf("  Label-protected (skipped): %d\n", result.Skipped.LabelProtected)
+	}
 	if result.Skipped.Pinned > 0 {
 		fmt.Printf("  Pinned (skipped): %d\n", result.Skipped.Pinned)
 	}
@@ -277,6 +313,9 @@ func emitSweepDryRun(scope purgeScope, result issueops.SweepResult) error {
 
 func emitSweepConfirm(scope purgeScope, olderThan, pattern string, result issueops.SweepResult) error {
 	fmt.Printf("Found %d %s(s) to %s\n", result.Swept, scope.subjectNoun, scope.cmdName)
+	if result.Skipped.LabelProtected > 0 {
+		fmt.Printf("Skipping %d label-protected bead(s)\n", result.Skipped.LabelProtected)
+	}
 	if result.Skipped.Pinned > 0 {
 		fmt.Printf("Skipping %d pinned bead(s)\n", result.Skipped.Pinned)
 	}
@@ -306,6 +345,7 @@ func emitSweepResult(scope purgeScope, result issueops.SweepResult) error {
 		if result.Skipped.Pinned > 0 {
 			stats["pinned_skipped"] = result.Skipped.Pinned
 		}
+		addLabelProtectedStats(stats, result)
 		addReferenceStats(scope, stats, result)
 		return outputJSON(stats)
 	}
@@ -313,6 +353,9 @@ func emitSweepResult(scope purgeScope, result issueops.SweepResult) error {
 	fmt.Printf("  Dependencies removed: %d\n", result.Dependencies)
 	fmt.Printf("  Labels removed:       %d\n", result.Labels)
 	fmt.Printf("  Events removed:       %d\n", result.Events)
+	if result.Skipped.LabelProtected > 0 {
+		fmt.Printf("  Label-protected (skipped): %d\n", result.Skipped.LabelProtected)
+	}
 	if result.Skipped.Pinned > 0 {
 		fmt.Printf("  Pinned (skipped):     %d\n", result.Skipped.Pinned)
 	}

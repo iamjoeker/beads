@@ -120,10 +120,18 @@ type SweepRequest struct {
 // held back, so the buckets and SweepResult.Swept describe one candidate set.
 //
 // They are separate counters rather than one number because they mean
-// different things to the person reading them: Pinned and Referenced are
-// PROTECTIONS a user can override or re-express, and the other three are the
-// sweep declining to trust its own input.
+// different things to the person reading them: LabelProtected, Pinned and
+// Referenced are PROTECTIONS a user can override or re-express, and the other
+// three are the sweep declining to trust its own input.
 type SweepSkips struct {
+	// LabelProtected counts candidates held back because they carry one of the
+	// workspace's GC-protected labels (workapi.ConfigKeyGCProtectedLabels,
+	// defaulting to merge-request and message records). Like Pinned, NO
+	// request field overrides it: the classes it names are closed as a normal
+	// part of their life and are the sole record of what they describe, so
+	// "closed" is the trigger for their deletion rather than evidence it is
+	// safe. A caller that means to delete one names it to `bd delete`.
+	LabelProtected int
 	// Pinned counts candidates protected by the pinned flag. Pinning is the
 	// workspace's own "never sweep this", and no request field overrides it —
 	// a caller that wants a pinned row gone unpins it first.

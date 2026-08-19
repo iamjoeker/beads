@@ -92,9 +92,9 @@ func MatchesSweepPattern(pattern, id string) bool {
 	return err == nil && ok
 }
 
-// FilterSweepCandidates applies the pattern and then the two protections that
-// hold a candidate back before any reference scan: the pinned flag, and the
-// closed_at recheck.
+// FilterSweepCandidates applies the pattern and then the three protections
+// that hold a candidate back before any reference scan: a protected label, the
+// pinned flag, and the closed_at recheck.
 //
 // THE ORDER IS PART OF THE ANSWER, and issueops.Sweeper.Sweep states it: the
 // pattern narrows first, so a pinned row the pattern excluded is not counted
@@ -105,7 +105,13 @@ func MatchesSweepPattern(pattern, id string) bool {
 //
 // cutoff is the request's ClosedBefore; a nil cutoff performs the presence
 // checks and skips the comparison.
-func FilterSweepCandidates(issues []*types.Issue, pattern string, cutoff *time.Time) ([]*types.Issue, issueops.SweepSkips) {
+//
+// protected is the workspace's GC-protected label set (GCProtectedLabels). It
+// is a PARAMETER rather than a package default so the caller's failure to
+// resolve it is a compile error instead of a silently unprotected sweep;
+// resolve it with ResolveGCProtectedLabels, which falls back to the built-in
+// defaults rather than to an empty set.
+func FilterSweepCandidates(issues []*types.Issue, pattern string, cutoff *time.Time, protected GCProtectedLabels) ([]*types.Issue, issueops.SweepSkips) {
 	kept := make([]*types.Issue, 0, len(issues))
 	var skips issueops.SweepSkips
 
@@ -118,6 +124,8 @@ func FilterSweepCandidates(issues []*types.Issue, pattern string, cutoff *time.T
 			continue
 		}
 		switch {
+		case protected.Protects(issue):
+			skips.LabelProtected++
 		case issue.Pinned:
 			skips.Pinned++
 		case issue.Status != types.StatusClosed:

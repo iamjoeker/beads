@@ -36,7 +36,8 @@ func SweepInTx(ctx context.Context, tx *sql.Tx, req publicops.SweepRequest) (pub
 		return publicops.SweepResult{}, fmt.Errorf("listing sweep candidates: %w", err)
 	}
 
-	kept, skips := workapi.FilterSweepCandidates(candidates, req.IDPattern, req.ClosedBefore)
+	kept, skips := workapi.FilterSweepCandidates(candidates, req.IDPattern, req.ClosedBefore,
+		ResolveGCProtectedLabelsInTx(ctx, tx))
 	result.Skipped = skips
 
 	if req.ProtectReferenced {

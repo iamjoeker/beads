@@ -9,6 +9,7 @@ import (
 	"github.com/steveyegge/beads/internal/config"
 	"github.com/steveyegge/beads/internal/storage/domain"
 	"github.com/steveyegge/beads/internal/types"
+	"github.com/steveyegge/beads/internal/workapi"
 )
 
 // ParseStatusFallback converts legacy []string status names (from YAML) to []CustomStatus.
@@ -463,6 +464,24 @@ func SyncConfigTables(ctx context.Context, tx DBTX, key, value string) (string, 
 		return "custom_types", nil
 	}
 	return "", nil
+}
+
+// ResolveGCProtectedLabelsInTx reads the workspace's GC-protected label set
+// from the database, falling back to config.yaml then to the built-in defaults
+// (workapi.ResolveGCProtectedLabels does the layering).
+//
+// A FAILED READ FALLS BACK RATHER THAN FAILING THE SWEEP, and it falls back to
+// a set that protects: the alternative to "protect the default classes" here
+// would be "delete them because the settings table could not be read", which
+// is the shape of loss the protection exists to prevent. The read happens on
+// the SAME transaction as the candidate query, so a sweep decides against the
+// snapshot it is deleting from.
+func ResolveGCProtectedLabelsInTx(ctx context.Context, tx DBTX) workapi.GCProtectedLabels {
+	stored, err := GetConfigInTx(ctx, tx, workapi.ConfigKeyGCProtectedLabels)
+	if err != nil {
+		stored = ""
+	}
+	return workapi.ResolveGCProtectedLabels(stored, config.GetGCProtectedLabelsFromYAML())
 }
 
 // ResolveInfraTypesInTx reads infrastructure types from the database,
