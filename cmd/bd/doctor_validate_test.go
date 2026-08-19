@@ -6,6 +6,7 @@ import (
 	"context"
 	"os"
 	"path/filepath"
+	"slices"
 	"testing"
 
 	"github.com/steveyegge/beads/internal/storage/dolt"
@@ -57,8 +58,23 @@ func TestValidateCheck_AllClean(t *testing.T) {
 			t.Errorf("%s: status = %q, want %q (message: %s)", cr.check.Name, cr.check.Status, statusOK, cr.check.Message)
 		}
 	}
-	if len(checks) != 4 {
-		t.Errorf("Expected 4 checks, got %d", len(checks))
+	// Name the checks rather than counting them: the count assertion said 4
+	// while collectValidateChecks had unconditionally returned 5 since
+	// "Cross-Table Duplicates" was added, and nothing caught it because this
+	// test only runs with a Dolt server (bd-2k4).
+	want := []string{
+		"Cross-Table Duplicates",
+		"Duplicate Issues",
+		"Orphaned Dependencies",
+		"Test Pollution",
+		"Git Conflicts",
+	}
+	got := make([]string, 0, len(checks))
+	for _, cr := range checks {
+		got = append(got, cr.check.Name)
+	}
+	if !slices.Equal(got, want) {
+		t.Errorf("checks = %v, want %v", got, want)
 	}
 }
 

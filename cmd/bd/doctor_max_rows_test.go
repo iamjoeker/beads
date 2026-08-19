@@ -59,7 +59,10 @@ func TestDoctorConventionsMaxRows_EnvOnly_Exits2(t *testing.T) {
 	}
 
 	// BEADS_MAX_ROWS=3 with 6 open issues → cap fires → exit 2.
-	out, code := bdRunRaw(t, bdBin, tmpDir, []string{"BEADS_MAX_ROWS=3"}, "doctor", "--check=conventions")
+	// BEADS_TEST_SERVER=1 because bdEnv strips every BEADS_* var from the
+	// child, and without it dolt.New's database-name firewall refuses the
+	// testdb_* database newTestStoreIsolatedDB just created (bd-2k4).
+	out, code := bdRunRaw(t, bdBin, tmpDir, []string{"BEADS_MAX_ROWS=3", "BEADS_TEST_SERVER=1"}, "doctor", "--check=conventions")
 	if code != 2 {
 		t.Fatalf("be-pc8c: expected exit 2 (cap exceeded), got %d\n%s", code, out)
 	}
@@ -97,7 +100,7 @@ func TestDoctorPollutionMaxRows_EnvOnly_Exits2(t *testing.T) {
 		}
 	}
 
-	out, code := bdRunRaw(t, bdBin, tmpDir, []string{"BEADS_MAX_ROWS=3"}, "doctor", "--check=pollution")
+	out, code := bdRunRaw(t, bdBin, tmpDir, []string{"BEADS_MAX_ROWS=3", "BEADS_TEST_SERVER=1"}, "doctor", "--check=pollution")
 	if code != 2 {
 		t.Fatalf("be-pc8c: expected exit 2 (cap exceeded), got %d\n%s", code, out)
 	}

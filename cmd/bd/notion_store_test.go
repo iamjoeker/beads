@@ -12,7 +12,11 @@ func TestGetNotionConfigReadsDBPathWhenStoreUnset(t *testing.T) {
 	saveAndRestoreGlobals(t)
 	tempDir := t.TempDir()
 	testDBPath := filepath.Join(tempDir, "test.db")
-	testStore := newTestStore(t, testDBPath)
+	// Isolated database, not the branch-per-test shared one: getNotionConfig
+	// below reopens the store from dbPath through metadata.json, which lands
+	// on the shared database's main branch where the SetConfig calls above
+	// are not visible (bd-2k4).
+	testStore := newTestStoreIsolatedDB(t, testDBPath, "test")
 	defer testStore.Close()
 
 	ctx := context.Background()

@@ -55,6 +55,7 @@ beads_test_env_enter() {
     unset BD_NO_DB
     unset BD_NO_DAEMON
     unset BD_ACTOR
+    unset BD_DOLT_AUTO_COMMIT
     unset BEADS_ACTOR
     unset GT_ROOT
     unset BEADS_DOLT_SHARED_SERVER

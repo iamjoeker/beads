@@ -77,9 +77,16 @@ func countEphemeral(t *testing.T, ctx context.Context, s *dolt.DoltStore) int {
 // globals around a test, since runWispCreate reads them directly.
 func withWispTestGlobals(t *testing.T, s *dolt.DoltStore, ctx context.Context) {
 	t.Helper()
-	oldStore, oldCtx, oldActor := store, rootCtx, actor
-	t.Cleanup(func() { store, rootCtx, actor = oldStore, oldCtx, oldActor })
-	store, rootCtx, actor = s, ctx, "test"
+	oldStore, oldCtx, oldActor, oldJSON := store, rootCtx, actor, jsonOutput
+	t.Cleanup(func() { store, rootCtx, actor, jsonOutput = oldStore, oldCtx, oldActor, oldJSON })
+	// jsonOutput too, and pinned OFF: HandleErrorWithHint switches shape on
+	// it, so a test asserting on human-readable stderr is asserting on
+	// whichever earlier test in the package last set the global. Something
+	// ahead of pour_wisp_var_validation_test.go leaves it true, which is how
+	// TestPour/TestWispMissingVarHintUnchanged passed alone and failed in
+	// every full-package run (bd-2k4). Callers that want JSON set it after
+	// this returns.
+	store, rootCtx, actor, jsonOutput = s, ctx, "test", false
 }
 
 // TestWispCreateMaterializesChildDAG is the regression test for GH#3872.

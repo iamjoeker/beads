@@ -121,12 +121,19 @@ reachable and a suite with nothing to report look identical. It needs `dolt`
 on `PATH`, a reachable Docker daemon, and the Dolt image cached locally
 (`scripts/ci/pull-dolt-image.sh`).
 
-Tests known to fail here are listed, with the reason, in
-`scripts/ci/cmd-bd-dolt-known-red.txt`; the wrapper skips them.
+`scripts/ci/cmd-bd-dolt-known-red.txt` lists tests the wrapper skips because
+they are known to fail here. **It is empty** — bd-2k4 drained the last twelve,
+so the two jobs below now gate the whole package with nothing excused. Adding
+an entry is a regression: it needs a bead and a reason on the line.
 `scripts/ci/cmd-bd-dolt-known-red.sh check` fails when an entry stops naming a
 real test, so the file cannot rot into a list of tests that no longer exist.
-Deleting an entry by fixing its test is the intended direction; adding one
-needs a bead and a reason.
+
+Both CI jobs shard `./cmd/bd` by test name, so neither ever runs the package
+as one process. `scripts/ci/test-cmd-bd-dolt.sh` with no `-run` does, and is
+the stricter check for that reason: it is what catches order-dependence
+between tests the shards happen to separate. Two of bd-2k4's twelve — a pair
+asserting on human-readable stderr while an earlier test left the `jsonOutput`
+global set — were only ever red that way.
 
 CI runs this surface in two places, both against the container: `Test (cmd/bd
 init under real Dolt)` on every PR covers the `TestInit` family, and `Test
