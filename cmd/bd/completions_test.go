@@ -267,8 +267,12 @@ func TestIssueIDCompletion_UsesWorktreeFallbackWhenStoreNil(t *testing.T) {
 		_ = cleanupCmd.Run()
 	})
 
+	// Isolated database, not the branch-per-test shared one: the assertion
+	// below reopens the store by path through metadata.json, which lands on
+	// the shared database's main branch where this test's writes are not
+	// visible (bd-2k4).
 	testDB := filepath.Join(mainRepoDir, ".beads", "beads.db")
-	testStore := newTestStoreWithPrefix(t, testDB, "wt")
+	testStore := newTestStoreIsolatedDB(t, testDB, "wt")
 	if err := testStore.CreateIssue(ctx, &types.Issue{
 		ID:        "wt-abc1",
 		Title:     "Worktree completion target",

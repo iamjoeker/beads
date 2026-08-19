@@ -222,6 +222,21 @@ func snapshotReadonlyTree(t *testing.T, root string) readonlyTreeSnapshot {
 		if err != nil {
 			return err
 		}
+		// The cooperative workspace fence is not workspace state. Every bd
+		// command takes it, readers included — a SHARED holder is precisely
+		// how a reader tells a maintenance operation not to yank the
+		// database out from under it — and taking it means creating the
+		// content-free sibling lock file if no one has yet. Excluding it
+		// keeps the contract on the things strict readonly actually
+		// promises not to touch: data, config, metadata, the version
+		// witness, server artifacts.
+		//
+		// Narrowly the fence file ONLY: the `.info` sidecar is written just
+		// by EXCLUSIVE acquisition, which strict readonly must never do, so
+		// it stays snapshotted and still trips this canary (bd-2k4).
+		if strings.HasSuffix(rel, ".gate.lock") {
+			return nil
+		}
 		item := readonlyTreeEntry{Mode: info.Mode()}
 		switch {
 		case info.Mode().IsRegular():
@@ -291,8 +306,15 @@ func TestConfigValidateReadOnlyIsHermetic(t *testing.T) {
 	repoDir := t.TempDir()
 	beadsDir := filepath.Join(repoDir, ".beads")
 	doltPath := filepath.Join(beadsDir, "dolt")
-	if err := os.MkdirAll(doltPath, 0o755); err != nil {
-		t.Fatalf("create isolated Dolt path: %v", err)
+	// Create .beads but NOT .beads/dolt. A server-mode workspace carrying a
+	// local dolt root and no .local_version witness is exactly the shape
+	// guardLegacyUpgradeWorkspace refuses, and the refusal fired before the
+	// hermeticity contract was ever exercised — while this test's own
+	// assertions forbid creating the witness that would clear it. cfg.Path is
+	// only a resolution hint in server mode, so the directory is not needed
+	// (bd-2k4).
+	if err := os.MkdirAll(beadsDir, 0o755); err != nil {
+		t.Fatalf("create isolated beads dir: %v", err)
 	}
 	database := fmt.Sprintf("readonly_canary_%d_%d", os.Getpid(), time.Now().UnixNano())
 	cfg := &configfile.Config{

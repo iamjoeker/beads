@@ -199,6 +199,18 @@ func testMainInner(m *testing.M) int {
 		}
 	}()
 
+	// Same reason for BD_DOLT_AUTO_COMMIT: Gas Town agent shells export it,
+	// and it outranks the config.yaml value that
+	// TestPrepareSelectedCommandContext_RebindsTargetConfig asserts was
+	// rebound from the target workspace (bd-2k4).
+	origDoltAutoCommit := os.Getenv("BD_DOLT_AUTO_COMMIT")
+	os.Unsetenv("BD_DOLT_AUTO_COMMIT")
+	defer func() {
+		if origDoltAutoCommit != "" {
+			os.Setenv("BD_DOLT_AUTO_COMMIT", origDoltAutoCommit)
+		}
+	}()
+
 	// BD_BRANCH is no longer used (all writers operate on main with transactions).
 
 	// Start shared test Dolt server if the hook is registered (CGO builds).

@@ -12,6 +12,7 @@ import (
 	"testing"
 
 	"github.com/steveyegge/beads/internal/testutil"
+	"gopkg.in/yaml.v3"
 )
 
 func TestDoltRemoteAddPersistsSyncRemoteToSharedWorktreeConfig(t *testing.T) {
@@ -52,11 +53,47 @@ func TestDoltRemoteAddPersistsSyncRemoteToSharedWorktreeConfig(t *testing.T) {
 	if err != nil {
 		t.Fatalf("failed to read shared config.yaml: %v", err)
 	}
-	if !strings.Contains(string(content), `sync.remote: "`+remoteURL+`"`) {
-		t.Fatalf("expected shared config.yaml to contain sync.remote, got:\n%s", string(content))
+	// Read the value, don't match the text. updateYamlKey writes a dotted key
+	// flat when the document has no other mapping entries and nested once it
+	// does, so the shape here depends on whether `bd init` happened to write
+	// dolt.shared-server first. Both shapes read back identically; only the
+	// literal-string assertion could tell them apart (bd-2k4).
+	if got := yamlStringValue(t, content, "sync", "remote"); got != remoteURL {
+		t.Fatalf("shared config.yaml sync.remote = %q, want %q, in:\n%s", got, remoteURL, string(content))
 	}
 
 	if _, err := os.Stat(filepath.Join(worktreeDir, ".beads")); !os.IsNotExist(err) {
 		t.Fatalf("expected no worktree-local .beads directory after remote add, got err=%v", err)
 	}
+}
+
+// yamlStringValue resolves a dotted config key in a config.yaml document,
+// accepting either the flat form (`a.b: v`) or the nested one
+// (`a:\n  b: v`). Returns "" when the key is absent in both shapes.
+func yamlStringValue(t *testing.T, content []byte, parts ...string) string {
+	t.Helper()
+	var doc map[string]any
+	if err := yaml.Unmarshal(content, &doc); err != nil {
+		t.Fatalf("parse config.yaml: %v\n%s", err, string(content))
+	}
+	if flat, ok := doc[strings.Join(parts, ".")].(string); ok {
+		return flat
+	}
+	current := doc
+	for i, part := range parts {
+		value, ok := current[part]
+		if !ok {
+			return ""
+		}
+		if i == len(parts)-1 {
+			s, _ := value.(string)
+			return s
+		}
+		nested, ok := value.(map[string]any)
+		if !ok {
+			return ""
+		}
+		current = nested
+	}
+	return ""
 }

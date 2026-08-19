@@ -1,56 +1,33 @@
 # Known-red cmd/bd tests under a real Dolt server (bd-9jl).
 #
-# The CI jobs `Test (cmd/bd under real Dolt N/4)` and `Test (cmd/bd init under
-# real Dolt)` run ./cmd/bd with BEADS_TEST_ENV_RUN_DOLT=1, i.e. WITHOUT the
-# BEADS_TEST_SKIP=dolt that scripts/ci/lib/test-env.sh normally adds. That
-# surface had never been run by any CI job, so it rotted: bd-kbx found and
-# fixed 25 failures on pristine main. These entries are the residue. The jobs
-# skip exactly these so they can gate on the other ~2500 tests. Draining this
-# file is tracked as bd-2k4, which carries what is known about each group.
+# THIS FILE IS EMPTY, AND THAT IS THE POINT. The CI jobs `Test (cmd/bd under
+# real Dolt N/4)` and `Test (cmd/bd init under real Dolt)` run ./cmd/bd with
+# BEADS_TEST_ENV_RUN_DOLT=1, i.e. WITHOUT the BEADS_TEST_SKIP=dolt that
+# scripts/ci/lib/test-env.sh normally adds. That surface had never been run by
+# any CI job, so it rotted: bd-kbx fixed 25 failures on pristine main and this
+# list held the 12 that survived. bd-2k4 drained all 12, so the jobs now gate
+# the whole package with nothing excused.
 #
 # Rules:
-#   - Removing an entry, by fixing its test, is the intended direction. Adding
-#     one is a regression and needs a bead and a reason on the line.
+#   - Adding an entry is a regression. It needs a bead and a reason on the
+#     line, and it re-opens a hole in a gate that is currently whole.
 #   - Every entry must name a top-level test that still exists in ./cmd/bd;
 #     `scripts/ci/cmd-bd-dolt-known-red.sh check` enforces that, so a rename or
 #     deletion cannot leave a dead line here pretending to cover something.
-#   - The main job also re-runs these in a non-gating step, so an entry that has
-#     quietly started passing shows up in the log as ready to delete.
+#   - The main job also re-runs any entries in a non-gating step, so one that
+#     has quietly started passing shows up in the log as ready to delete.
 #
-# Provenance: measured on origin/main plus bd-kbx's two commits (d271d673e),
-# real Dolt container, `BEADS_TEST_ENV_RUN_DOLT=1 ./scripts/test.sh ./cmd/bd`
-# with no -skip: 12 failures out of 5508 tests, and this file is those 12.
-#
-# Measuring this again on a shared box: pin BEADS_TEST_BD_BINARY to a path
+# Measuring this surface on a shared box: pin BEADS_TEST_BD_BINARY to a path
 # outside /tmp/beads-*. A concurrent scripts/test.sh run deletes the prebuilt
 # bd out from under yours, and every subprocess test after that fails with an
 # empty CombinedOutput -- 17 bogus failures the first time it happened here.
 #
+#   BEADS_TEST_ENV_RUN_DOLT=1 BEADS_CMD_BD_REQUIRE_DOLT=1 \
+#     BEADS_TEST_BD_BINARY=/somewhere/stable/bd ./scripts/test.sh ./cmd/bd
+#
+# Note that the CI jobs shard by test name, so they never run ./cmd/bd as one
+# process. The command above is the stricter check: it is the one that catches
+# order-dependence between tests that CI's shards happen to separate. Two of
+# bd-2k4's twelve were only ever red that way.
+#
 # Format: one top-level Go test name per line. `#` starts a comment.
-
-# Red only when the Dolt container is up. The container publishes
-# BEADS_DOLT_PORT process-wide (testutil.ensureSharedContainer), so config
-# resolution reaches a live server in tests that expect not to find one.
-# Pre-existing before bd-kbx and untouched by it.
-TestConfigValidateReadOnlyIsHermetic
-TestDoctorConventionsMaxRows_EnvOnly_Exits2
-TestDoctorPollutionMaxRows_EnvOnly_Exits2
-TestDoltRemoteAddPersistsSyncRemoteToSharedWorktreeConfig
-TestGetNotionConfigReadsDBPathWhenStoreUnset
-TestIssueIDCompletion_UsesWorktreeFallbackWhenStoreNil
-TestPourMissingVarHintUnchanged
-TestValidateCheck_AllClean
-TestWispMissingVarHintUnchanged
-
-# Red under plain `./scripts/test.sh ./cmd/bd` too, with Dolt skipped, so not
-# caused by the server being real. They are here because this job runs the same
-# package. TestPrepareSelectedCommandContext_RebindsTargetConfig reads an
-# ambient BD_DOLT_AUTO_COMMIT that test-env.sh does not clear, so it may well
-# pass on a CI runner -- the non-gating report step will say so.
-TestPrepareSelectedCommandContext_RebindsTargetConfig
-TestInitNonInteractiveAutoExportDefaultOffAndOptIn
-
-# Passes in isolation, fails at the same point in every full-package run: an
-# in-package interference, not a flake. The test swaps the package-global
-# `store` and its five prefix subtests come back with zero completions.
-TestIssueIDCompletion
