@@ -254,6 +254,54 @@ and that `metadata.json` points at the right server and port. If a stale
 it can shadow the real database — confirm your real data lives on the server
 before removing the stale directory.
 
+If `bd` also prints a config parse warning, the cause is a damaged metadata
+file instead — see [Corrupt workspace metadata](#corrupt-workspace-metadata).
+
+### Corrupt workspace metadata
+
+**Symptom:** `bd` prints a config parse warning and then behaves as if the
+workspace were empty. `bd list` reports no issues and exits 0, even though the
+issues are still in the database:
+
+```text
+warning: failed to load beads config from /path/to/.beads: parsing config: unexpected end of JSON input
+No issues found.
+```
+
+**Cause:** `.beads/metadata.json` records which backend, mode, and database
+this workspace uses. When the file is truncated or otherwise invalid JSON — a
+partial write, an interrupted copy, a botched merge resolution — `bd` cannot
+identify the database and falls back to a default that has nothing in it.
+
+<Warning>
+`bd export` hits the same fallback: it writes an **empty** file and exits 0.
+Repair the metadata before trusting any export taken in this state.
+</Warning>
+
+**Fix — restore the file from git.** `bd init` commits `metadata.json`, so a
+good copy is usually one command away. This is non-destructive and keeps every
+issue ID:
+
+```bash
+git status .beads/metadata.json        # modified, so git has a baseline
+git checkout -- .beads/metadata.json
+bd list                                # issues are back
+```
+
+**Fix — rewrite the workspace metadata.** Use this only when git has no good
+copy. Copy the data directory aside first, and pass the prefix the workspace
+already used — read it off any issue ID (`acme-34s` → `acme`):
+
+```bash
+cp -r .beads/embeddeddolt .beads/embeddeddolt.backup   # embedded mode (default)
+bd init --reinit-local --prefix acme
+```
+
+Pass `--prefix` explicitly: without it, `bd init` derives one from the
+directory name and points the workspace at a different database, leaving the
+issues on disk but still invisible. Add `--server` too if this workspace ran
+in server mode, since the mode was recorded only in the file being rewritten.
+
 ### Configured server unreachable (auto-start disabled)
 
 **Symptom (server mode):** `bd` returns "database not found on Dolt server"
