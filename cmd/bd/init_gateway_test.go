@@ -303,33 +303,33 @@ func TestResolveInitProjectIDNonGatewayKeepsLocal(t *testing.T) {
 }
 
 // shouldConsultInitProjectID decides when init reads _project_id from the db.
-// Gateway always consults (the fix: it must reconcile even when a local id is
-// already set — a re-init or preseeded workspace). Non-gateway only consults to
-// adopt from a pre-existing shared/bootstrapped database when no local id exists.
+// Gateway always consults (it must reconcile even when a local id is already set
+// — a re-init or preseeded workspace). Non-gateway consults whenever it has no
+// local id of its own to keep, which is the bd-92m fix: the earlier gate also
+// required --database or bootstrapped-from-remote, so re-initializing over a
+// SURVIVING LOCAL database ignored the identity in it and minted a new one.
 func TestShouldConsultInitProjectID(t *testing.T) {
 	tests := []struct {
-		name                   string
-		gateway                bool
-		localID                string
-		database               string
-		bootstrappedFromRemote bool
-		want                   bool
+		name    string
+		gateway bool
+		localID string
+		want    bool
 	}{
-		{"gateway fresh, no local id", true, "", "", false, true},
-		{"gateway re-init with local id", true, "local", "", false, true},
-		{"gateway preseeded + database", true, "local", "hosteddb", false, true},
-		{"non-gateway fresh local-only", false, "", "", false, false},
-		{"non-gateway --database, no local id", false, "", "mydb", false, true},
-		{"non-gateway bootstrapped, no local id", false, "", "", true, true},
-		{"non-gateway --database but local id set", false, "local", "mydb", false, false},
-		{"non-gateway bootstrapped but local id set", false, "local", "", true, false},
+		{"gateway fresh, no local id", true, "", true},
+		{"gateway re-init with local id", true, "local", true},
+		// A fresh local-only init consults too, but the database it is about
+		// to create has no _project_id to adopt, so it still mints its own.
+		{"non-gateway fresh local-only", false, "", true},
+		// bd-92m: metadata.json lost or corrupt over a surviving database.
+		{"non-gateway re-init, no local id", false, "", true},
+		{"non-gateway local id set", false, "local", false},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			got := shouldConsultInitProjectID(tt.gateway, tt.localID, tt.database, tt.bootstrappedFromRemote)
+			got := shouldConsultInitProjectID(tt.gateway, tt.localID)
 			if got != tt.want {
-				t.Fatalf("shouldConsultInitProjectID(%v, %q, %q, %v) = %v, want %v",
-					tt.gateway, tt.localID, tt.database, tt.bootstrappedFromRemote, got, tt.want)
+				t.Fatalf("shouldConsultInitProjectID(%v, %q) = %v, want %v",
+					tt.gateway, tt.localID, got, tt.want)
 			}
 		})
 	}

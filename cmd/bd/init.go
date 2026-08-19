@@ -133,10 +133,10 @@ func resolveInitIssuePrefix(gateway bool, existing, dbName, prefix string, readE
 // the transient failure it is, so a flaky connection is not misdiagnosed as an
 // unprovisioned database.
 //
-// Non-gateway (legacy, unchanged): a non-empty localID is kept as-is (readErr
-// ignored, exactly as before); otherwise an adopted id wins (another rig already
-// chose it; minting a new one would break cross-project verification), else a
-// fresh identity is generated.
+// Non-gateway (unchanged): a non-empty localID is kept as-is (readErr ignored,
+// exactly as before); otherwise an adopted id wins (another rig — or this
+// workspace's own surviving database — already chose it; minting a new one
+// breaks cross-project verification), else a fresh identity is generated.
 func resolveInitProjectID(gateway bool, localID, adoptedFromDB, dbName string, readErr error) (value string, changed bool, err error) {
 	if gateway {
 		if adoptedFromDB != "" {
@@ -169,15 +169,23 @@ func resolveInitProjectID(gateway bool, localID, adoptedFromDB, dbName string, r
 // let init save a stale id and made every later normal open hard-fail PROJECT
 // IDENTITY MISMATCH.
 //
-// Non-gateway (legacy, unchanged): only when no local id exists yet and the
-// database is a pre-existing shared/bootstrapped one worth adopting from
-// (--database set or bootstrapped-from-remote). A fresh local-only init mints its
-// own id without a read.
-func shouldConsultInitProjectID(gateway bool, localID, database string, bootstrappedFromRemote bool) bool {
+// Non-gateway: whenever there is no local id to keep. The id comes from the
+// InitVerifier read init already took beside the prefix, so consulting costs
+// nothing, and a fresh local-only init still mints its own id — a database that
+// does not exist yet has no _project_id to adopt.
+//
+// The earlier, narrower gate also required --database or bootstrapped-from-
+// remote, which named the two ways ANOTHER project's identity could be sitting
+// in the database and missed the one that matters most: this workspace's own.
+// Re-initializing over a surviving local database — the documented repair for a
+// corrupt .beads/metadata.json — then ignored the identity in it and minted a
+// new one, so every later write command failed the identity check against the
+// database's original id (bd-92m).
+func shouldConsultInitProjectID(gateway bool, localID string) bool {
 	if gateway {
 		return true
 	}
-	return localID == "" && (database != "" || bootstrappedFromRemote)
+	return localID == ""
 }
 
 // shouldWriteProjectIDLocally reports whether init should write _project_id back
@@ -1623,16 +1631,19 @@ Non-interactive mode (--non-interactive or BD_NON_INTERACTIVE=1):
 			// detect cross-project leakage.
 			//
 			// Consult the database _project_id and adopt it when:
-			//   - --database is set and the database already exists on a
-			//     shared remote Dolt server (GH#2922), or
-			//   - we just bootstrapped from a remote whose Dolt history
-			//     already carried a _project_id, or
+			//   - this workspace has no local id of its own to keep, whether
+			//     because the database is a pre-existing shared one (GH#2922),
+			//     because we just bootstrapped from a remote whose Dolt history
+			//     already carried a _project_id, or because metadata.json was
+			//     lost or corrupt and is being written fresh over a surviving
+			//     local database (bd-92m), or
 			//   - we are connected to an authenticating gateway server, whose
 			//     database identity is provisioned server-side.
-			// In all cases another rig — or the hosted server — has already
-			// chosen an identity; minting a new one and writing it back would
-			// overwrite the source identity and cause cross-project verification
-			// to fail on subsequent pulls. In gateway mode bd refuses to mint one
+			// In all cases the database — another rig's, this workspace's own
+			// survivor, or the hosted server's — has already chosen an identity;
+			// minting a new one and writing it back would overwrite the source
+			// identity and cause cross-project verification to fail on
+			// subsequent pulls. In gateway mode bd refuses to mint one
 			// at all (a missing identity is a provisioning-contract violation),
 			// and because the hosted server is authoritative it reconciles the
 			// identity on every init — even a re-init or preseeded workspace whose
@@ -1648,7 +1659,7 @@ Non-interactive mode (--non-interactive or BD_NON_INTERACTIVE=1):
 			// The id comes from the single InitVerifier read taken beside the
 			// prefix; shouldConsultInitProjectID still decides whether to USE it.
 			adoptedFromDB := ""
-			if store != nil && shouldConsultInitProjectID(doltCfg.Gateway, cfg.ProjectID, database, bootstrappedFromRemote) {
+			if store != nil && shouldConsultInitProjectID(doltCfg.Gateway, cfg.ProjectID) {
 				adoptedFromDB = dbIdentity.ProjectID
 			}
 			localID := cfg.ProjectID
