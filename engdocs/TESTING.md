@@ -103,6 +103,37 @@ invocation costs seconds instead of the ceiling. The refusal does not apply
 to `-run`, `-bench`, or `-list`: a single test in this package finishes in
 under two seconds, and that is the right way to work one of them.
 
+### The `cmd/bd` Dolt Surface
+
+The same default hides roughly 150 tests in `cmd/bd`: they need the Dolt
+server that `TestMain` starts in a container, and `dolt` in `BEADS_TEST_SKIP`
+makes every one of them skip. Run them through their wrapper:
+
+```bash
+scripts/ci/test-cmd-bd-dolt.sh              # the package, minus known-red
+scripts/ci/test-cmd-bd-dolt.sh -run TestInit
+```
+
+The wrapper sets `BEADS_TEST_ENV_RUN_DOLT=1` so the tests run at all, and
+`BEADS_CMD_BD_REQUIRE_DOLT=1` so a missing container fails the run instead of
+skipping into a green one — without that, a Docker daemon that is not
+reachable and a suite with nothing to report look identical. It needs `dolt`
+on `PATH`, a reachable Docker daemon, and the Dolt image cached locally
+(`scripts/ci/pull-dolt-image.sh`).
+
+Tests known to fail here are listed, with the reason, in
+`scripts/ci/cmd-bd-dolt-known-red.txt`; the wrapper skips them.
+`scripts/ci/cmd-bd-dolt-known-red.sh check` fails when an entry stops naming a
+real test, so the file cannot rot into a list of tests that no longer exist.
+Deleting an entry by fixing its test is the intended direction; adding one
+needs a bead and a reason.
+
+CI runs this surface in two places, both against the container: `Test (cmd/bd
+init under real Dolt)` on every PR covers the `TestInit` family, and `Test
+(cmd/bd under real Dolt N/4)` on every push to main covers the whole package.
+Before those existed no job ran any of it, and the surface accumulated 25
+failures across several releases (bd-kbx, bd-9jl).
+
 Tests that need a temporary repository or store should use `t.TempDir()` and
 `t.Cleanup()`. Temporary repositories must set a repository-local hooks path;
 do not inherit the developer's global hooks configuration.

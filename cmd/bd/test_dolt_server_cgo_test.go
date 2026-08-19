@@ -26,7 +26,25 @@ var testSharedConn *sql.DB
 // on a dynamic port using the shared testutil helper. This prevents tests
 // from creating testdb_* databases on the production Dolt server.
 // Returns a cleanup function that stops the server and removes the container.
+//
+// Every path below that leaves testDoltServerPort at 0 makes the ~150
+// Dolt-backed tests in this package self-skip, which reads as a clean run.
+// BEADS_CMD_BD_REQUIRE_DOLT=1 (set by scripts/ci/test-cmd-bd-dolt.sh) turns
+// that silence into a hard failure so the gate job cannot pass by not
+// running anything (bd-9jl).
 func startTestDoltServer() func() {
+	cleanup := startTestDoltServerInner()
+	if os.Getenv(requireDoltEnvVar) == "1" && testDoltServerPort == 0 {
+		beforeTestsFailure = requireDoltEnvVar + "=1 but no Dolt test server is available; " +
+			"the cmd/bd Dolt suite must not silently skip. Needs a reachable Docker daemon " +
+			"and the " + testutil.DoltDockerImage + " image (scripts/ci/pull-dolt-image.sh), " +
+			"and none of BEADS_TEST_SKIP=dolt / BEADS_TEST_PROXIED_LOCAL / " +
+			"BEADS_TEST_EMBEDDED_DOLT / BEADS_TEST_PROXIED_SERVER set."
+	}
+	return cleanup
+}
+
+func startTestDoltServerInner() func() {
 	if os.Getenv("BEADS_TEST_PROXIED_LOCAL") == "1" {
 		return func() {}
 	}

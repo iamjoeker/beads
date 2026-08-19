@@ -180,14 +180,20 @@ Key jobs preserved by display name:
   `PR Lint (wrapper timing)`.
 - `Package Gate (MCP)`, `Package Gate (npm)`, and `Package Gate (website)`.
 - `Test (storage domain + uow)`.
+- `Test (cmd/bd init under real Dolt)`: the only PR job that runs `cmd/bd`
+  without `BEADS_TEST_SKIP=dolt`. Main runs the whole package the same way as
+  `Test (cmd/bd under real Dolt N/4)`. Both go through
+  `scripts/ci/test-cmd-bd-dolt.sh`, which hard-requires the container so the
+  job cannot pass by skipping (bd-9jl).
 - `Build (Embedded Dolt)`, `Test (Embedded Dolt Storage N/5)`, and
   `Test (Embedded Dolt Cmd N/20)`.
 - Aggregate required-check candidates: `PR / CI Gate / Required` and
   `PR Risk / CI Gate / Required`.
 - Main-only platform and integration jobs: `Test (ubuntu-latest)`,
   `Test (macos-latest)`, `Test (Windows - smoke)`,
-  `Main Linux integration packages (N/6)`, and
-  `Main Linux integration cmd/bd (N/8)`.
+  `Main Linux integration packages (N/6)`,
+  `Main Linux integration cmd/bd (N/8)`, and
+  `Test (cmd/bd under real Dolt N/4)`.
 - `Check formatting`, `Lint`, and `Test Nix Flake`.
 
 ### Other Workflows
