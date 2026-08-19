@@ -344,6 +344,17 @@ pointless).`,
 		if historyChanged {
 			updates["no_history"] = false
 		}
+		// --wisp-type reclassifies an existing row. Detected with Changed() so
+		// `--wisp-type ""` is the documented way to clear a classification
+		// rather than a silently ignored empty flag.
+		if cmd.Flags().Changed("wisp-type") {
+			wispTypeStr, _ := cmd.Flags().GetString("wisp-type")
+			wispType := types.WispType(wispTypeStr)
+			if !wispType.IsValid() {
+				return HandleErrorRespectJSON("invalid wisp-type %q (must be %s, or \"\" to clear)", wispTypeStr, types.ValidWispTypeNames())
+			}
+			updates["wisp_type"] = wispTypeStr
+		}
 		// Metadata flag (GH#1413)
 		if cmd.Flags().Changed("metadata") {
 			metadataValue, _ := cmd.Flags().GetString("metadata")
@@ -743,6 +754,11 @@ func buildUpdatePatch(updates map[string]interface{}) (issueops.IssuePatch, erro
 			if flag, ok = value.(bool); ok {
 				noHistory = &flag
 			}
+		case "wisp_type":
+			var wispType issueops.Field[string]
+			if wispType, ok = stringField(value); ok {
+				patch.WispType = setField(issueops.WispType(wispType.Value))
+			}
 		default:
 			return issueops.IssuePatch{}, fmt.Errorf("unsupported update field %q", key)
 		}
@@ -1015,6 +1031,7 @@ func init() {
 	updateCmd.Flags().Bool("persistent", false, "Mark issue as persistent (promote wisp to regular issue)")
 	updateCmd.Flags().Bool("no-history", false, "Mark issue as no-history (skip Dolt commits, not GC-eligible)")
 	updateCmd.Flags().Bool("history", false, "Clear no-history flag (re-enable Dolt commit history)")
+	updateCmd.Flags().String("wisp-type", "", "Reclassify a wisp for TTL-based compaction: heartbeat, ping, patrol, gc_report, recovery, error, escalation (empty string clears it)")
 	// Metadata flag (GH#1413)
 	updateCmd.Flags().String("metadata", "", "Set custom metadata (JSON string or @file.json to read from file)")
 	// Incremental metadata edits (GH#1406)
