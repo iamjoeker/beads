@@ -243,7 +243,23 @@ func newParityEnv(t *testing.T) *parityEnv {
 	ensureCleanGlobalState(t)
 	initConfigForTest(t)
 
-	dir := t.TempDir()
+	// A git repo, and the working directory for the whole test: these tests
+	// pin exact stderr, and two things the write verbs consult resolve from
+	// cwd rather than from the store the env installs. Prefix-route discovery
+	// walks up from cwd (findPrefixRoutesSource) -- from the checkout it finds
+	// whatever routes.jsonl sits above it, which on a Gas Town machine is the
+	// town's own, and the id resolver then answers "prefix has no route in
+	// <town>/.beads/routes.jsonl" instead of the plain "no issue found" pinned
+	// below. And routing.DetectUserRole reads `git config beads.role` from
+	// cwd, prepending a three-line warning to stderr wherever that is unset.
+	// Both used to be answered by the developer's own checkout, so these
+	// tests asserted against the machine they ran on (bd-kbx).
+	dir := newGitRepo(t)
+	if err := runCommandInDir(dir, "git", "config", "beads.role", "maintainer"); err != nil {
+		t.Fatalf("configure beads.role: %v", err)
+	}
+	t.Chdir(dir)
+
 	beadsDir := filepath.Join(dir, ".beads")
 	raw := newTestStore(t, filepath.Join(beadsDir, "beads.db"))
 	ps := newParityStore(raw)
