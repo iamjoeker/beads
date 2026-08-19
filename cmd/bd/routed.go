@@ -12,6 +12,7 @@ import (
 
 	"github.com/steveyegge/beads/internal/beads"
 	"github.com/steveyegge/beads/internal/debug"
+	"github.com/steveyegge/beads/internal/routing"
 	"github.com/steveyegge/beads/internal/storage"
 	"github.com/steveyegge/beads/internal/types"
 	"github.com/steveyegge/beads/internal/utils"
@@ -91,13 +92,16 @@ func resolveAndGetIssueWithRoutingAccess(ctx context.Context, localStore storage
 	// only there is an issue the user can otherwise never close or update, and creates
 	// already land there. A read-intent caller keeps the read-only open that guarantees
 	// hydrating a foreign project cannot mutate it (GH#3231, bd-6dnrw.32).
+	var autoErr error
 	if isNotFoundErr(err) {
-		if autoResult, autoErr := resolveViaAutoRouting(ctx, localStore, id, writablePrefixRoute); autoErr == nil {
+		autoResult, routeErr := resolveViaAutoRouting(ctx, localStore, id, writablePrefixRoute)
+		if routeErr == nil {
 			return autoResult, nil
 		}
+		autoErr = routeErr
 	}
 
-	return nil, annotateLookupFailure(err, prefixErr)
+	return nil, annotateLookupFailure(ctx, localStore, err, prefixErr, autoErr)
 }
 
 // resolveAndGetFromStore resolves a partial ID and gets the issue from a specific store.
@@ -129,19 +133,86 @@ func resolveAndGetFromStore(ctx context.Context, s storage.DoltStorage, id strin
 // writable opens the routed target writable so a mutation command can commit
 // there; false keeps the read-only open that guarantees a routed read cannot
 // mutate the target.
+//
+// Failures come back as *autoRouteFailure so the caller can disclose the routed
+// store in the not-found message. bd list already names it unprompted; the
+// lookup path knew it too and used to throw it away (bd-1uu).
 func resolveViaAutoRouting(ctx context.Context, localStore storage.DoltStorage, id string, writable bool) (*RoutedResult, error) {
-	routedStore, routed, _, err := openRoutedStore(ctx, localStore, writable)
-	if err != nil || !routed {
-		return nil, fmt.Errorf("no auto-routed store available")
+	routedStore, target, err := openRoutedStoreTarget(ctx, localStore, writable)
+	if target == nil {
+		return nil, newAutoRouteFailure(ctx, nil, nil, errors.New("no auto-routed store configured"))
+	}
+	if err != nil {
+		return nil, newAutoRouteFailure(ctx, target, nil, err)
 	}
 
-	result, err := resolveAndGetFromStore(ctx, routedStore, id, true)
-	if err != nil {
+	result, resolveErr := resolveAndGetFromStore(ctx, routedStore, id, true)
+	if resolveErr != nil {
+		// Build the failure before closing: the differential count can only be
+		// read from a store that is still open.
+		failure := newAutoRouteFailure(ctx, target, routedStore, resolveErr)
 		_ = routedStore.Close()
-		return nil, err
+		return nil, failure
 	}
 	result.closeFn = func() { _ = routedStore.Close() }
 	return result, nil
+}
+
+// newAutoRouteFailure builds the auto-routing disclosure for a lookup that did
+// not find the issue. target is nil when no routing rule applies at all; store
+// is nil when the routed target was never opened, and must still be open when
+// it is passed, since the issue count is read from it.
+func newAutoRouteFailure(ctx context.Context, target *routedTarget, store issueCounter, err error) *autoRouteFailure {
+	failure := &autoRouteFailure{Count: unknownIssueCount, Err: err}
+	if target == nil {
+		return failure
+	}
+	failure.Rule = target.Rule
+	failure.BeadsDir = target.BeadsDir
+	failure.Searched = store != nil && isNotFoundErr(err)
+	if failure.Searched {
+		failure.Count = countIssues(ctx, store)
+	}
+	return failure
+}
+
+// autoRouteFailure records that contributor auto-routing was consulted and did
+// not produce the issue, together with the store it addressed.
+//
+// The routed store is the whole content of bd list's unprompted notice, so a
+// lookup that silently drops it makes a misroute indistinguishable from a
+// deleted bead — the defect bd-1uu was filed for.
+type autoRouteFailure struct {
+	Rule     routing.RoutingRule // the rule that selected the target
+	BeadsDir string              // .beads directory of the routed target ("" when no rule applies)
+	Searched bool                // the routed store was opened and queried
+	Count    int                 // total issues in the routed store; unknownIssueCount when not counted
+	Err      error
+}
+
+func (f *autoRouteFailure) Error() string {
+	if f.Err == nil {
+		return "auto-routing failed"
+	}
+	return f.Err.Error()
+}
+
+func (f *autoRouteFailure) Unwrap() error { return f.Err }
+
+// explain renders the auto-routing half of a lookup failure. It returns "" when
+// no routing rule applies at all — the ordinary case, where there is no second
+// store and therefore nothing the reader could act on.
+func (f *autoRouteFailure) explain() string {
+	if f.BeadsDir == "" {
+		return ""
+	}
+	mechanism, fix := routingRuleMechanism(f.Rule)
+	if f.Searched {
+		return fmt.Sprintf("%s also searched %s%s (fix: %s)",
+			mechanism, describeDatabaseAt(f.BeadsDir), describeIssueCount(f.Count), fix)
+	}
+	return fmt.Sprintf("%s routes to %s, which could not be searched: %v (fix: %s)",
+		mechanism, describeDatabaseAt(f.BeadsDir), f.Err, fix)
 }
 
 // prefixRouteFailure records why prefix routing did not produce an issue, so a
@@ -159,6 +230,7 @@ type prefixRouteFailure struct {
 	TargetDB    string // dolt database the route resolves to
 	Searched    bool   // the routed database was opened and queried
 	SameAsLocal bool   // the route resolves back to the local database
+	Count       int    // total issues in the routed database; unknownIssueCount when not counted
 	Err         error
 }
 
@@ -180,8 +252,8 @@ func (f *prefixRouteFailure) explain() string {
 	case f.RoutesFile == "" || f.SameAsLocal:
 		return ""
 	case f.Searched:
-		return fmt.Sprintf("prefix %q routes to %s (database %q), which was also searched",
-			f.Prefix, f.describeTarget(), f.TargetDB)
+		return fmt.Sprintf("prefix %q routes to %s (database %q%s), which was also searched",
+			f.Prefix, f.describeTarget(), f.TargetDB, describeIssueCount(f.Count))
 	case f.RoutePath != "":
 		return fmt.Sprintf("prefix %q routes to %s, but that database could not be searched: %v",
 			f.Prefix, f.describeTarget(), f.Err)
@@ -200,23 +272,36 @@ func (f *prefixRouteFailure) describeTarget() string {
 }
 
 // annotateLookupFailure names the database a not-found lookup actually searched
-// and, when the ID's prefix routes somewhere else, says where (bd-4sw). Other
-// errors pass through untouched.
+// and, when the ID's prefix routes somewhere else, says where (bd-4sw). It also
+// discloses contributor auto-routing and the total issue count of every store
+// that answered (bd-1uu). Other errors pass through untouched.
+//
+// The counts are the positive control, and they are the reason the sibling
+// bd list notice actually works: a store holding zero issues is a wrong store,
+// a store holding thousands really is missing the bead. Without them "not
+// found" cannot be told apart from "you are addressing the wrong database",
+// and agents have read the first as proof that live P1 beads were destroyed.
 //
 // The original error is wrapped, so errors.Is(storage.ErrNotFound) and the
 // "no issue found matching" text that isNotFoundErr and the protocol contract
 // match on both still hold.
-func annotateLookupFailure(err error, prefixErr error) error {
+func annotateLookupFailure(ctx context.Context, localStore issueCounter, err error, prefixErr, autoErr error) error {
 	if !isNotFoundErr(err) {
 		return err
 	}
 	var parts []string
-	if where := describeLocalDatabase(); where != "" {
+	if where := describeLocalDatabase(ctx, localStore); where != "" {
 		parts = append(parts, "searched "+where)
 	}
 	var routeFailure *prefixRouteFailure
 	if errors.As(prefixErr, &routeFailure) {
 		if explanation := routeFailure.explain(); explanation != "" {
+			parts = append(parts, explanation)
+		}
+	}
+	var autoFailure *autoRouteFailure
+	if errors.As(autoErr, &autoFailure) {
+		if explanation := autoFailure.explain(); explanation != "" {
 			parts = append(parts, explanation)
 		}
 	}
@@ -226,17 +311,61 @@ func annotateLookupFailure(err error, prefixErr error) error {
 	return fmt.Errorf("%w (%s)", err, strings.Join(parts, "; "))
 }
 
-// describeLocalDatabase names the database the command opened, so a not-found
-// answer says which database it is an answer about.
-func describeLocalDatabase() string {
+// describeLocalDatabase names the database the command opened and how many
+// issues it holds, so a not-found answer says which database it is an answer
+// about and whether that database holds anything at all.
+func describeLocalDatabase(ctx context.Context, localStore issueCounter) string {
 	beadsDir := resolveCommandBeadsDir(dbPath)
 	if beadsDir == "" {
 		return ""
 	}
+	return describeDatabaseAt(beadsDir) + describeIssueCount(countIssues(ctx, localStore))
+}
+
+// describeDatabaseAt names a store by its declared Dolt database and the beads
+// directory it was opened from, falling back to the directory alone when the
+// database cannot be read. Every store a lookup consulted is named this way, so
+// the reader compares like with like.
+func describeDatabaseAt(beadsDir string) string {
 	if database := readDoltDatabase(beadsDir); database != "" {
 		return fmt.Sprintf("database %q at %s", database, beadsDir)
 	}
 	return beadsDir
+}
+
+// unknownIssueCount marks a store that was never counted, so a real zero — the
+// single most diagnostic count there is — is never confused with "no answer".
+const unknownIssueCount = -1
+
+// issueCounter is the slice of storage a lookup failure needs: the total issue
+// count that turns a bare "not found" into a differential answer.
+type issueCounter interface {
+	GetStatisticsNoBlocked(ctx context.Context) (*types.Statistics, error)
+}
+
+// countIssues returns the total number of issues in s, or unknownIssueCount if
+// it cannot be read. The no-blocked variant is deliberate: only the total is
+// wanted, and this runs on an error path where the blocked-set traversal would
+// be pure cost.
+func countIssues(ctx context.Context, s issueCounter) int {
+	if s == nil {
+		return unknownIssueCount
+	}
+	stats, err := s.GetStatisticsNoBlocked(ctx)
+	if err != nil || stats == nil {
+		debug.Logf("[routing] could not count issues for lookup failure: %v\n", err)
+		return unknownIssueCount
+	}
+	return stats.TotalIssues
+}
+
+// describeIssueCount renders a store's issue count as a clause to append to the
+// store's name, or "" when the store was not counted.
+func describeIssueCount(count int) string {
+	if count < 0 {
+		return ""
+	}
+	return fmt.Sprintf(", holding %d issue(s)", count)
 }
 
 // prefixRoute represents a prefix-to-path routing rule from routes.jsonl.
@@ -281,6 +410,7 @@ func resolveViaPrefixRoutingWithAccess(ctx context.Context, id string, writable 
 	if src == nil {
 		return nil, &prefixRouteFailure{
 			Prefix: prefix,
+			Count:  unknownIssueCount,
 			Err:    errors.New("no routes.jsonl found"),
 		}
 	}
@@ -297,6 +427,7 @@ func resolveViaPrefixRoutingWithAccess(ctx context.Context, id string, writable 
 		return nil, &prefixRouteFailure{
 			Prefix:     prefix,
 			RoutesFile: src.File,
+			Count:      unknownIssueCount,
 			Err:        fmt.Errorf("no route for prefix %q", prefix),
 		}
 	}
@@ -316,6 +447,7 @@ func resolveViaPrefixRoutingWithAccess(ctx context.Context, id string, writable 
 			RoutesFile:  src.File,
 			RoutePath:   matchedRoute.Path,
 			SameAsLocal: true,
+			Count:       unknownIssueCount,
 			Err:         errors.New("route points to the database already searched"),
 		}
 	}
@@ -327,6 +459,7 @@ func resolveViaPrefixRoutingWithAccess(ctx context.Context, id string, writable 
 			Prefix:     prefix,
 			RoutesFile: src.File,
 			RoutePath:  matchedRoute.Path,
+			Count:      unknownIssueCount,
 			Err:        fmt.Errorf("target rig %s has no dolt_database configured", targetBeadsDir),
 		}
 	}
@@ -356,21 +489,30 @@ func resolveViaPrefixRoutingWithAccess(ctx context.Context, id string, writable 
 			RoutesFile: src.File,
 			RoutePath:  matchedRoute.Path,
 			TargetDB:   targetDB,
+			Count:      unknownIssueCount,
 			Err:        fmt.Errorf("opening routed store for %s: %w", matchedRoute.Path, openErr),
 		}
 	}
 
 	result, err := resolveAndGetFromStore(ctx, targetStore, id, true)
 	if err != nil {
-		_ = targetStore.Close()
-		return nil, &prefixRouteFailure{
+		failure := &prefixRouteFailure{
 			Prefix:     prefix,
 			RoutesFile: src.File,
 			RoutePath:  matchedRoute.Path,
 			TargetDB:   targetDB,
 			Searched:   isNotFoundErr(err),
+			Count:      unknownIssueCount,
 			Err:        err,
 		}
+		// Count while the routed store is still open. A routed database that
+		// holds zero issues is the reader's evidence that the route landed
+		// somewhere unrelated rather than that the bead is gone (bd-1uu).
+		if failure.Searched {
+			failure.Count = countIssues(ctx, targetStore)
+		}
+		_ = targetStore.Close()
+		return nil, failure
 	}
 	result.closeFn = func() { _ = targetStore.Close() }
 
@@ -557,11 +699,14 @@ func getIssueWithRouting(ctx context.Context, localStore storage.DoltStorage, id
 	// If not found via prefix routing, try contributor auto-routing as fallback (GH#2345).
 	// getIssueWithRouting is the read-intent entry point, so the routed store stays
 	// read-only here; mutation commands go through resolveAndGetIssueForMutation.
+	var autoErr error
 	if isNotFoundErr(err) {
-		if autoResult, autoErr := resolveViaAutoRouting(ctx, localStore, id, false); autoErr == nil {
+		autoResult, routeErr := resolveViaAutoRouting(ctx, localStore, id, false)
+		if routeErr == nil {
 			return autoResult, nil
 		}
+		autoErr = routeErr
 	}
 
-	return nil, annotateLookupFailure(err, prefixErr)
+	return nil, annotateLookupFailure(ctx, localStore, err, prefixErr, autoErr)
 }
