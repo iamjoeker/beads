@@ -92,26 +92,44 @@ func determineAutoRoutedRepoPath(ctx context.Context, store storage.DoltStorage)
 	return routing.DetermineTargetRepoWithRule(routingConfig, userRole, ".")
 }
 
-// routingNoticeText returns the stderr note and remediation command for the
-// given routing rule, so the notice always attributes the swap to the rule
-// that actually matched instead of hardcoding the contributor-role case.
-func routingNoticeText(rule routing.RoutingRule) (reason, fix string) {
+// routingRuleMechanism names the routing rule that swapped the store, in a form
+// that reads as the subject of a sentence, together with the command that undoes
+// it.
+//
+// Both the list/ready notice and the not-found annotation (bd-1uu) render from
+// this, so the two paths can never name different mechanisms or different fixes
+// for the same rule — the whole complaint in bd-1uu is that one path discloses
+// the routing decision and its sibling stays silent about the same decision.
+func routingRuleMechanism(rule routing.RoutingRule) (mechanism, fix string) {
 	switch rule {
 	case routing.RuleContributor:
 		// The contributor rule fires on explicit beads.role=contributor OR on
 		// origin-URL inference with beads.role unset — don't claim the config
 		// key is set when it may not be.
-		return "contributor routing (beads.role=contributor, or inferred from the origin URL) routes bd list/ready to the contributor planning store, not this project",
+		return "contributor routing (beads.role=contributor, or inferred from the origin URL)",
 			"git config beads.role maintainer"
 	case routing.RuleMaintainer:
-		return "routing.maintainer routes bd list/ready to a different planning store than this project",
-			"bd config unset routing.maintainer"
+		return "routing.maintainer", "bd config unset routing.maintainer"
 	case routing.RuleDefault:
-		return "routing.default routes bd list/ready to a different planning store than this project",
-			"bd config unset routing.default"
+		return "routing.default", "bd config unset routing.default"
 	default:
-		return "an auto-routing rule sends bd list/ready to a different planning store than this project",
+		return "an auto-routing rule",
 			"bd config get routing.mode routing.contributor routing.maintainer routing.default"
+	}
+}
+
+// routingNoticeText returns the stderr note and remediation command for the
+// given routing rule, so the notice always attributes the swap to the rule
+// that actually matched instead of hardcoding the contributor-role case.
+func routingNoticeText(rule routing.RoutingRule) (reason, fix string) {
+	mechanism, fix := routingRuleMechanism(rule)
+	switch rule {
+	case routing.RuleContributor:
+		return mechanism + " routes bd list/ready to the contributor planning store, not this project", fix
+	case routing.RuleMaintainer, routing.RuleDefault:
+		return mechanism + " routes bd list/ready to a different planning store than this project", fix
+	default:
+		return mechanism + " sends bd list/ready to a different planning store than this project", fix
 	}
 }
 
@@ -137,18 +155,16 @@ func printContributorRoutingNotice(ctx context.Context, localStore storage.DoltS
 		return
 	}
 	countSuffix := ""
-	if localStore != nil {
-		if stats, err := localStore.GetStatistics(ctx); err == nil {
-			// stats.TotalIssues is an unfiltered COUNT(*) FROM issues, so it
-			// includes closed/deferred/blocked issues that bd ready's
-			// predicates would never surface anyway. Report it as the
-			// project's total issue count rather than claiming all of them
-			// are "hidden as a result" of routing.
-			countSuffix = fmt.Sprintf(" (this project has %d total issue(s))", stats.TotalIssues)
-		}
-		// If GetStatistics errors, countSuffix stays empty: the notice is
-		// still accurate without the count, so the parenthetical is
-		// silently dropped rather than surfacing a secondary error.
+	// countIssues reports an unfiltered COUNT(*) FROM issues, so it includes
+	// closed/deferred/blocked issues that bd ready's predicates would never
+	// surface anyway. Report it as the project's total issue count rather than
+	// claiming all of them are "hidden as a result" of routing.
+	//
+	// A negative count means the store could not be counted; the notice is
+	// still accurate without it, so the parenthetical is silently dropped
+	// rather than surfacing a secondary error.
+	if n := countIssues(ctx, localStore); n >= 0 {
+		countSuffix = fmt.Sprintf(" (this project has %d total issue(s))", n)
 	}
 	reason, fix := routingNoticeText(rule)
 	fmt.Fprintf(os.Stderr, "note: %s%s.\n", reason, countSuffix)
@@ -183,20 +199,50 @@ func openRoutedWriteStore(ctx context.Context, store storage.DoltStorage) (stora
 }
 
 func openRoutedStore(ctx context.Context, store storage.DoltStorage, writable bool) (storage.DoltStorage, bool, routing.RoutingRule, error) {
+	targetStore, target, err := openRoutedStoreTarget(ctx, store, writable)
+	if target == nil {
+		return nil, false, routing.RuleNone, err
+	}
+	if err != nil {
+		return nil, false, target.Rule, err
+	}
+	return targetStore, true, target.Rule, nil
+}
+
+// routedTarget records where auto-routing sent a command, so a caller can name
+// the destination and not merely hold a handle to it. A lookup that fails in the
+// routed store has to be able to say which store answered (bd-1uu).
+type routedTarget struct {
+	Rule     routing.RoutingRule // the rule that selected this target
+	RepoPath string              // expanded path of the routed repository
+	BeadsDir string              // .beads directory inside RepoPath
+}
+
+// openRoutedStoreTarget opens the auto-routed store and reports where it went.
+//
+// It returns a nil *routedTarget when no routing rule applies, which is the
+// signal that there is no second store at all — distinct from a target that
+// exists but could not be opened, where the target is returned alongside the
+// error so the failure can still name it.
+func openRoutedStoreTarget(ctx context.Context, store storage.DoltStorage, writable bool) (storage.DoltStorage, *routedTarget, error) {
 	repoPath, rule := determineAutoRoutedRepoPath(ctx, store)
 	if repoPath == "" || repoPath == "." {
-		return nil, false, routing.RuleNone, nil
+		return nil, nil, nil
 	}
 
 	targetRepoPath := routing.ExpandPath(repoPath)
-	targetBeadsDir := filepath.Join(targetRepoPath, ".beads")
+	target := &routedTarget{
+		Rule:     rule,
+		RepoPath: targetRepoPath,
+		BeadsDir: filepath.Join(targetRepoPath, ".beads"),
+	}
 	open := newReadOnlyStoreFromConfig
 	if writable {
 		open = newDoltStoreFromConfig
 	}
-	targetStore, err := open(ctx, targetBeadsDir)
+	targetStore, err := open(ctx, target.BeadsDir)
 	if err != nil {
-		return nil, false, rule, fmt.Errorf("failed to open routed store at %s: %w", targetRepoPath, err)
+		return nil, target, fmt.Errorf("failed to open routed store at %s: %w", target.RepoPath, err)
 	}
-	return targetStore, true, rule, nil
+	return targetStore, target, nil
 }

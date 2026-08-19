@@ -12,14 +12,32 @@
 package main
 
 import (
+	"context"
 	"errors"
 	"os"
 	"path/filepath"
 	"strings"
 	"testing"
 
+	"github.com/steveyegge/beads/internal/routing"
 	"github.com/steveyegge/beads/internal/storage"
+	"github.com/steveyegge/beads/internal/types"
 )
+
+// countingStore is a minimal issueCounter. The not-found annotation reads a
+// store for exactly one thing — how many issues it holds — so the tests can
+// supply that without a Dolt server.
+type countingStore struct {
+	total int
+	err   error
+}
+
+func (s countingStore) GetStatisticsNoBlocked(context.Context) (*types.Statistics, error) {
+	if s.err != nil {
+		return nil, s.err
+	}
+	return &types.Statistics{TotalIssues: s.total}, nil
+}
 
 // writeRoutes creates dir/.beads/routes.jsonl with the given lines and returns
 // the path to the routes file.
@@ -234,40 +252,50 @@ func TestAnnotateLookupFailure(t *testing.T) {
 	t.Cleanup(func() { dbPath = oldDBPath })
 
 	notFound := errors.New(`no issue found matching "hq-abc"`)
+	// The contributor-routed target declares its own database, so the failure
+	// can name it the same way it names the local one.
+	planningDir := writeBeadsMetadata(t, filepath.Join(town, "planning"), "planningdb")
 
 	cases := []struct {
-		name      string
-		err       error
-		prefixErr error
-		wantAll   []string
-		wantNone  []string
+		name       string
+		err        error
+		localStore issueCounter
+		prefixErr  error
+		autoErr    error
+		wantAll    []string
+		wantNone   []string
 	}{
 		{
 			// The damaging case: the routed database was searched and really
 			// is missing the bead. Say which databases answered.
-			name: "routed_and_searched",
-			err:  notFound,
+			name:       "routed_and_searched",
+			err:        notFound,
+			localStore: countingStore{total: 1523},
 			prefixErr: &prefixRouteFailure{
 				Prefix: "hq-", RoutesFile: filepath.Join(town, ".beads", "routes.jsonl"),
-				RoutePath: ".", TargetDB: "hq", Searched: true,
+				RoutePath: ".", TargetDB: "hq", Searched: true, Count: 412,
 				Err: notFound,
 			},
 			wantAll: []string{
 				`no issue found matching "hq-abc"`,
 				`database "rigdb"`,
 				rigBeadsDir,
+				"holding 1523 issue(s)",
 				`prefix "hq-"`,
 				"the town root",
 				`database "hq"`,
+				"holding 412 issue(s)",
 				"also searched",
 			},
 		},
 		{
-			name: "prefix_has_no_route",
-			err:  notFound,
+			name:       "prefix_has_no_route",
+			err:        notFound,
+			localStore: countingStore{total: 3},
 			prefixErr: &prefixRouteFailure{
 				Prefix: "hq-", RoutesFile: filepath.Join(town, ".beads", "routes.jsonl"),
-				Err: errors.New(`no route for prefix "hq-"`),
+				Count: unknownIssueCount,
+				Err:   errors.New(`no route for prefix "hq-"`),
 			},
 			wantAll: []string{
 				`database "rigdb"`,
@@ -278,11 +306,12 @@ func TestAnnotateLookupFailure(t *testing.T) {
 		{
 			// The route resolves back to the database already named as
 			// searched: naming it twice is noise, not information.
-			name: "route_is_the_local_database",
-			err:  notFound,
+			name:       "route_is_the_local_database",
+			err:        notFound,
+			localStore: countingStore{total: 3},
 			prefixErr: &prefixRouteFailure{
 				Prefix: "rig-", RoutesFile: filepath.Join(town, ".beads", "routes.jsonl"),
-				RoutePath: "rig", SameAsLocal: true,
+				RoutePath: "rig", SameAsLocal: true, Count: unknownIssueCount,
 				Err: errors.New("route points to the database already searched"),
 			},
 			wantAll:  []string{`database "rigdb"`},
@@ -291,17 +320,88 @@ func TestAnnotateLookupFailure(t *testing.T) {
 		{
 			// Ordinary single-repo use: no routes.jsonl at all is not a
 			// routing problem and must not be reported as one.
-			name:      "no_routes_file",
-			err:       notFound,
-			prefixErr: &prefixRouteFailure{Prefix: "hq-", Err: errors.New("no routes.jsonl found")},
-			wantAll:   []string{`database "rigdb"`},
-			wantNone:  []string{"routes.jsonl", "prefix"},
+			name:       "no_routes_file",
+			err:        notFound,
+			localStore: countingStore{total: 3},
+			prefixErr:  &prefixRouteFailure{Prefix: "hq-", Count: unknownIssueCount, Err: errors.New("no routes.jsonl found")},
+			wantAll:    []string{`database "rigdb"`},
+			wantNone:   []string{"routes.jsonl", "prefix"},
+		},
+		{
+			// bd-1uu proper: contributor routing sent the lookup to a planning
+			// store that does not carry these ids. The mechanism, the
+			// destination, its (zero) count and the fix are all things bd
+			// already knew and used to discard.
+			name:       "contributor_route_also_searched",
+			err:        notFound,
+			localStore: countingStore{total: 15},
+			autoErr: &autoRouteFailure{
+				Rule: routing.RuleContributor, BeadsDir: planningDir,
+				Searched: true, Count: 0, Err: notFound,
+			},
+			wantAll: []string{
+				"holding 15 issue(s)",
+				"contributor routing",
+				"beads.role=contributor",
+				`database "planningdb"`,
+				planningDir,
+				"holding 0 issue(s)",
+				"fix: git config beads.role maintainer",
+			},
+		},
+		{
+			// A routed target that could not be opened is a different answer
+			// from one that was searched and came up empty; saying "also
+			// searched" would be a lie about what the store reported.
+			name:       "contributor_route_unopenable",
+			err:        notFound,
+			localStore: countingStore{total: 15},
+			autoErr: &autoRouteFailure{
+				Rule: routing.RuleMaintainer, BeadsDir: planningDir,
+				Count: unknownIssueCount,
+				Err:   errors.New("failed to open routed store: connection refused"),
+			},
+			wantAll: []string{
+				planningDir,
+				"could not be searched",
+				"connection refused",
+				"fix: bd config unset routing.maintainer",
+			},
+			wantNone: []string{"also searched", "holding 0 issue(s)"},
+		},
+		{
+			// No routing rule applies at all: there is no second store, so
+			// there is nothing to disclose and the message stays short.
+			name:       "no_auto_routing_configured",
+			err:        notFound,
+			localStore: countingStore{total: 15},
+			autoErr:    &autoRouteFailure{Count: unknownIssueCount, Err: errors.New("no auto-routed store configured")},
+			wantAll:    []string{`database "rigdb"`},
+			wantNone:   []string{"routing", "fix:", "auto-routed"},
+		},
+		{
+			// The count is an optional positive control, not a precondition:
+			// a store that cannot be counted still gets named, and an
+			// unknown count must never render as a zero.
+			name:       "count_unavailable",
+			err:        notFound,
+			localStore: countingStore{err: errors.New("connection refused")},
+			wantAll:    []string{`database "rigdb"`, rigBeadsDir},
+			wantNone:   []string{"holding"},
+		},
+		{
+			// No store handle at all (callers that annotate before opening
+			// one). Same rule: name the database, omit the count.
+			name:     "no_local_store",
+			err:      notFound,
+			wantAll:  []string{`database "rigdb"`},
+			wantNone: []string{"holding"},
 		},
 	}
 
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
-			got := annotateLookupFailure(tc.err, tc.prefixErr)
+			got := annotateLookupFailure(context.Background(), tc.localStore, tc.err, tc.prefixErr, tc.autoErr)
 			msg := got.Error()
 			for _, want := range tc.wantAll {
 				if !strings.Contains(msg, want) {
@@ -330,7 +430,7 @@ func TestAnnotateLookupFailurePassesThroughOtherErrors(t *testing.T) {
 	t.Parallel()
 
 	boom := errors.New("dial tcp 127.0.0.1:3307: connection refused")
-	if got := annotateLookupFailure(boom, &prefixRouteFailure{Prefix: "hq-"}); got != boom {
+	if got := annotateLookupFailure(context.Background(), countingStore{total: 5}, boom, &prefixRouteFailure{Prefix: "hq-"}, nil); got != boom {
 		t.Errorf("annotateLookupFailure rewrote a non-not-found error: %v", got)
 	}
 }
@@ -340,7 +440,7 @@ func TestAnnotateLookupFailurePassesThroughOtherErrors(t *testing.T) {
 func TestAnnotateLookupFailurePreservesErrNotFound(t *testing.T) {
 	t.Parallel()
 
-	got := annotateLookupFailure(storage.ErrNotFound, nil)
+	got := annotateLookupFailure(context.Background(), nil, storage.ErrNotFound, nil, nil)
 	if !errors.Is(got, storage.ErrNotFound) {
 		t.Errorf("annotated error lost storage.ErrNotFound: %v", got)
 	}

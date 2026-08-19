@@ -3,6 +3,7 @@ package main
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"os"
 	"strings"
@@ -778,23 +779,30 @@ func resolveCloseTargets(ctx context.Context, localStore storage.DoltStorage, id
 			_ = sharedRouted.Close()
 		}
 	}
-	ensureShared := func() (storage.DoltStorage, error) {
+	// The routed target is remembered alongside the handle so a failed close can
+	// name the store it addressed, not merely report that the bead is missing
+	// (bd-1uu).
+	var sharedTarget *routedTarget
+	var sharedRoutedErr error
+	ensureShared := func() (storage.DoltStorage, *routedTarget, error) {
 		if sharedRouted != nil {
-			return sharedRouted, nil
+			return sharedRouted, sharedTarget, nil
 		}
 		if sharedRoutedTried {
-			return nil, fmt.Errorf("no auto-routed store available")
+			return nil, sharedTarget, sharedRoutedErr
 		}
 		sharedRoutedTried = true
-		rs, routed, _, err := openRoutedWriteStore(ctx, localStore)
-		if err != nil {
-			return nil, err
+		rs, target, err := openRoutedStoreTarget(ctx, localStore, true)
+		sharedTarget = target
+		switch {
+		case target == nil:
+			sharedRoutedErr = errors.New("no auto-routed store configured")
+		case err != nil:
+			sharedRoutedErr = err
+		default:
+			sharedRouted = rs
 		}
-		if !routed {
-			return nil, fmt.Errorf("no auto-routed store available")
-		}
-		sharedRouted = rs
-		return rs, nil
+		return sharedRouted, target, sharedRoutedErr
 	}
 	for _, id := range ids {
 		// Local first.
@@ -816,17 +824,24 @@ func resolveCloseTargets(ctx context.Context, localStore storage.DoltStorage, id
 			continue
 		}
 		// Contributor auto-routing uses one shared store for the whole batch.
-		if rs, rerr := ensureShared(); rerr == nil {
-			if r, err := resolveAndGetFromStore(ctx, rs, id, true); err == nil {
+		rs, sharedTarget, rerr := ensureShared()
+		var autoErr error
+		if rerr == nil {
+			r, resolveErr := resolveAndGetFromStore(ctx, rs, id, true)
+			if resolveErr == nil {
 				// Per-id RoutedResult does not own the shared handle; cleanup() does.
 				results = append(results, r)
 				continue
 			}
+			autoErr = newAutoRouteFailure(ctx, sharedTarget, rs, resolveErr)
+		} else {
+			autoErr = newAutoRouteFailure(ctx, sharedTarget, nil, rerr)
 		}
 		cleanup()
-		// Name the database that was searched and where the prefix routes, so a
-		// close against the wrong database doesn't read as a missing bead (bd-4sw).
-		notFound := annotateLookupFailure(fmt.Errorf("no issue found matching %q", id), prefixErr)
+		// Name every store that answered — the local database, where the prefix
+		// routes (bd-4sw), and the contributor-routed store (bd-1uu) — so a close
+		// against the wrong database doesn't read as a missing bead.
+		notFound := annotateLookupFailure(ctx, localStore, fmt.Errorf("no issue found matching %q", id), prefixErr, autoErr)
 		return nil, func() {}, fmt.Errorf("resolving ID %s: %w", id, notFound)
 	}
 	return results, cleanup, nil
