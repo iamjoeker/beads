@@ -144,13 +144,13 @@ func executeIssueInsert(ctx context.Context, tx DBTX, table string, issue *types
 	`, table, suffix),
 		issue.ID, issue.ContentHash, issue.Title, issue.Description, issue.Design, issue.AcceptanceCriteria, issue.Notes,
 		issue.Status, issue.Priority, issue.IssueType, NullString(issue.Assignee), NullInt(issue.EstimatedMinutes),
-		issue.CreatedAt, issue.CreatedBy, issue.Owner, issue.UpdatedAt, issue.StartedAt, issue.ClosedAt, NullStringPtr(issue.ExternalRef), issue.SpecID,
-		issue.CompactionLevel, issue.CompactedAt, NullStringPtr(issue.CompactedAtCommit), NullIntVal(issue.OriginalSize),
+		issue.CreatedAt.UTC(), issue.CreatedBy, issue.Owner, issue.UpdatedAt.UTC(), UTCTimePtr(issue.StartedAt), UTCTimePtr(issue.ClosedAt), NullStringPtr(issue.ExternalRef), issue.SpecID,
+		issue.CompactionLevel, UTCTimePtr(issue.CompactedAt), NullStringPtr(issue.CompactedAtCommit), NullIntVal(issue.OriginalSize),
 		issue.Sender, issue.Ephemeral, issue.NoHistory, issue.WispType, issue.Pinned, issue.IsTemplate,
 		issue.MolType, issue.WorkType, issue.SourceSystem, issue.SourceRepo, issue.CloseReason, issue.ClosedBySession,
 		issue.EventKind, issue.Actor, issue.Target, issue.Payload,
 		issue.AwaitType, issue.AwaitID, issue.Timeout.Nanoseconds(), FormatJSONStringArray(issue.Waiters),
-		issue.DueAt, issue.DeferUntil, JSONMetadata(issue.Metadata),
+		UTCTimePtr(issue.DueAt), UTCTimePtr(issue.DeferUntil), JSONMetadata(issue.Metadata),
 		freshRowLock(), NullString(string(issue.StorageClass.Normalize())),
 	)
 	if err != nil {

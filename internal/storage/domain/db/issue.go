@@ -732,6 +732,11 @@ func normalizeIssueTimestamps(issue *types.Issue) {
 	} else {
 		issue.UpdatedAt = issue.UpdatedAt.UTC()
 	}
+	// The optional instants (due_at, defer_until, started_at, closed_at) reach
+	// the bind untouched otherwise, and normalizeUpdateValue already holds this
+	// column set to UTC on the update side — an insert that skipped them would
+	// store a zone-aware value the very next update would correct.
+	issueops.NormalizeIssueOptionalTimestampsUTC(issue)
 }
 
 func pickIssueTable(useWisps bool) string {
@@ -881,23 +886,11 @@ func formatJSONStringArray(items []string) string {
 	return string(b)
 }
 
-var timestampUpdateFields = map[string]struct{}{
-	"started_at": {}, "closed_at": {}, "due_at": {}, "defer_until": {},
-}
-
 func normalizeUpdateValue(key string, value any) any {
-	if _, ok := timestampUpdateFields[key]; ok {
-		switch v := value.(type) {
-		case time.Time:
-			return v.UTC()
-		case *time.Time:
-			if v == nil {
-				return nil
-			}
-			t := v.UTC()
-			return t
-		}
-		return value
+	// The timestamp column set and its conversion live in issueops so this
+	// plane and the embedded one cannot drift on which columns are instants.
+	if issueops.IsTimestampUpdateField(key) {
+		return issueops.NormalizeTimestampUpdateValueUTC(value)
 	}
 	switch key {
 	case "status":

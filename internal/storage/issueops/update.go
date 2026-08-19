@@ -442,6 +442,12 @@ func updateIssueInTx(ctx context.Context, tx DBTX, id string, updates map[string
 				return nil, fmt.Errorf("invalid metadata: %w", err)
 			}
 			args = append(args, metadataStr)
+		} else if IsTimestampUpdateField(key) {
+			// The embedded driver binds a time.Time by its wall clock without
+			// converting to the connection zone, so a zone-aware value would be
+			// stored as local digits in a column every reader parses as UTC.
+			// updated_at above is already UTC for the same reason.
+			args = append(args, NormalizeTimestampUpdateValueUTC(value))
 		} else {
 			args = append(args, value)
 		}
