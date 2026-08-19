@@ -11,6 +11,7 @@ import (
 
 	"github.com/spf13/cobra"
 
+	"github.com/steveyegge/beads/cmd/bd/setup"
 	"github.com/steveyegge/beads/internal/beads"
 	"github.com/steveyegge/beads/internal/config"
 	"github.com/steveyegge/beads/internal/configfile"
@@ -620,7 +621,12 @@ func runInitProxiedServerTail(cmd *cobra.Command, ctx context.Context, in initPr
 				HasRemote:    t.remoteURL != "",
 				NoPush:       config.GetBool("no-push"),
 			})
-			if err := t.fsUseCase.InstallClaudeProject(ctx, in.stealth); err != nil && !in.quiet {
+			// The installer narrates its progress to stdout on success;
+			// --quiet promises none of it (bd-kbx).
+			restoreSetupQuiet := setup.SetQuiet(in.quiet)
+			err := t.fsUseCase.InstallClaudeProject(ctx, in.stealth)
+			restoreSetupQuiet()
+			if err != nil && !in.quiet {
 				fmt.Fprintf(os.Stderr, "Warning: failed to setup Claude hooks: %v\n", err)
 			}
 		}

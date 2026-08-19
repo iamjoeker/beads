@@ -16,10 +16,13 @@ import (
 	"os"
 	"path/filepath"
 	"strconv"
+	"strings"
 	"testing"
 	"time"
 
 	"github.com/steveyegge/beads/internal/configfile"
+	"github.com/steveyegge/beads/internal/doltserver"
+	"github.com/steveyegge/beads/internal/storage"
 	"github.com/steveyegge/beads/internal/storage/dolt"
 	"github.com/steveyegge/beads/internal/storage/doltutil"
 	"github.com/steveyegge/beads/internal/testutil"
@@ -246,6 +249,18 @@ func dropTestDatabase(dbName string, port int) {
 // sweep still reaps anything left listening.
 func sharedServerTestEnv(t *testing.T) []string {
 	t.Helper()
+	return append(sharedServerPortOnlyTestEnv(t), "BEADS_DOLT_SHARED_SERVER=1")
+}
+
+// sharedServerPortOnlyTestEnv is sharedServerTestEnv without the mode switch:
+// the isolated port and server directory, but no BEADS_DOLT_SHARED_SERVER.
+//
+// Use it for a test whose subject IS how shared-server mode gets selected --
+// `bd init --shared-server`. Exporting the env flag there would satisfy the
+// assertion no matter what the flag did, so the test needs the isolation
+// without the answer.
+func sharedServerPortOnlyTestEnv(t *testing.T) []string {
+	t.Helper()
 	port, err := testutil.FindFreePort()
 	if err != nil {
 		t.Fatalf("find free port for shared server: %v", err)
@@ -256,7 +271,6 @@ func sharedServerTestEnv(t *testing.T) []string {
 	}
 	t.Cleanup(func() { _ = os.RemoveAll(serverDir) })
 	return append(os.Environ(),
-		"BEADS_DOLT_SHARED_SERVER=1",
 		"BEADS_SHARED_SERVER_DIR="+serverDir,
 		"BEADS_DOLT_SERVER_PORT="+strconv.Itoa(port),
 	)
@@ -265,6 +279,11 @@ func sharedServerTestEnv(t *testing.T) []string {
 // openExistingTestDB reopens an existing Dolt store for verification in tests.
 // It tries NewFromConfig first (reads metadata.json for correct database name),
 // then falls back to direct open for BEADS_DB or other non-standard paths.
+//
+// Server-mode workspaces only: dolt.New always builds a client for a dolt
+// sql-server, so this cannot read back the DEFAULT `bd init`, which is
+// embedded. Use openWorkspaceStoreForTest for a workspace whose mode is
+// whatever init chose.
 func openExistingTestDB(t *testing.T, dbPath string) (*dolt.DoltStore, error) {
 	t.Helper()
 	// Serialize dolt.New() to avoid race in Dolt's InitStatusVariables (bd-cqjoi)
@@ -283,4 +302,191 @@ func openExistingTestDB(t *testing.T, dbPath string) (*dolt.DoltStore, error) {
 		cfg.ServerPort = testDoltServerPort
 	}
 	return dolt.New(ctx, cfg)
+}
+
+// openWorkspaceStoreForTest reopens the workspace at beadsDir through the same
+// mode-dispatching factory the CLI uses, so the store it returns matches the
+// mode `bd init` actually wrote to metadata.json.
+//
+// Tests here used to reopen with dolt.NewFromConfig, which is server-only:
+// dolt.New ends in newServerMode unconditionally, and the embedded engine
+// lives in a different package. Since plain `bd init` became embedded, that
+// route could not read back its own workspace, and this suite made the
+// mismatch loud rather than absent -- cmd/bd's TestMain exports BEADS_DOLT_PORT
+// process-wide for the test container, so the doomed open resolved to the
+// container and failed with `database "..." not found on Dolt server at
+// 127.0.0.1:<port>` instead of an error naming the mode confusion (bd-kbx).
+func openWorkspaceStoreForTest(t *testing.T, beadsDir string) (storage.DoltStorage, error) {
+	t.Helper()
+	// Serialize store construction to avoid a race in Dolt's
+	// InitStatusVariables (bd-cqjoi); the embedded engine shares it.
+	doltNewMutex.Lock()
+	defer doltNewMutex.Unlock()
+	return newDoltStoreFromConfig(context.Background(), beadsDir)
+}
+
+// initDataRootForTest returns the directory the workspace's own metadata says
+// its database lives in, so a test can assert `bd init` created a database
+// without hardcoding one mode's layout.
+//
+// The layout is not a constant: embedded init writes .beads/embeddeddolt,
+// server-layout workspaces use .beads/dolt (or dolt_data_dir /
+// BEADS_DOLT_DATA_DIR), and shared-server mode puts it under the shared
+// server directory entirely. Hardcoded `.beads/dolt` assertions rotted into
+// permanent failures when plain init became embedded, and only surfaced when
+// Dolt actually ran (bd-kbx). ResolvePhysicalRoots is the resolver the gate
+// wiring already trusts for the same question.
+func initDataRootForTest(t *testing.T, beadsDir string) string {
+	t.Helper()
+	pr, err := doltserver.ResolvePhysicalRoots(beadsDir)
+	if err != nil {
+		t.Fatalf("resolve physical roots for %s: %v", beadsDir, err)
+	}
+	if len(pr.Roots) != 1 {
+		t.Fatalf("expected exactly one physical root for %s, got %v (mode %q, %s)",
+			beadsDir, pr.Roots, pr.Mode, pr.Provenance)
+	}
+	return pr.Roots[0]
+}
+
+// requireInitDataRoot asserts that `bd init` created the workspace's database
+// directory, wherever the workspace's mode puts it, and returns that path.
+func requireInitDataRoot(t *testing.T, beadsDir string) string {
+	t.Helper()
+	root := initDataRootForTest(t, beadsDir)
+	info, err := os.Stat(root)
+	if err != nil {
+		t.Errorf("Dolt database directory was not created at %s: %v", root, err)
+		return root
+	}
+	if !info.IsDir() {
+		t.Errorf("expected %s to be a directory", root)
+	}
+	return root
+}
+
+// seedCurrentEraServerWorkspace makes beadsDir look like a server workspace
+// that THIS bd version created: metadata.json naming server mode and the
+// database, plus the local version witness.
+//
+// Tests that need an existing `.beads/dolt/` data directory have to say that
+// much. A bare `.beads/dolt/` with no metadata and no version witness is
+// precisely the pre-0.56 shape guardLegacyUpgradeWorkspace refuses, and it
+// cannot tell a hand-built fixture from a genuine cross-era workspace --
+// refusing is the reviewed behaviour there, so the fixture is what has to be
+// specific. These tests predate the guard and had been failing with "legacy
+// Dolt workspace detected" ever since (bd-kbx).
+func seedCurrentEraServerWorkspace(t *testing.T, beadsDir, database string) {
+	t.Helper()
+	if err := os.MkdirAll(beadsDir, 0o700); err != nil {
+		t.Fatalf("creating beads dir: %v", err)
+	}
+	cfg := configfile.DefaultConfig()
+	cfg.Backend = configfile.BackendDolt
+	cfg.DoltMode = configfile.DoltModeServer
+	cfg.DoltDatabase = database
+	cfg.DoltServerHost = "127.0.0.1"
+	cfg.DoltServerPort = testDoltServerPort
+	if err := cfg.Save(beadsDir); err != nil {
+		t.Fatalf("writing metadata.json: %v", err)
+	}
+	if err := os.WriteFile(filepath.Join(beadsDir, localVersionFile), []byte(Version), 0o600); err != nil {
+		t.Fatalf("writing version witness: %v", err)
+	}
+}
+
+// requireDefaultInitMode asserts the workspace was written in init's default
+// storage mode, embedded.
+//
+// It exists to pin down what `--database` does NOT do: it names the database,
+// it does not select a mode. Mode comes from --server / --shared-server /
+// --proxied-server, and init's own hyphen check on --database is conditioned
+// on the resolved mode being embedded, so a `--database`-only init is
+// embedded by construction. The tests here asserted DoltMode "server" from
+// the era when --database meant "an existing server database", and had been
+// failing ever since the default flipped (bd-kbx).
+func requireDefaultInitMode(t *testing.T, cfg *configfile.Config) {
+	t.Helper()
+	if got := cfg.GetDoltMode(); got != configfile.DoltModeEmbedded {
+		t.Errorf("Expected DoltMode %q (--database names the database, it does not select a mode), got %q",
+			configfile.DoltModeEmbedded, got)
+	}
+}
+
+// requireNoInitDataRoot asserts that `bd init` did NOT put a database under
+// beadsDir. Unlike the positive assertion this cannot ask the resolver, which
+// answers with the path a database WOULD occupy; it checks every layout an
+// init could have produced there, so the negative does not go quietly stale
+// the way the hardcoded `.beads/dolt` positives did (bd-kbx).
+func requireNoInitDataRoot(t *testing.T, beadsDir string) {
+	t.Helper()
+	for _, layout := range []string{"embeddeddolt", "dolt"} {
+		path := filepath.Join(beadsDir, layout)
+		if _, err := os.Stat(path); err == nil {
+			t.Errorf("database should NOT have been created at %s", path)
+		}
+	}
+}
+
+// initExportedEnvVars are the environment variables an in-process `bd`
+// command writes back into the process it runs in: the selected workspace
+// (main.go prepareSelectedCommandContext and the -C handler), the database
+// carried across a redirect (preserveRedirectSourceDatabase), and the two
+// switches `bd init` turns on for its own children (init.go).
+//
+// A real CLI run gets to leak these -- the process exits immediately after.
+// Running the same code in-process does not, and nothing else resets them.
+var initExportedEnvVars = []string{
+	"BEADS_DIR",
+	"BEADS_DOLT_SERVER_DATABASE",
+	"BEADS_DOLT_SHARED_SERVER",
+	"BEADS_DOLT_DEBUG",
+}
+
+// isolateInitEnvForTest confines the process-global environment that an
+// in-process `bd init` mutates to the calling test, in both directions.
+//
+// Inbound, it drops any workspace selection an earlier test exported: a
+// leaked BEADS_DIR points at that test's temp directory, which t.TempDir has
+// already deleted, so the next init aborts before doing anything with
+// "bd init refuses to run over live bd activity on this workspace:
+// workspacegate: gate parent <the other test's dir> must exist". One leaking
+// test took out every init test after it -- including the ones that shell out
+// to a real `bd`, which inherit os.Environ() (bd-kbx).
+//
+// Outbound, it restores the whole BEADS_* namespace on cleanup, which is
+// wider than the inbound list on purpose: the inbound clear must name only
+// variables that are safe to drop, while the restore only has to put things
+// back, so it stays correct as init grows new exports.
+//
+// Call this BEFORE any t.Setenv in the test. Cleanups run
+// last-registered-first, so the snapshot must be taken first to be restored
+// last.
+func isolateInitEnvForTest(t *testing.T) {
+	t.Helper()
+	const prefix = "BEADS_"
+	saved := map[string]string{}
+	for _, kv := range os.Environ() {
+		k, v, ok := strings.Cut(kv, "=")
+		if ok && strings.HasPrefix(k, prefix) {
+			saved[k] = v
+		}
+	}
+	t.Cleanup(func() {
+		for _, kv := range os.Environ() {
+			k, _, ok := strings.Cut(kv, "=")
+			if !ok || !strings.HasPrefix(k, prefix) {
+				continue
+			}
+			if _, kept := saved[k]; !kept {
+				_ = os.Unsetenv(k)
+			}
+		}
+		for k, v := range saved {
+			_ = os.Setenv(k, v)
+		}
+	})
+	for _, k := range initExportedEnvVars {
+		_ = os.Unsetenv(k)
+	}
 }
