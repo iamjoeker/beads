@@ -1839,17 +1839,20 @@ type SweepResult struct {
 	// ReferencedIds A BOUNDED SAMPLE of the ids `skipped.referenced` counts — at most 100, in the order the candidate query returned them. It is a sample, not the set: compare its length against 100 to tell a truncated one from a complete one. Absent when nothing was protected.
 	ReferencedIds *[]string `json:"referenced_ids,omitempty"`
 
-	// Skipped The candidates a sweep declined to delete, bucketed by WHY. They are separate counters rather than one number because they mean different things: the first two are PROTECTIONS, and the last four are the sweep declining to trust its own input.
+	// Skipped The candidates a sweep declined to delete, bucketed by WHY. They are separate counters rather than one number because they mean different things: the first three are PROTECTIONS, and the last four are the sweep declining to trust its own input.
 	Skipped SweepSkips `json:"skipped"`
 
 	// Swept How many beads were deleted, or under `dry_run` would be.
 	Swept int `json:"swept"`
 }
 
-// SweepSkips The candidates a sweep declined to delete, bucketed by WHY. They are separate counters rather than one number because they mean different things: the first two are PROTECTIONS, and the last four are the sweep declining to trust its own input.
+// SweepSkips The candidates a sweep declined to delete, bucketed by WHY. They are separate counters rather than one number because they mean different things: the first three are PROTECTIONS, and the last four are the sweep declining to trust its own input.
 type SweepSkips struct {
 	// ClosedAtOrAfterCutoff Candidates whose close timestamp did not satisfy `closed_before`. See `not_closed`.
 	ClosedAtOrAfterCutoff int `json:"closed_at_or_after_cutoff"`
+
+	// LabelProtected Candidates held back because they carry one of the workspace's GC-protected labels (`gc.protected_labels`, defaulting to merge-request and message records). No request member overrides it: for those classes closure is a normal part of their life and the bead is the only record of what it describes, so "closed" is the trigger for deletion rather than evidence that deleting is safe. A caller who means to delete one names it to `bd delete`.
+	LabelProtected int `json:"label_protected"`
 
 	// NotClosed Candidates the tier query returned that the recheck found were not closed. A NON-ZERO VALUE HERE IS A DEFENSE FIRING, not a normal outcome: the query asked for exactly the beads this excludes.
 	NotClosed int `json:"not_closed"`

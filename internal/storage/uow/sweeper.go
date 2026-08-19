@@ -4,6 +4,7 @@ import (
 	"context"
 	"fmt"
 
+	"github.com/steveyegge/beads/internal/config"
 	"github.com/steveyegge/beads/internal/storage/domain"
 	"github.com/steveyegge/beads/internal/types"
 	"github.com/steveyegge/beads/internal/workapi"
@@ -81,7 +82,8 @@ func sweepInUOW(ctx context.Context, uw UnitOfWork, req publicops.SweepRequest) 
 		return publicops.SweepResult{}, fmt.Errorf("listing sweep candidates: %w", err)
 	}
 
-	kept, skips := workapi.FilterSweepCandidates(page.Items, req.IDPattern, req.ClosedBefore)
+	kept, skips := workapi.FilterSweepCandidates(page.Items, req.IDPattern, req.ClosedBefore,
+		resolveGCProtectedLabelsInUOW(ctx, uw))
 	result.Skipped = skips
 
 	if req.ProtectReferenced {
@@ -182,4 +184,20 @@ func sweepReferencedInUOW(ctx context.Context, uw UnitOfWork, candidates []*type
 		}
 	}
 	return referenced, nil
+}
+
+// resolveGCProtectedLabelsInUOW is this body's half of the protected-label
+// read: the stored setting, then config.yaml, then the built-in defaults, all
+// layered by the same workapi function the shared body uses.
+//
+// A FAILED READ FALLS BACK TO A SET THAT PROTECTS rather than failing the
+// sweep — see issueops.ResolveGCProtectedLabelsInTx for why the alternative is
+// the loss this mechanism exists to prevent. The read is on the unit of work
+// the candidates came off, so one snapshot decides both.
+func resolveGCProtectedLabelsInUOW(ctx context.Context, uw UnitOfWork) workapi.GCProtectedLabels {
+	stored, err := uw.ConfigUseCase().GetConfig(ctx, workapi.ConfigKeyGCProtectedLabels)
+	if err != nil {
+		stored = ""
+	}
+	return workapi.ResolveGCProtectedLabels(stored, config.GetGCProtectedLabelsFromYAML())
 }

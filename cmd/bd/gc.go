@@ -94,8 +94,10 @@ Examples:
 			}
 
 			var stats closedDeletionCandidateStats
-			closedIssues, stats = filterClosedDeletionCandidates(closedIssues, &cutoffTime)
+			protected := resolveGCProtectedLabels(ctx, store)
+			closedIssues, stats = filterClosedDeletionCandidates(closedIssues, &cutoffTime, protected)
 			warnClosedDeletionSafetySkips(stats)
+			reportGCLabelProtectedSkips(stats, protected)
 
 			if len(closedIssues) == 0 {
 				detail := fmt.Sprintf("  No closed issues older than %d days", cutoffDays)

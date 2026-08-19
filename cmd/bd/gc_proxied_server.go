@@ -12,6 +12,7 @@ import (
 	"github.com/steveyegge/beads/internal/storage/uow"
 	"github.com/steveyegge/beads/internal/storage/versioncontrolops"
 	"github.com/steveyegge/beads/internal/types"
+	"github.com/steveyegge/beads/internal/workapi"
 )
 
 func runGCProxiedServer(ctx context.Context) error {
@@ -57,20 +58,29 @@ func runGCProxiedServer(ctx context.Context) error {
 			ClosedBefore: &cutoffTime,
 		}
 
-		closedIssues, err := uow.RunTxRead(ctx, uowProvider, func(ctx context.Context, uw uow.UnitOfWork) ([]*types.Issue, error) {
+		// The candidates and the protected-label set come off ONE read, so a
+		// setting changed mid-sweep cannot leave the two describing different
+		// workspaces.
+		type decayScan struct {
+			issues    []*types.Issue
+			protected workapi.GCProtectedLabels
+		}
+		scan, err := uow.RunTxRead(ctx, uowProvider, func(ctx context.Context, uw uow.UnitOfWork) (decayScan, error) {
 			page, err := uw.IssueUseCase().SearchIssues(ctx, "", filter)
 			if err != nil {
-				return nil, err
+				return decayScan{}, err
 			}
-			return page.Items, nil
+			return decayScan{issues: page.Items, protected: resolveGCProtectedLabels(ctx, uowMolReader{uw: uw})}, nil
 		})
 		if err != nil {
 			return HandleErrorRespectJSON("searching closed issues: %v", err)
 		}
+		closedIssues := scan.issues
 
 		var stats closedDeletionCandidateStats
-		closedIssues, stats = filterClosedDeletionCandidates(closedIssues, &cutoffTime)
+		closedIssues, stats = filterClosedDeletionCandidates(closedIssues, &cutoffTime, scan.protected)
 		warnClosedDeletionSafetySkips(stats)
+		reportGCLabelProtectedSkips(stats, scan.protected)
 
 		switch {
 		case len(closedIssues) == 0:

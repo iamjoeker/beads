@@ -35,6 +35,9 @@ func TestSweeperContract(t *testing.T) {
 	t.Run("ProtectsPinnedRows", func(t *testing.T) {
 		conformance.RunSweeperProtectsPinnedRows(t, ctx, fixture)
 	})
+	t.Run("ProtectsLabelProtectedRecords", func(t *testing.T) {
+		conformance.RunSweeperProtectsLabelProtectedRecords(t, ctx, fixture)
+	})
 	t.Run("HonorsTheCutoffAndThePattern", func(t *testing.T) {
 		conformance.RunSweeperHonorsTheCutoffAndThePattern(t, ctx, fixture)
 	})

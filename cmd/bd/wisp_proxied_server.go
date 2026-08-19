@@ -134,7 +134,8 @@ func runWispGCProxiedServer(ctx context.Context, dryRun bool, ageThreshold time.
 		return err
 	}
 	r := uowMolReader{uw: uw}
-	abandoned, err := findAbandonedWisps(ctx, r, cleanAll, ageThreshold, excludeTypes)
+	abandoned, labelProtected, err := findAbandonedWisps(ctx, r, cleanAll, ageThreshold, excludeTypes)
+	protectedLabels := resolveGCProtectedLabels(ctx, r)
 	uw.Close(ctx)
 	if err != nil && abandoned == nil {
 		return HandleError("%v", err)
@@ -142,6 +143,7 @@ func runWispGCProxiedServer(ctx context.Context, dryRun bool, ageThreshold time.
 	if err != nil {
 		fmt.Fprintf(os.Stderr, "Warning: cascade expansion incomplete: %v\n", err)
 	}
+	reportWispLabelProtected(labelProtected, protectedLabels)
 
 	if len(abandoned) == 0 {
 		if jsonOutput {
@@ -240,29 +242,10 @@ func runWispPurgeClosedProxiedServer(ctx context.Context, dryRun, force bool, ex
 		return HandleError("listing closed wisps: %v", err)
 	}
 
-	pinnedCount := 0
-	infraCount := 0
-	filtered := make([]*types.Issue, 0, len(closedIssues))
-	for _, issue := range closedIssues {
-		if issue.Pinned {
-			pinnedCount++
-			continue
-		}
-		if r.IsInfraTypeCtx(ctx, issue.IssueType) {
-			infraCount++
-			continue
-		}
-		filtered = append(filtered, issue)
-	}
-	closedIssues = filtered
+	closedIssues, skips := filterClosedWispPurgeCandidates(ctx, r, closedIssues)
 	uw.Close(ctx)
 
-	if pinnedCount > 0 && !jsonOutput {
-		fmt.Printf("Skipping %d pinned issue(s) (protected from cleanup)\n", pinnedCount)
-	}
-	if infraCount > 0 && !jsonOutput {
-		fmt.Printf("Skipping %d configured infra issue(s) protected from GC\n", infraCount)
-	}
+	reportClosedWispPurgeSkips(skips)
 
 	if len(closedIssues) == 0 {
 		if jsonOutput {

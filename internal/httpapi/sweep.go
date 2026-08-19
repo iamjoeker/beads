@@ -261,6 +261,7 @@ func sweepResponse(result issueops.SweepResult) apigen.SweepResult {
 		Labels:       result.Labels,
 		Events:       result.Events,
 		Skipped: apigen.SweepSkips{
+			LabelProtected:        result.Skipped.LabelProtected,
 			Pinned:                result.Skipped.Pinned,
 			Referenced:            result.Skipped.Referenced,
 			NotClosed:             result.Skipped.NotClosed,

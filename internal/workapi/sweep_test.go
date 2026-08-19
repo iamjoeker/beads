@@ -122,7 +122,7 @@ func TestFilterSweepCandidatesRechecksClosedAtCutoff(t *testing.T) {
 		nil,
 	}
 
-	filtered, skips := FilterSweepCandidates(candidates, "", &cutoff)
+	filtered, skips := FilterSweepCandidates(candidates, "", &cutoff, nil)
 
 	if len(filtered) != 1 || filtered[0].ID != "old-closed" {
 		t.Fatalf("filtered IDs = %v, want only old-closed", sweepCandidateIDs(filtered))
@@ -150,7 +150,7 @@ func TestFilterSweepCandidatesWithoutCutoffStillRequiresClosedAt(t *testing.T) {
 		{ID: "closed-missing-time", Status: types.StatusClosed},
 	}
 
-	filtered, skips := FilterSweepCandidates(candidates, "", nil)
+	filtered, skips := FilterSweepCandidates(candidates, "", nil, nil)
 
 	if len(filtered) != 1 || filtered[0].ID != "closed" {
 		t.Fatalf("filtered IDs = %v, want only closed", sweepCandidateIDs(filtered))
@@ -174,7 +174,7 @@ func TestFilterSweepCandidatesNarrowsByPatternBeforeProtecting(t *testing.T) {
 		{ID: "other-pinned", Status: types.StatusClosed, ClosedAt: &closedAt, Pinned: true},
 	}
 
-	filtered, skips := FilterSweepCandidates(candidates, "keep-*", nil)
+	filtered, skips := FilterSweepCandidates(candidates, "keep-*", nil, nil)
 
 	if len(filtered) != 1 || filtered[0].ID != "keep-1" {
 		t.Fatalf("filtered IDs = %v, want only keep-1", sweepCandidateIDs(filtered))

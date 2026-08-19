@@ -203,6 +203,45 @@ func RunSweeperProtectsPinnedRows(t *testing.T, ctx context.Context, fixture Swe
 	sweeperAssertIssueRows(t, ctx, fixture, 1, pinned)
 }
 
+// RunSweeperProtectsLabelProtectedRecords pins the protection that does not
+// depend on status (issueops.SweepSkips.LabelProtected): a closed row carrying
+// one of the workspace's GC-protected labels is held back and counted, and the
+// sweep still clears the row beside it.
+//
+// IT IS SEEDED IN THE EPHEMERAL TIER because that is where the loss was
+// unrecoverable — wisp tables are dolt_ignored, so a deletion there has no
+// history, no backup and no undo — and because an unfiltered sweep of closed
+// wisps is the ordinary use of `bd purge`, which is what made "closed means
+// done" load-bearing for records that are closed as a normal part of their
+// life.
+//
+// THE CONTROL IS THE ASSERTION. Both rows are closed, both carry the same
+// closed_at, both are wisps, and only one carries the label; the control being
+// GONE is what makes the protected row's survival evidence of the protection
+// rather than of a sweep that selected nothing. The guard this replaced passed
+// a suite that asserted only its presence while its predicate matched no rows.
+func RunSweeperProtectsLabelProtectedRecords(t *testing.T, ctx context.Context, fixture SweeperFixture) {
+	t.Helper()
+	plain := sweeperSeedClosedIssue(t, ctx, fixture, "gclbl", true)
+	protected := sweeperSeed(t, ctx, fixture, sweeperIssue(fixture, "gclbl", "keep", true), func(issue *types.Issue) {
+		issue.Labels = []string{"gt:merge-request"}
+	})
+
+	result := sweeperSweep(t, ctx, fixture, publicops.SweepRequest{
+		Tier:      publicops.SweepEphemeral,
+		IDPattern: sweeperPattern(fixture, "gclbl"),
+	})
+
+	if result.Swept != 1 {
+		t.Errorf("Swept = %d, want 1 — the labeled record must not be one of them", result.Swept)
+	}
+	if result.Skipped.LabelProtected != 1 {
+		t.Errorf("Skipped.LabelProtected = %d, want 1", result.Skipped.LabelProtected)
+	}
+	sweeperAssertWispRows(t, ctx, fixture, 0, plain)
+	sweeperAssertWispRows(t, ctx, fixture, 1, protected)
+}
+
 // RunSweeperHonorsTheCutoffAndThePattern pins the two narrowing fields.
 //
 // The CUTOFF is HALF-OPEN: a row closed exactly at the cutoff is KEPT

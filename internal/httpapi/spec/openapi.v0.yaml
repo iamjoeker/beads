@@ -7576,6 +7576,7 @@ components:
     SweepSkips:
       type: object
       required:
+        - label_protected
         - pinned
         - referenced
         - not_closed
@@ -7585,9 +7586,19 @@ components:
       description: >-
         The candidates a sweep declined to delete, bucketed by WHY. They are
         separate counters rather than one number because they mean different
-        things: the first two are PROTECTIONS, and the last four are the sweep
-        declining to trust its own input.
+        things: the first three are PROTECTIONS, and the last four are the
+        sweep declining to trust its own input.
       properties:
+        label_protected:
+          type: integer
+          description: >-
+            Candidates held back because they carry one of the workspace's
+            GC-protected labels (`gc.protected_labels`, defaulting to
+            merge-request and message records). No request member overrides it:
+            for those classes closure is a normal part of their life and the
+            bead is the only record of what it describes, so "closed" is the
+            trigger for deletion rather than evidence that deleting is safe. A
+            caller who means to delete one names it to `bd delete`.
         pinned:
           type: integer
           description: >-
