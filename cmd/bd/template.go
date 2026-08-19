@@ -58,6 +58,13 @@ type CloneOptions struct {
 	Ephemeral bool              // If true, spawned issues are marked for bulk deletion
 	Prefix    string            // Override prefix for ID generation (bd-hobo: distinct prefixes)
 
+	// WispType stamps the TTL classification on the spawned root AND every
+	// spawned child (bd-2kl). A molecule's steps outnumber its root, so typing
+	// only the root would leave the bulk of the rows unclassified — the very
+	// gap this field exists to close. Empty means unclassified, which is what
+	// every spawn produced before this field existed.
+	WispType types.WispType
+
 	// Dynamic bonding fields (for Christmas Ornament pattern)
 	ParentID string // Parent molecule ID to bond under (e.g., "patrol-x7k")
 	ChildRef string // Child reference with variables (e.g., "arm-{{polecat_name}}")
@@ -403,6 +410,51 @@ func applyVariableDefaults(vars map[string]string, subgraph *TemplateSubgraph) m
 	return result
 }
 
+// formulaWispTypeVar is the formula variable through which a formula declares
+// the TTL classification of the wisps it spawns. Patrol and GC formulas have
+// carried it since they were written; bd-2kl is that declaration finally being
+// read at spawn time instead of ignored.
+const formulaWispTypeVar = "wisp_type"
+
+// wispTypeFlagUsage is the shared --wisp-type help text for the spawners, so
+// the three of them cannot describe the same flag three different ways.
+const wispTypeFlagUsage = "TTL classification stamped on the spawned root and every child: " +
+	"heartbeat, ping, patrol, gc_report, recovery, error, escalation. " +
+	"Overrides the formula's own wisp_type var; pass \"\" to spawn unclassified"
+
+// resolveWispType picks the TTL classification for a spawn. An explicit
+// --wisp-type flag wins over the formula's declaration, including an explicit
+// empty value, which is how a caller spawns unclassified despite a formula
+// default. Pass vars AFTER applyVariableDefaults so the formula's own default
+// is visible here.
+//
+// The two sources answer to different rules. A flag value came from the
+// caller's keyboard, so an unknown one is a typo and is refused. A
+// formula-declared value that is outside the vocabulary only warns: nothing
+// read this var before, so a formula already carrying an out-of-vocabulary
+// wisp_type spawns fine today, and turning that into a hard failure would
+// break working formulas rather than classify anything.
+func resolveWispType(flagValue string, flagSet bool, vars map[string]string) (types.WispType, error) {
+	if flagSet {
+		wispType := types.WispType(flagValue)
+		if !wispType.IsValid() {
+			return "", fmt.Errorf("invalid wisp-type %q (must be %s)", flagValue, types.ValidWispTypeNames())
+		}
+		return wispType, nil
+	}
+	declared := vars[formulaWispTypeVar]
+	if declared == "" {
+		return "", nil
+	}
+	wispType := types.WispType(declared)
+	if !wispType.IsValid() {
+		WarnError("ignoring formula %s=%q: not a known wisp type (%s); spawned rows stay unclassified",
+			formulaWispTypeVar, declared, types.ValidWispTypeNames())
+		return "", nil
+	}
+	return wispType, nil
+}
+
 // substituteVariables replaces {{variable}} with values
 func substituteVariables(text string, vars map[string]string) string {
 	return variablePattern.ReplaceAllStringFunc(text, func(match string) string {
@@ -697,6 +749,7 @@ func cloneSubgraphInto(ctx context.Context, w molWriter, subgraph *TemplateSubgr
 			Assignee:           issueAssignee,
 			EstimatedMinutes:   oldIssue.EstimatedMinutes,
 			Ephemeral:          opts.Ephemeral, // mark for cleanup when closed
+			WispType:           opts.WispType,  // TTL classification for compaction (bd-2kl)
 			IDPrefix:           opts.Prefix,    // distinct prefixes for mols/wisps
 			// Gate fields (for async coordination)
 			AwaitType: oldIssue.AwaitType,

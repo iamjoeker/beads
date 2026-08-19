@@ -58,6 +58,9 @@ func UpdateFields(patch publicops.IssuePatch) map[string]interface{} {
 		{patch.ExternalRef.Set, "external_ref", patch.ExternalRef.Value},
 		{patch.DueAt.Set, "due_at", patch.DueAt.Value},
 		{patch.DeferUntil.Set, "defer_until", patch.DeferUntil.Value},
+		// Written as a plain string: the SET-clause builder hands the value
+		// straight to the driver, which has no encoder for a named string type.
+		{patch.WispType.Set, "wisp_type", string(patch.WispType.Value)},
 	} {
 		if field.set {
 			updates[field.key] = field.val
@@ -94,6 +97,9 @@ func ValidateUpdateRequest(request publicops.UpdateRequest) error {
 	}
 	if patch.Persistence.Set && !patch.Persistence.Value.IsValid() {
 		return fmt.Errorf("%w: invalid persistence mode %q", storage.ErrValidation, patch.Persistence.Value)
+	}
+	if patch.WispType.Set && !patch.WispType.Value.IsValid() {
+		return fmt.Errorf("%w: invalid wisp type %q (must be %s)", storage.ErrValidation, patch.WispType.Value, types.ValidWispTypeNames())
 	}
 	return nil
 }

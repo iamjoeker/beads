@@ -76,8 +76,13 @@ func runWispCreateProxiedServer(ctx context.Context, in wispCreateInput) error {
 		return HandleErrorWithHint(err.Error(), fmt.Sprintf("Provide them with: --var %s=<value>", firstMissingVar(subgraph, vars)))
 	}
 
+	wispType, err := resolveWispType(in.wispType, in.wispTypeSet, vars)
+	if err != nil {
+		return HandleError("%v", err)
+	}
+
 	if in.dryRun {
-		renderWispCreateDryRun(protoID, subgraph, vars, in.rootOnly)
+		renderWispCreateDryRun(protoID, subgraph, vars, in.rootOnly, wispType)
 		return nil
 	}
 
@@ -87,6 +92,7 @@ func runWispCreateProxiedServer(ctx context.Context, in wispCreateInput) error {
 			Vars:      vars,
 			Actor:     actor,
 			Ephemeral: true,
+			WispType:  wispType,
 			Prefix:    types.IDPrefixWisp,
 			RootOnly:  in.rootOnly,
 		})
@@ -99,7 +105,7 @@ func runWispCreateProxiedServer(ctx context.Context, in wispCreateInput) error {
 		return HandleError("%v", err)
 	}
 
-	return renderWispCreateResult(result)
+	return renderWispCreateResult(result, wispType)
 }
 
 func runWispListProxiedServer(ctx context.Context, showAll bool, typeFilter string) error {

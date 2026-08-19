@@ -305,6 +305,9 @@ func updateSpec(request publicops.UpdateRequest) (domain.UpdateSpec, error) {
 	setField(fields, "external_ref", patch.ExternalRef)
 	setField(fields, "due_at", patch.DueAt)
 	setField(fields, "defer_until", patch.DeferUntil)
+	if patch.WispType.Set {
+		fields["wisp_type"] = string(patch.WispType.Value)
+	}
 	if patch.Notes.Set && patch.AppendNotes.Set {
 		return domain.UpdateSpec{}, validationError(fmt.Errorf("update: notes and append notes cannot both be set"))
 	}

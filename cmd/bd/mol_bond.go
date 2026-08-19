@@ -142,15 +142,15 @@ func runMolBond(cmd *cobra.Command, args []string) error {
 		result, err = bondProtoProto(ctx, store, issueA, issueB, in.bondType, in.customTitle, actor)
 	case aIsProto && !bIsProto:
 		if cookedA {
-			result, err = bondProtoMolWithSubgraph(ctx, store, subgraphA, issueA, issueB, in.bondType, in.vars, in.childRef, actor, in.ephemeral, in.pour)
+			result, err = bondProtoMolWithSubgraph(ctx, store, subgraphA, issueA, issueB, in.bondType, in.vars, in.childRef, actor, in.phase)
 		} else {
-			result, err = bondProtoMol(ctx, store, issueA, issueB, in.bondType, in.vars, in.childRef, actor, in.ephemeral, in.pour)
+			result, err = bondProtoMol(ctx, store, issueA, issueB, in.bondType, in.vars, in.childRef, actor, in.phase)
 		}
 	case !aIsProto && bIsProto:
 		if cookedB {
-			result, err = bondProtoMolWithSubgraph(ctx, store, subgraphB, issueB, issueA, in.bondType, in.vars, in.childRef, actor, in.ephemeral, in.pour)
+			result, err = bondProtoMolWithSubgraph(ctx, store, subgraphB, issueB, issueA, in.bondType, in.vars, in.childRef, actor, in.phase)
 		} else {
-			result, err = bondMolProto(ctx, store, issueA, issueB, in.bondType, in.vars, in.childRef, actor, in.ephemeral, in.pour)
+			result, err = bondMolProto(ctx, store, issueA, issueB, in.bondType, in.vars, in.childRef, actor, in.phase)
 		}
 	default:
 		result, err = bondMolMol(ctx, store, issueA, issueB, in.bondType, actor)
@@ -159,7 +159,7 @@ func runMolBond(cmd *cobra.Command, args []string) error {
 		return HandleErrorRespectJSON("bonding: %v", err)
 	}
 
-	return renderMolBondResult(result, issueA.ID, issueB.ID, in.ephemeral, in.pour)
+	return renderMolBondResult(result, issueA.ID, issueB.ID, in.phase.ephemeral, in.phase.pour)
 }
 
 type molBondInput struct {
@@ -169,9 +169,21 @@ type molBondInput struct {
 	customTitle string
 	dryRun      bool
 	vars        map[string]string
-	ephemeral   bool
-	pour        bool
+	phase       bondSpawnPhase
 	childRef    string
+}
+
+// bondSpawnPhase carries the caller's intent for the rows a bond spawns: which
+// persistence plane they land on, and how they are classified for TTL
+// compaction once there (bd-2kl).
+type bondSpawnPhase struct {
+	ephemeral bool // --ephemeral: force the spawn onto the wisp plane
+	pour      bool // --pour: force it persistent
+	// wispType/wispTypeSet carry --wisp-type. The "set" bool is what makes an
+	// explicit `--wisp-type ""` mean "unclassified, ignore the formula's
+	// declaration" rather than "flag absent".
+	wispType    string
+	wispTypeSet bool
 }
 
 func gatherMolBondInput(cmd *cobra.Command, args []string) (molBondInput, error) {
@@ -179,11 +191,13 @@ func gatherMolBondInput(cmd *cobra.Command, args []string) (molBondInput, error)
 	in.bondType, _ = cmd.Flags().GetString("type")
 	in.customTitle, _ = cmd.Flags().GetString("as")
 	in.dryRun, _ = cmd.Flags().GetBool("dry-run")
-	in.ephemeral, _ = cmd.Flags().GetBool("ephemeral")
-	in.pour, _ = cmd.Flags().GetBool("pour")
+	in.phase.ephemeral, _ = cmd.Flags().GetBool("ephemeral")
+	in.phase.pour, _ = cmd.Flags().GetBool("pour")
+	in.phase.wispType, _ = cmd.Flags().GetString("wisp-type")
+	in.phase.wispTypeSet = cmd.Flags().Changed("wisp-type")
 	in.childRef, _ = cmd.Flags().GetString("ref")
 
-	if in.ephemeral && in.pour {
+	if in.phase.ephemeral && in.phase.pour {
 		return in, fmt.Errorf("cannot use both --ephemeral and --pour")
 	}
 	if in.bondType != types.BondTypeSequential && in.bondType != types.BondTypeParallel && in.bondType != types.BondTypeConditional {
@@ -232,9 +246,9 @@ func renderMolBondDryRun(in molBondInput, issueA *types.Issue, formulaA string, 
 		fmt.Printf("  B: %s (%s)\n", issueB.Title, operandType(bIsProto))
 	}
 	fmt.Printf("  Bond type: %s\n", in.bondType)
-	if in.ephemeral {
+	if in.phase.ephemeral {
 		fmt.Printf("  Phase override: vapor (--ephemeral)\n")
-	} else if in.pour {
+	} else if in.phase.pour {
 		fmt.Printf("  Phase override: liquid (--pour)\n")
 	}
 	if in.childRef != "" {
@@ -388,12 +402,12 @@ func bondProtoProtoInto(ctx context.Context, w molWriter, protoA, protoB *types.
 // bondProtoMol bonds a proto to an existing molecule by spawning the proto.
 // If childRef is provided, generates custom IDs like "parent.childref" (dynamic bonding).
 // protoSubgraph can be nil if proto is from DB (will be loaded), or pre-loaded for formulas.
-func bondProtoMol(ctx context.Context, s storage.DoltStorage, proto, mol *types.Issue, bondType string, vars map[string]string, childRef string, actorName string, ephemeralFlag, pourFlag bool) (*BondResult, error) {
-	return bondProtoMolWithSubgraph(ctx, s, nil, proto, mol, bondType, vars, childRef, actorName, ephemeralFlag, pourFlag)
+func bondProtoMol(ctx context.Context, s storage.DoltStorage, proto, mol *types.Issue, bondType string, vars map[string]string, childRef string, actorName string, phase bondSpawnPhase) (*BondResult, error) {
+	return bondProtoMolWithSubgraph(ctx, s, nil, proto, mol, bondType, vars, childRef, actorName, phase)
 }
 
 // bondProtoMolWithSubgraph is the internal implementation that accepts a pre-loaded subgraph.
-func bondProtoMolWithSubgraph(ctx context.Context, s storage.DoltStorage, protoSubgraph *TemplateSubgraph, proto, mol *types.Issue, bondType string, vars map[string]string, childRef string, actorName string, ephemeralFlag, pourFlag bool) (*BondResult, error) {
+func bondProtoMolWithSubgraph(ctx context.Context, s storage.DoltStorage, protoSubgraph *TemplateSubgraph, proto, mol *types.Issue, bondType string, vars map[string]string, childRef string, actorName string, phase bondSpawnPhase) (*BondResult, error) {
 	if protoSubgraph == nil {
 		var err error
 		protoSubgraph, err = loadTemplateSubgraph(ctx, s, proto.ID)
@@ -401,7 +415,7 @@ func bondProtoMolWithSubgraph(ctx context.Context, s storage.DoltStorage, protoS
 			return nil, fmt.Errorf("loading proto: %w", err)
 		}
 	}
-	opts, err := buildAttachCloneOpts(protoSubgraph, mol, bondType, vars, childRef, actorName, ephemeralFlag, pourFlag)
+	opts, err := buildAttachCloneOpts(protoSubgraph, mol, bondType, vars, childRef, actorName, phase)
 	if err != nil {
 		return nil, err
 	}
@@ -421,7 +435,7 @@ func bondProtoMolWithSubgraph(ctx context.Context, s storage.DoltStorage, protoS
 // bondProtoMolAttachInto is bondProtoMolWithSubgraph's counterpart for
 // callers that already have an open molWriter (the proxied-server duals),
 // so spawn + attach happen inside the caller's own transaction.
-func bondProtoMolAttachInto(ctx context.Context, w molWriter, protoSubgraph *TemplateSubgraph, proto, mol *types.Issue, bondType string, vars map[string]string, childRef string, actorName string, ephemeralFlag, pourFlag bool) (*BondResult, error) {
+func bondProtoMolAttachInto(ctx context.Context, w molWriter, protoSubgraph *TemplateSubgraph, proto, mol *types.Issue, bondType string, vars map[string]string, childRef string, actorName string, phase bondSpawnPhase) (*BondResult, error) {
 	if protoSubgraph == nil {
 		var err error
 		protoSubgraph, err = loadTemplateSubgraph(ctx, w, proto.ID)
@@ -429,7 +443,7 @@ func bondProtoMolAttachInto(ctx context.Context, w molWriter, protoSubgraph *Tem
 			return nil, fmt.Errorf("loading proto: %w", err)
 		}
 	}
-	opts, err := buildAttachCloneOpts(protoSubgraph, mol, bondType, vars, childRef, actorName, ephemeralFlag, pourFlag)
+	opts, err := buildAttachCloneOpts(protoSubgraph, mol, bondType, vars, childRef, actorName, phase)
 	if err != nil {
 		return nil, err
 	}
@@ -446,7 +460,7 @@ func bondProtoMolAttachInto(ctx context.Context, w molWriter, protoSubgraph *Tem
 	}, nil
 }
 
-func buildAttachCloneOpts(subgraph *TemplateSubgraph, mol *types.Issue, bondType string, vars map[string]string, childRef string, actorName string, ephemeralFlag, pourFlag bool) (CloneOptions, error) {
+func buildAttachCloneOpts(subgraph *TemplateSubgraph, mol *types.Issue, bondType string, vars map[string]string, childRef string, actorName string, phase bondSpawnPhase) (CloneOptions, error) {
 	requiredVars := extractAllVariables(subgraph)
 	var missingVars []string
 	for _, v := range requiredVars {
@@ -459,10 +473,19 @@ func buildAttachCloneOpts(subgraph *TemplateSubgraph, mol *types.Issue, bondType
 	}
 
 	makeEphemeral := mol.Ephemeral
-	if ephemeralFlag {
+	if phase.ephemeral {
 		makeEphemeral = true
-	} else if pourFlag {
+	} else if phase.pour {
 		makeEphemeral = false
+	}
+
+	// Defaults are applied for this lookup only. The substitution vars above
+	// stay exactly as the caller supplied them — bond has never filled formula
+	// defaults into them, and a spawn's classification is not the place to
+	// start.
+	wispType, err := resolveWispType(phase.wispType, phase.wispTypeSet, applyVariableDefaults(vars, subgraph))
+	if err != nil {
+		return CloneOptions{}, err
 	}
 
 	var depType types.DependencyType
@@ -479,6 +502,7 @@ func buildAttachCloneOpts(subgraph *TemplateSubgraph, mol *types.Issue, bondType
 		Vars:          vars,
 		Actor:         actorName,
 		Ephemeral:     makeEphemeral,
+		WispType:      wispType,
 		AttachToID:    mol.ID,
 		AttachDepType: depType,
 	}
@@ -490,9 +514,9 @@ func buildAttachCloneOpts(subgraph *TemplateSubgraph, mol *types.Issue, bondType
 }
 
 // bondMolProto bonds a molecule to a proto (symmetric with bondProtoMol)
-func bondMolProto(ctx context.Context, s storage.DoltStorage, mol, proto *types.Issue, bondType string, vars map[string]string, childRef string, actorName string, ephemeralFlag, pourFlag bool) (*BondResult, error) {
+func bondMolProto(ctx context.Context, s storage.DoltStorage, mol, proto *types.Issue, bondType string, vars map[string]string, childRef string, actorName string, phase bondSpawnPhase) (*BondResult, error) {
 	// Same as bondProtoMol but with arguments swapped
-	return bondProtoMol(ctx, s, proto, mol, bondType, vars, childRef, actorName, ephemeralFlag, pourFlag)
+	return bondProtoMol(ctx, s, proto, mol, bondType, vars, childRef, actorName, phase)
 }
 
 // wouldCreateCycle checks whether adding an edge (newDepID depends on newDependsOnID)
@@ -691,6 +715,7 @@ func init() {
 	molBondCmd.Flags().Bool("ephemeral", false, "Force spawn as vapor (ephemeral, Ephemeral=true)")
 	molBondCmd.Flags().Bool("pour", false, "Force spawn as liquid (persistent, Ephemeral=false)")
 	molBondCmd.Flags().String("ref", "", "Custom child reference with {{var}} substitution (e.g., arm-{{polecat_name}})")
+	molBondCmd.Flags().String("wisp-type", "", wispTypeFlagUsage)
 
 	molCmd.AddCommand(molBondCmd)
 }

@@ -220,6 +220,15 @@ func gatherUpdateInput(ctx context.Context, cmd *cobra.Command) (*updateInput, e
 	if historyChanged {
 		in.fields["no_history"] = false
 	}
+	// Changed()-detected so `--wisp-type ""` clears the classification, matching
+	// the non-proxied path in update.go.
+	if cmd.Flags().Changed("wisp-type") {
+		wispTypeStr, _ := cmd.Flags().GetString("wisp-type")
+		if !types.WispType(wispTypeStr).IsValid() {
+			return nil, HandleErrorRespectJSON("invalid wisp-type %q (must be %s, or \"\" to clear)", wispTypeStr, types.ValidWispTypeNames())
+		}
+		in.fields["wisp_type"] = wispTypeStr
+	}
 	if cmd.Flags().Changed("metadata") {
 		metadataValue, _ := cmd.Flags().GetString("metadata")
 		var metadataJSON string

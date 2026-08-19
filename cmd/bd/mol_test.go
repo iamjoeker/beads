@@ -347,7 +347,7 @@ func TestBondProtoMol(t *testing.T) {
 
 	// Bond proto to molecule
 	vars := map[string]string{"name": "auth-feature"}
-	result, err := bondProtoMol(ctx, store, proto, mol, types.BondTypeSequential, vars, "", "test", false, false)
+	result, err := bondProtoMol(ctx, store, proto, mol, types.BondTypeSequential, vars, "", "test", bondSpawnPhase{})
 	if err != nil {
 		t.Fatalf("bondProtoMol failed: %v", err)
 	}
@@ -911,7 +911,7 @@ func TestSpawnWithBasicAttach(t *testing.T) {
 	}
 
 	// Attach the second proto (simulating --attach flag behavior)
-	bondResult, err := bondProtoMol(ctx, s, attachProto, spawnedMol, types.BondTypeSequential, vars, "", "test", false, false)
+	bondResult, err := bondProtoMol(ctx, s, attachProto, spawnedMol, types.BondTypeSequential, vars, "", "test", bondSpawnPhase{})
 	if err != nil {
 		t.Fatalf("Failed to bond attachment: %v", err)
 	}
@@ -1016,12 +1016,12 @@ func TestSpawnWithMultipleAttachments(t *testing.T) {
 	}
 
 	// Attach both protos (simulating --attach A --attach B)
-	bondResultA, err := bondProtoMol(ctx, s, attachA, spawnedMol, types.BondTypeSequential, nil, "", "test", false, false)
+	bondResultA, err := bondProtoMol(ctx, s, attachA, spawnedMol, types.BondTypeSequential, nil, "", "test", bondSpawnPhase{})
 	if err != nil {
 		t.Fatalf("Failed to bond attachA: %v", err)
 	}
 
-	bondResultB, err := bondProtoMol(ctx, s, attachB, spawnedMol, types.BondTypeSequential, nil, "", "test", false, false)
+	bondResultB, err := bondProtoMol(ctx, s, attachB, spawnedMol, types.BondTypeSequential, nil, "", "test", bondSpawnPhase{})
 	if err != nil {
 		t.Fatalf("Failed to bond attachB: %v", err)
 	}
@@ -1134,7 +1134,7 @@ func TestSpawnAttachTypes(t *testing.T) {
 			}
 
 			// Bond with specified type
-			bondResult, err := bondProtoMol(ctx, s, attachProto, spawnedMol, tt.bondType, nil, "", "test", false, false)
+			bondResult, err := bondProtoMol(ctx, s, attachProto, spawnedMol, tt.bondType, nil, "", "test", bondSpawnPhase{})
 			if err != nil {
 				t.Fatalf("Failed to bond: %v", err)
 			}
@@ -1299,7 +1299,7 @@ func TestSpawnVariableAggregation(t *testing.T) {
 
 	// Bond attachment with same variables
 	spawnedMol, _ := s.GetIssue(ctx, spawnResult.NewEpicID)
-	bondResult, err := bondProtoMol(ctx, s, attachProto, spawnedMol, types.BondTypeSequential, vars, "", "test", false, false)
+	bondResult, err := bondProtoMol(ctx, s, attachProto, spawnedMol, types.BondTypeSequential, vars, "", "test", bondSpawnPhase{})
 	if err != nil {
 		t.Fatalf("Failed to bond: %v", err)
 	}
@@ -2556,7 +2556,7 @@ func TestBondProtoMolWithRef(t *testing.T) {
 	// Bond proto to patrol with custom child ref
 	vars := map[string]string{"polecat_name": "ace"}
 	childRef := "arm-{{polecat_name}}"
-	result, err := bondProtoMol(ctx, s, protoRoot, patrol, types.BondTypeSequential, vars, childRef, "test", false, false)
+	result, err := bondProtoMol(ctx, s, protoRoot, patrol, types.BondTypeSequential, vars, childRef, "test", bondSpawnPhase{})
 	if err != nil {
 		t.Fatalf("bondProtoMol failed: %v", err)
 	}
@@ -2627,14 +2627,14 @@ func TestBondProtoMolMultipleArms(t *testing.T) {
 
 	// Bond arm-ace
 	varsAce := map[string]string{"name": "ace"}
-	resultAce, err := bondProtoMol(ctx, s, proto, patrol, types.BondTypeParallel, varsAce, "arm-{{name}}", "test", false, false)
+	resultAce, err := bondProtoMol(ctx, s, proto, patrol, types.BondTypeParallel, varsAce, "arm-{{name}}", "test", bondSpawnPhase{})
 	if err != nil {
 		t.Fatalf("bondProtoMol (ace) failed: %v", err)
 	}
 
 	// Bond arm-nux
 	varsNux := map[string]string{"name": "nux"}
-	resultNux, err := bondProtoMol(ctx, s, proto, patrol, types.BondTypeParallel, varsNux, "arm-{{name}}", "test", false, false)
+	resultNux, err := bondProtoMol(ctx, s, proto, patrol, types.BondTypeParallel, varsNux, "arm-{{name}}", "test", bondSpawnPhase{})
 	if err != nil {
 		t.Fatalf("bondProtoMol (nux) failed: %v", err)
 	}

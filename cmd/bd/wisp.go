@@ -194,6 +194,11 @@ type wispCreateInput struct {
 	dryRun   bool
 	rootOnly bool
 	varFlags []string
+	// wispType/wispTypeSet carry --wisp-type. The "set" bool is what makes an
+	// explicit `--wisp-type ""` mean "unclassified, ignore the formula's
+	// default" rather than "flag absent".
+	wispType    string
+	wispTypeSet bool
 }
 
 func gatherWispCreateInput(cmd *cobra.Command, args []string) wispCreateInput {
@@ -201,6 +206,8 @@ func gatherWispCreateInput(cmd *cobra.Command, args []string) wispCreateInput {
 	in.dryRun, _ = cmd.Flags().GetBool("dry-run")
 	in.rootOnly, _ = cmd.Flags().GetBool("root-only")
 	in.varFlags, _ = cmd.Flags().GetStringArray("var")
+	in.wispType, _ = cmd.Flags().GetString("wisp-type")
+	in.wispTypeSet = cmd.Flags().Changed("wisp-type")
 	return in
 }
 
@@ -301,8 +308,13 @@ func runWispCreateCore(cmd *cobra.Command, args []string) error {
 		return HandleErrorWithHint(err.Error(), fmt.Sprintf("Provide them with: --var %s=<value>", firstMissingVar(subgraph, vars)))
 	}
 
+	wispType, err := resolveWispType(in.wispType, in.wispTypeSet, vars)
+	if err != nil {
+		return HandleError("%v", err)
+	}
+
 	if dryRun {
-		renderWispCreateDryRun(protoID, subgraph, vars, rootOnly)
+		renderWispCreateDryRun(protoID, subgraph, vars, rootOnly, wispType)
 		return nil
 	}
 
@@ -310,6 +322,7 @@ func runWispCreateCore(cmd *cobra.Command, args []string) error {
 		Vars:      vars,
 		Actor:     actor,
 		Ephemeral: true,
+		WispType:  wispType,
 		Prefix:    types.IDPrefixWisp,
 		RootOnly:  rootOnly,
 	})
@@ -317,7 +330,7 @@ func runWispCreateCore(cmd *cobra.Command, args []string) error {
 		return HandleError("creating wisp: %v", err)
 	}
 
-	return renderWispCreateResult(result)
+	return renderWispCreateResult(result, wispType)
 }
 
 func checkRequiredVars(subgraph *TemplateSubgraph, vars map[string]string) error {
@@ -342,7 +355,7 @@ func firstMissingVar(subgraph *TemplateSubgraph, vars map[string]string) string 
 	return ""
 }
 
-func renderWispCreateDryRun(protoID string, subgraph *TemplateSubgraph, vars map[string]string, rootOnly bool) {
+func renderWispCreateDryRun(protoID string, subgraph *TemplateSubgraph, vars map[string]string, rootOnly bool, wispType types.WispType) {
 	if rootOnly {
 		skipped := len(subgraph.Issues) - 1
 		fmt.Printf("\nDry run: would create wisp with 1 issue (root only) from proto %s\n", protoID)
@@ -352,7 +365,16 @@ func renderWispCreateDryRun(protoID string, subgraph *TemplateSubgraph, vars map
 	} else {
 		fmt.Printf("\nDry run: would create wisp with %d issues from proto %s\n\n", len(subgraph.Issues), protoID)
 	}
-	fmt.Printf("Storage: main database (ephemeral=true, not synced via git)\n\n")
+	fmt.Printf("Storage: main database (ephemeral=true, not synced via git)\n")
+	// Always printed, unclassified included: the whole point of bd-2kl is that
+	// a spawn's classification was invisible, and a line that appears only when
+	// a type was resolved would leave the failure mode looking like the
+	// success one.
+	if wispType == "" {
+		fmt.Printf("Wisp type: (unclassified — default TTL)\n\n")
+	} else {
+		fmt.Printf("Wisp type: %s\n\n", wispType)
+	}
 	issuesToShow := subgraph.Issues
 	if rootOnly && len(issuesToShow) > 0 {
 		issuesToShow = issuesToShow[:1]
@@ -363,18 +385,25 @@ func renderWispCreateDryRun(protoID string, subgraph *TemplateSubgraph, vars map
 	}
 }
 
-func renderWispCreateResult(result *InstantiateResult) error {
+func renderWispCreateResult(result *InstantiateResult, wispType types.WispType) error {
 	if jsonOutput {
 		type wispCreateResult struct {
 			*InstantiateResult
 			Phase string `json:"phase"`
+			// Reported even when empty so a consumer checking the
+			// classification can tell "spawned unclassified" from "this bd
+			// does not report classification at all".
+			WispType types.WispType `json:"wisp_type"`
 		}
-		return outputJSON(wispCreateResult{result, "vapor"})
+		return outputJSON(wispCreateResult{result, "vapor", wispType})
 	}
 
 	fmt.Printf("%s Created wisp: %d issues\n", ui.RenderPass("✓"), result.Created)
 	fmt.Printf("  Root issue: %s\n", result.NewEpicID)
 	fmt.Printf("  Phase: vapor (ephemeral, not synced via git)\n")
+	if wispType != "" {
+		fmt.Printf("  Wisp type: %s\n", wispType)
+	}
 	fmt.Printf("\nNext steps:\n")
 	fmt.Printf("  bd close %s.<step>       # Complete steps\n", result.NewEpicID)
 	fmt.Printf("  bd mol squash %s         # Condense to digest (promotes to persistent)\n", result.NewEpicID)
@@ -1320,11 +1349,13 @@ func init() {
 	wispCmd.Flags().StringArray("var", []string{}, "Variable substitution (key=value)")
 	wispCmd.Flags().Bool("dry-run", false, "Preview what would be created")
 	wispCmd.Flags().Bool("root-only", false, "Create only the root issue (no child step issues)")
+	wispCmd.Flags().String("wisp-type", "", wispTypeFlagUsage)
 
 	// Wisp create command flags (kept for backwards compat: bd mol wisp create <proto>)
 	wispCreateCmd.Flags().StringArray("var", []string{}, "Variable substitution (key=value)")
 	wispCreateCmd.Flags().Bool("dry-run", false, "Preview what would be created")
 	wispCreateCmd.Flags().Bool("root-only", false, "Create only the root issue (no child step issues)")
+	wispCreateCmd.Flags().String("wisp-type", "", wispTypeFlagUsage)
 
 	wispListCmd.Flags().Bool("all", false, "Include closed wisps (a MERGED merge-request wisp is closed)")
 	wispListCmd.Flags().String("type", "", "Filter by issue type (e.g., agent, task, patrol)")

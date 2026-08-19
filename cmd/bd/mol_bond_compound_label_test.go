@@ -2,6 +2,7 @@ package main
 
 import (
 	"context"
+	"fmt"
 	"testing"
 
 	"github.com/steveyegge/beads/internal/types"
@@ -20,7 +21,7 @@ type recordingMolWriter struct {
 
 func (w *recordingMolWriter) CreateIssue(_ context.Context, issue *types.Issue, _ string) error {
 	if issue.ID == "" {
-		issue.ID = "cmp-1"
+		issue.ID = fmt.Sprintf("cmp-%d", len(w.created)+1)
 	}
 	clone := *issue
 	clone.Labels = append([]string(nil), issue.Labels...)

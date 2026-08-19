@@ -209,7 +209,7 @@ func runPour(cmd *cobra.Command, args []string) error {
 		}
 
 		for _, attach := range attachments {
-			bondResult, err := bondProtoMol(ctx, store, attach.issue, spawnedMol, in.attachType, vars, "", actor, false, true)
+			bondResult, err := bondProtoMol(ctx, store, attach.issue, spawnedMol, in.attachType, vars, "", actor, bondSpawnPhase{pour: true})
 			if err != nil {
 				return HandleError("attaching %s: %v", attach.id, err)
 			}

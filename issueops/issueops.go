@@ -147,6 +147,13 @@ type IssuePatch struct {
 	// adapters translate their own flag spelling before constructing this
 	// request.
 	Persistence Field[PersistenceMode]
+	// WispType classifies an ephemeral issue for TTL-based compaction. It is
+	// unchanged when unset; a set value must be a known WispType, and the empty
+	// string is one — it clears the classification back to the default TTL.
+	// Independent of Persistence: this only records what KIND of wisp a row is,
+	// so setting it never moves the row between persistence planes, and a
+	// persistent row can carry one (harmlessly) the way a create can.
+	WispType Field[WispType]
 	// ParentID is unchanged when unset. A set empty value removes all outgoing
 	// parent-child edges. A set nonempty value atomically replaces all parents
 	// with exactly that target and does not inherit labels.
