@@ -2,8 +2,6 @@ package main
 
 import (
 	"context"
-	"sort"
-	"strings"
 	"time"
 
 	"github.com/steveyegge/beads/internal/config"
@@ -54,15 +52,13 @@ func resolveGCProtectedLabels(ctx context.Context, r configReader) workapi.GCPro
 // present" would live only in the code. It goes to stderr so it survives a
 // caller reading stdout as JSON.
 // It takes the set the filter actually used rather than re-reading it, so the
-// labels it names cannot disagree with the labels that held the beads back.
+// protections it names cannot disagree with the ones that held the beads back.
 func reportGCLabelProtectedSkips(stats closedDeletionCandidateStats, protected workapi.GCProtectedLabels) {
 	if stats.LabelProtected == 0 {
 		return
 	}
-	labels := protected.Labels()
-	sort.Strings(labels)
-	WarnError("kept %d label-protected bead(s) (%s); delete one deliberately with `bd delete <id>`",
-		stats.LabelProtected, strings.Join(labels, ", "))
+	WarnError("kept %d protected bead(s) (%s); delete one deliberately with `bd delete <id>`",
+		stats.LabelProtected, protected.Describe())
 }
 
 func warnClosedDeletionSafetySkips(stats closedDeletionCandidateStats) {

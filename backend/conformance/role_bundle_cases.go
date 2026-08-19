@@ -626,6 +626,7 @@ var roleContractCases = []roleContract{
 		RunSweeperClearsOneTierAndLeavesTheOther,
 		RunSweeperProtectsPinnedRows,
 		RunSweeperProtectsLabelProtectedRecords,
+		RunSweeperProtectsEscalationWisps,
 		RunSweeperHonorsTheCutoffAndThePattern,
 		RunSweeperDryRunChangesNothing,
 		RunSweeperProtectsRowsCitedFromAWispComment,

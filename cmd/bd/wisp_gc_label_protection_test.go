@@ -224,3 +224,78 @@ func TestFilterClosedWispPurgeCandidatesProtectsWhenTheSettingCannotBeRead(t *te
 		t.Errorf("skips.LabelProtected = %d, want 1", skips.LabelProtected)
 	}
 }
+
+// TestFindAbandonedWispsKeepsOpenEscalations is bd-724's headline case, and it
+// is the age sweep rather than the closed purge because that is the one that
+// reaches OPEN rows.
+//
+// The row shapes are copied from the town that produced the bug: no labels,
+// not pinned, status open, last touched hours ago. Seven wisps in exactly this
+// state were deletable by `bd mol wisp gc --age 1h`, and an open escalation is
+// by definition an incident nobody has resolved. The control is a patrol step
+// with the same status and the same age, so a sweep that had simply stopped
+// selecting anything fails this test.
+func TestFindAbandonedWispsKeepsOpenEscalations(t *testing.T) {
+	stale := time.Now().Add(-24 * time.Hour)
+	r := &stubMolReader{wisps: []*types.Issue{
+		{ID: "hq-wisp-step", Status: types.StatusOpen, UpdatedAt: stale, WispType: types.WispTypePatrol},
+		{ID: "hq-wisp-esc", Status: types.StatusOpen, UpdatedAt: stale, WispType: types.WispTypeEscalation},
+	}}
+
+	abandoned, recordProtected, err := findAbandonedWisps(context.Background(), r, false, time.Hour, nil)
+	if err != nil {
+		t.Fatalf("findAbandonedWisps: %v", err)
+	}
+	if len(abandoned) != 1 || abandoned[0].ID != "hq-wisp-step" {
+		t.Fatalf("abandoned = %v, want only hq-wisp-step — an open escalation is unresolved, not abandoned", wispIDs(abandoned))
+	}
+	if recordProtected != 1 {
+		t.Errorf("protected count = %d, want 1", recordProtected)
+	}
+}
+
+// TestFindAbandonedWispsKeepsEscalationsWithLabelsConfiguredAway is the part
+// that makes the guard worth having. gc.protected_labels REPLACES the defaults
+// when it is set, and on the town in question it was unset against wisps that
+// carry no labels at all — either way the label axis protected nothing. The
+// escalation has to survive a configuration that names something else.
+func TestFindAbandonedWispsKeepsEscalationsWithLabelsConfiguredAway(t *testing.T) {
+	stale := time.Now().Add(-24 * time.Hour)
+	r := &stubMolReader{
+		wisps: []*types.Issue{
+			{ID: "hq-wisp-step", Status: types.StatusOpen, UpdatedAt: stale},
+			{ID: "hq-wisp-esc", Status: types.StatusOpen, UpdatedAt: stale, WispType: types.WispTypeEscalation},
+		},
+		config: map[string]string{workapi.ConfigKeyGCProtectedLabels: "ops:receipt"},
+	}
+
+	abandoned, _, err := findAbandonedWisps(context.Background(), r, false, time.Hour, nil)
+	if err != nil {
+		t.Fatalf("findAbandonedWisps: %v", err)
+	}
+	if len(abandoned) != 1 || abandoned[0].ID != "hq-wisp-step" {
+		t.Fatalf("abandoned = %v, want the escalation held back by the kind guard, not the label setting", wispIDs(abandoned))
+	}
+}
+
+// TestFilterClosedWispPurgeCandidatesKeepsEscalations covers the other sweep.
+// `gt escalate` closes an escalation when it is acked or resolved, and 62 of
+// the 69 escalation wisps measured on the town were already closed — so
+// without this the record of every resolved incident goes on the next
+// `bd mol wisp gc --closed --force`.
+func TestFilterClosedWispPurgeCandidatesKeepsEscalations(t *testing.T) {
+	closed := []*types.Issue{
+		{ID: "hq-wisp-hb", Status: types.StatusClosed, WispType: types.WispTypeHeartbeat},
+		{ID: "hq-wisp-esc", Status: types.StatusClosed, WispType: types.WispTypeEscalation},
+	}
+	r := &stubMolReader{}
+
+	kept, skips := filterClosedWispPurgeCandidates(context.Background(), r, closed)
+
+	if len(kept) != 1 || kept[0].ID != "hq-wisp-hb" {
+		t.Fatalf("kept = %v, want only the heartbeat", wispIDs(kept))
+	}
+	if skips.LabelProtected != 1 {
+		t.Errorf("skips.LabelProtected = %d, want 1", skips.LabelProtected)
+	}
+}

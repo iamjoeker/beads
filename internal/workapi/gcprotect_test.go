@@ -149,3 +149,104 @@ func TestFilterSweepCandidatesPatternStillNarrowsFirst(t *testing.T) {
 		t.Errorf("skips.LabelProtected = %d, want 1 — only the protected bead the pattern ADMITTED", skips.LabelProtected)
 	}
 }
+
+// TestGCProtectedWispKindSurvivesAnyLabelConfiguration is the bd-724 case, and
+// the thing it pins is that the guard has no off switch reachable from
+// configuration.
+//
+// The measurement behind it: on the town that produced bd-724, 69 wisps
+// carried wisp_type='escalation' and ZERO wisps carried any label at all. So
+// the three configurations below are not hypotheticals — the middle one is the
+// production state (unset, so the defaults applied), and it protected none of
+// them. The negative control is a heartbeat with the same shape, which is what
+// makes "the escalation survived" mean the kind guard fired rather than the
+// predicate having stopped matching anything.
+func TestGCProtectedWispKindSurvivesAnyLabelConfiguration(t *testing.T) {
+	escalation := &types.Issue{ID: "hq-wisp-esc", WispType: types.WispTypeEscalation}
+	heartbeat := &types.Issue{ID: "hq-wisp-hb", WispType: types.WispTypeHeartbeat}
+
+	for name, set := range map[string]GCProtectedLabels{
+		"unset (built-in defaults)": ResolveGCProtectedLabels("", nil),
+		"configured elsewhere":      ResolveGCProtectedLabels("team:keep", nil),
+		"empty set":                 GCProtectedLabels(nil),
+	} {
+		if !set.Protects(escalation) {
+			t.Errorf("%s: an escalation wisp must be protected whatever the label configuration says", name)
+		}
+		if set.Protects(heartbeat) {
+			t.Errorf("%s: a heartbeat wisp must stay sweepable — protecting every kind turns the GC off", name)
+		}
+	}
+}
+
+// TestGCProtectedWispKindIsNarrow guards the other direction. A guard that
+// grew to cover the telemetry kinds would stop the sweep doing its job, and
+// the unclassified kind is every ordinary bead — protecting it would protect
+// the whole database.
+func TestGCProtectedWispKindIsNarrow(t *testing.T) {
+	if !IsGCProtectedWispType(types.WispTypeEscalation) {
+		t.Error("escalation must be protected")
+	}
+	if IsGCProtectedWispType("") {
+		t.Error("the empty kind is every non-wisp bead; protecting it protects everything")
+	}
+	for _, sweepable := range []types.WispType{
+		types.WispTypeHeartbeat, types.WispTypePing, types.WispTypePatrol,
+		types.WispTypeGCReport, types.WispTypeRecovery, types.WispTypeError,
+	} {
+		if IsGCProtectedWispType(sweepable) {
+			t.Errorf("%s is telemetry the sweep exists to reclaim; it must not be protected", sweepable)
+		}
+	}
+
+	// The accessor hands back a copy: a caller that appends to it must not be
+	// able to widen the guard for the rest of the process.
+	kinds := GCProtectedWispTypes()
+	kinds[0] = types.WispTypeHeartbeat
+	if IsGCProtectedWispType(types.WispTypeHeartbeat) || !IsGCProtectedWispType(types.WispTypeEscalation) {
+		t.Error("GCProtectedWispTypes must return a copy, not the package's own slice")
+	}
+}
+
+// TestFilterSweepCandidatesHoldsBackEscalationWisps runs the kind guard
+// through the sweep filter itself, because that is the path `bd purge` and
+// `bd prune` take. Everything about the two rows is identical except the kind,
+// and neither carries a label — the shape of every wisp measured on the town.
+func TestFilterSweepCandidatesHoldsBackEscalationWisps(t *testing.T) {
+	closedAt := time.Date(2026, 8, 18, 14, 2, 12, 0, time.UTC)
+	cutoff := closedAt.Add(time.Hour)
+
+	control := &types.Issue{ID: "hq-wisp-hb", Status: types.StatusClosed, ClosedAt: &closedAt, WispType: types.WispTypeHeartbeat}
+	escalation := &types.Issue{ID: "hq-wisp-esc", Status: types.StatusClosed, ClosedAt: &closedAt, WispType: types.WispTypeEscalation}
+
+	kept, skips := FilterSweepCandidates(
+		[]*types.Issue{control, escalation}, "", &cutoff,
+		ResolveGCProtectedLabels("", nil))
+
+	if len(kept) != 1 || kept[0].ID != control.ID {
+		t.Fatalf("kept = %v, want only %s", sweepCandidateIDs(kept), control.ID)
+	}
+	if skips.LabelProtected != 1 {
+		t.Errorf("skips.LabelProtected = %d, want 1 — the escalation is a protection, not a defense", skips.LabelProtected)
+	}
+	if defense := SweepDefenseSkips(skips); defense != 0 {
+		t.Errorf("SweepDefenseSkips = %d, want 0", defense)
+	}
+}
+
+// TestGCProtectedLabelsDescribeNamesBothAxes exists because the skip messages
+// are the only place an operator learns WHY a record survived. A message that
+// listed labels alone would send someone who wants the escalations gone to
+// edit gc.protected_labels, which cannot affect them.
+func TestGCProtectedLabelsDescribeNamesBothAxes(t *testing.T) {
+	got := ResolveGCProtectedLabels("", nil).Describe()
+	want := "labels: gt:merge-request, gt:message; wisp types: escalation"
+	if got != want {
+		t.Errorf("Describe() = %q, want %q", got, want)
+	}
+
+	// Even with no labels at all there is still a protecting set to name.
+	if got := (GCProtectedLabels(nil)).Describe(); got != "wisp types: escalation" {
+		t.Errorf("Describe() on an empty label set = %q, want the kinds alone", got)
+	}
+}

@@ -110,7 +110,9 @@ func MatchesSweepPattern(pattern, id string) bool {
 // is a PARAMETER rather than a package default so the caller's failure to
 // resolve it is a compile error instead of a silently unprotected sweep;
 // resolve it with ResolveGCProtectedLabels, which falls back to the built-in
-// defaults rather than to an empty set.
+// defaults rather than to an empty set. Its Protects also answers the built-in
+// wisp-kind guard, so the LabelProtected bucket counts a protected escalation
+// even in a workspace whose label configuration protects nothing (bd-724).
 func FilterSweepCandidates(issues []*types.Issue, pattern string, cutoff *time.Time, protected GCProtectedLabels) ([]*types.Issue, issueops.SweepSkips) {
 	kept := make([]*types.Issue, 0, len(issues))
 	var skips issueops.SweepSkips

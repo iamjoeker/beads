@@ -134,3 +134,89 @@ func TestWispGCClosedForceHonorsConfiguredLabels(t *testing.T) {
 	// is the same layering types.infra uses.
 	bdShowFail(t, bd, dir, defaulted)
 }
+
+// TestWispGCAgeKeepsOpenEscalations is bd-724 on the shipped binary, and it is
+// here rather than only in the unit suite because the kind has to survive the
+// same three hops the label does: `bd create --wisp-type escalation` has to
+// store it, the sweep's query has to hydrate it onto the row, and the filter
+// has to read it. A guard on types.Issue.WispType is inert if any hop drops it.
+//
+// --age 0 makes every wisp old enough, so the control's deletion proves the
+// sweep ran rather than found nothing.
+func TestWispGCAgeKeepsOpenEscalations(t *testing.T) {
+	if os.Getenv("BEADS_TEST_EMBEDDED_DOLT") != "1" {
+		t.Skip("set BEADS_TEST_EMBEDDED_DOLT=1 to run embedded dolt integration tests")
+	}
+	t.Parallel()
+
+	bd := buildEmbeddedBD(t)
+	dir, _, _ := bdInit(t, bd, "--prefix", "gce")
+
+	// No labels on either row — the shape every wisp had on the town where
+	// bd-724 was measured, and the reason the label axis could not help.
+	control := bdCreate(t, bd, dir, "patrol cycle", "--ephemeral", "--wisp-type", "patrol").ID
+	escalation := bdCreate(t, bd, dir, "Dolt server unreachable", "--ephemeral", "--wisp-type", "escalation").ID
+
+	bdCommand(t, bd, dir, "mol", "wisp", "gc", "--age", "0")
+
+	bdShowFail(t, bd, dir, control)
+	if !bdShowSucceeds(t, bd, dir, escalation) {
+		t.Errorf("open escalation wisp %s was reclaimed by the age sweep; "+
+			"an unresolved incident is not an abandoned wisp, and there is no restore path", escalation)
+	}
+}
+
+// TestWispGCKeepsEscalationsWhenLabelsAreConfiguredAway is the claim that the
+// guard is not configuration. The label list is set to something no bead
+// carries — which is what an unset list against unlabelled wisps amounts to —
+// and the escalation still has to survive both sweeps.
+func TestWispGCKeepsEscalationsWhenLabelsAreConfiguredAway(t *testing.T) {
+	if os.Getenv("BEADS_TEST_EMBEDDED_DOLT") != "1" {
+		t.Skip("set BEADS_TEST_EMBEDDED_DOLT=1 to run embedded dolt integration tests")
+	}
+	t.Parallel()
+
+	bd := buildEmbeddedBD(t)
+	dir, _, _ := bdInit(t, bd, "--prefix", "gcx")
+
+	bdCommand(t, bd, dir, "config", "set", "gc.protected_labels", "ops:receipt")
+
+	control := bdCreate(t, bd, dir, "finished step", "--ephemeral").ID
+	escalation := bdCreate(t, bd, dir, "wedged dog", "--ephemeral", "--wisp-type", "escalation").ID
+	for _, id := range []string{control, escalation} {
+		bdClose(t, bd, dir, id)
+	}
+
+	bdCommand(t, bd, dir, "mol", "wisp", "gc", "--closed", "--force")
+
+	bdShowFail(t, bd, dir, control)
+	if !bdShowSucceeds(t, bd, dir, escalation) {
+		t.Errorf("closed escalation wisp %s was purged under a label list that names nothing it carries", escalation)
+	}
+}
+
+// TestPurgeKeepsEscalations covers the other front door, for the same reason
+// TestPurgeKeepsMergeRequestRecords does: `bd purge` reaches these rows
+// through issueops.Sweeper rather than through `bd mol wisp gc`.
+func TestPurgeKeepsEscalations(t *testing.T) {
+	if os.Getenv("BEADS_TEST_EMBEDDED_DOLT") != "1" {
+		t.Skip("set BEADS_TEST_EMBEDDED_DOLT=1 to run embedded dolt integration tests")
+	}
+	t.Parallel()
+
+	bd := buildEmbeddedBD(t)
+	dir, _, _ := bdInit(t, bd, "--prefix", "gcq")
+
+	control := bdCreate(t, bd, dir, "finished step", "--ephemeral").ID
+	escalation := bdCreate(t, bd, dir, "resolved incident", "--ephemeral", "--wisp-type", "escalation").ID
+	for _, id := range []string{control, escalation} {
+		bdClose(t, bd, dir, id)
+	}
+
+	bdCommand(t, bd, dir, "purge", "--force")
+
+	bdShowFail(t, bd, dir, control)
+	if !bdShowSucceeds(t, bd, dir, escalation) {
+		t.Errorf("closed escalation wisp %s was deleted by `bd purge --force`", escalation)
+	}
+}
