@@ -1,6 +1,8 @@
 package workapi
 
 import (
+	"slices"
+	"sort"
 	"strings"
 
 	"github.com/steveyegge/beads/internal/types"
@@ -32,6 +34,13 @@ import (
 // (ConfigKeyGCProtectedLabels) rather than a fact of the tracker. The built-in
 // defaults exist because a protection that ships inert protects nothing: an
 // unconfigured workspace running the same sweeps has the same records to lose.
+//
+// AND WHY THE WISP KIND IS NOT. A label is a claim someone attached to a
+// record; a wisp KIND is part of the record itself, in beads' own vocabulary
+// (types.WispType). For the classes named in gcProtectedWispTypes the kind is
+// the only signal that survives every way the label can go missing, so the
+// kind guard is unconditional and layered UNDER the configurable one — see
+// Protects.
 
 // ConfigKeyGCProtectedLabels is the workspace setting naming the labels that
 // hold a bead back from every bulk deletion. Its value is a comma-separated
@@ -54,10 +63,57 @@ func DefaultGCProtectedLabels() []string {
 	return out
 }
 
+// gcProtectedWispTypes are the wisp KINDS no bulk deletion may take, whatever
+// the workspace's label configuration says.
+//
+// AN ESCALATION IS THE RECORD YOU CANNOT AFFORD TO LOSE BY DEFINITION: an open
+// one is an incident nobody has resolved yet, and wisps are unversioned, so
+// deleting one is not "closed early", it is destroyed with no undo (bd-724).
+// Age is not evidence that an escalation is finished; an escalation that has
+// sat untouched for a day is the one MOST likely to still matter.
+//
+// THIS IS NOT EXPRESSIBLE AS A LABEL, which is why the class needed a second
+// axis rather than another entry in defaultGCProtectedLabels. Measured on the
+// town that produced bd-724: 69 wisps carried wisp_type='escalation' and ZERO
+// wisps carried any label at all, so a label-based guard held back none of
+// them. `gt escalate` labels the DURABLE half of an escalation gt:escalation;
+// the ephemeral half — the half a wisp GC deletes — carries the kind and
+// nothing else.
+//
+// It is deliberately short. Every other wisp kind (heartbeat, ping, patrol,
+// gc_report, recovery, error) is telemetry that a sweep exists to reclaim, and
+// protecting those would turn the GC off rather than make it safe.
+var gcProtectedWispTypes = []types.WispType{types.WispTypeEscalation}
+
+// GCProtectedWispTypes returns the built-in protected wisp kinds. There is no
+// setting that widens or narrows it: a caller that means to delete one names
+// it to `bd delete`.
+func GCProtectedWispTypes() []types.WispType {
+	out := make([]types.WispType, len(gcProtectedWispTypes))
+	copy(out, gcProtectedWispTypes)
+	return out
+}
+
+// IsGCProtectedWispType reports whether a wisp kind is protected from bulk
+// deletion. The empty kind — every non-wisp bead and every wisp created before
+// the classification existed — is not protected, so this only ever holds back
+// a record that classified ITSELF as one of the protected kinds.
+func IsGCProtectedWispType(wispType types.WispType) bool {
+	if wispType == "" {
+		return false
+	}
+	return slices.Contains(gcProtectedWispTypes, wispType)
+}
+
 // GCProtectedLabels is a resolved protected-label set, keyed by normalized
-// label. The zero value protects NOTHING and is never what a delete path
+// label. The zero value protects no LABEL and is never what a delete path
 // should be holding: every caller resolves one with ResolveGCProtectedLabels
 // (or the storage-layer wrappers around it), which falls back to the defaults.
+//
+// The built-in wisp-kind guard rides along on this type rather than beside it
+// (see Protects) so that the delete paths keep asking ONE object the one
+// question. A second parameter threaded through four call sites is a
+// protection that a fifth call site can be written without.
 type GCProtectedLabels map[string]bool
 
 // NewGCProtectedLabels builds a set from an exact label list, applying no
@@ -92,11 +148,26 @@ func ResolveGCProtectedLabels(stored string, fromYAML []string) GCProtectedLabel
 	return NewGCProtectedLabels(DefaultGCProtectedLabels())
 }
 
-// Protects reports whether this bead carries a protected label. A nil issue is
-// not protected — the delete paths count an unreadable row as its own skip
-// bucket rather than folding it in here.
+// Protects reports whether a bulk deletion must hold this bead back: it
+// carries one of this set's labels, OR it is one of the built-in protected
+// wisp kinds. A nil issue is not protected — the delete paths count an
+// unreadable row as its own skip bucket rather than folding it in here.
+//
+// THE KIND CHECK RUNS EVEN ON AN EMPTY SET, and that is the point of putting
+// it here. The label half can be switched off from outside the program — leave
+// gc.protected_labels unset in a workspace whose records carry no labels, or
+// set it to a list that names none of them — and bd-724 is what that looks
+// like in production: every escalation in the town was deletable because the
+// only guard was one nothing satisfied. A guard for records with no undo must
+// not have an off switch reachable by configuration.
 func (p GCProtectedLabels) Protects(issue *types.Issue) bool {
-	if len(p) == 0 || issue == nil {
+	if issue == nil {
+		return false
+	}
+	if IsGCProtectedWispType(issue.WispType) {
+		return true
+	}
+	if len(p) == 0 {
 		return false
 	}
 	for _, label := range issue.Labels {
@@ -107,14 +178,45 @@ func (p GCProtectedLabels) Protects(issue *types.Issue) bool {
 	return false
 }
 
-// Labels returns the set's members, for messages that name what protected a
-// bead. Order is unspecified; callers that print them sort first.
+// Labels returns the set's configured members, for messages that name what
+// protected a bead. Order is unspecified; callers that print them sort first.
+// It does NOT include the wisp kinds — Describe is what prints the whole
+// protecting set.
 func (p GCProtectedLabels) Labels() []string {
 	out := make([]string, 0, len(p))
 	for label := range p {
 		out = append(out, label)
 	}
 	return out
+}
+
+// Describe renders the whole protecting set for a skip message: the configured
+// labels and the built-in wisp kinds, in that order and each sorted.
+//
+// It names the SET rather than the member that fired, which is what the
+// label-only messages always did. Naming both axes is not cosmetic: a message
+// that lists only labels invites the reading that setting gc.protected_labels
+// is what kept the record, and an operator who then narrows that setting to
+// clear space would expect the escalations to go and be told nothing when they
+// do not.
+func (p GCProtectedLabels) Describe() string {
+	labels := p.Labels()
+	sort.Strings(labels)
+
+	kinds := make([]string, 0, len(gcProtectedWispTypes))
+	for _, wispType := range GCProtectedWispTypes() {
+		kinds = append(kinds, string(wispType))
+	}
+	sort.Strings(kinds)
+
+	var parts []string
+	if len(labels) > 0 {
+		parts = append(parts, "labels: "+strings.Join(labels, ", "))
+	}
+	if len(kinds) > 0 {
+		parts = append(parts, "wisp types: "+strings.Join(kinds, ", "))
+	}
+	return strings.Join(parts, "; ")
 }
 
 // normalizeGCLabel is how a configured label and a stored one are compared:

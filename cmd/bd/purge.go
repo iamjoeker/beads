@@ -53,8 +53,10 @@ most of them have no value once closed. This command removes those to reclaim
 storage.
 
 Deletes: issues, dependencies, labels, events, and comments for matching beads.
-Skips: pinned beads, and beads carrying a GC-protected label
-(` + "`gc.protected_labels`" + `, default: merge-request and message records).
+Skips: pinned beads, beads carrying a GC-protected label
+(` + "`gc.protected_labels`" + `, default: merge-request and message records),
+and beads of a GC-protected wisp kind (escalations — not configurable, and
+applied whatever ` + "`gc.protected_labels`" + ` is set to).
 Those are held back at any age and with --force: closure is a normal part of
 their life and the bead is the only record of what it describes. Delete one
 deliberately with ` + "`bd delete <id>`" + `.
@@ -210,7 +212,7 @@ func warnSweepLabelProtected(skips issueops.SweepSkips) {
 	if skips.LabelProtected == 0 {
 		return
 	}
-	WarnError("kept %d label-protected bead(s) (see `gc.protected_labels`); delete one deliberately with `bd delete <id>`",
+	WarnError("kept %d protected bead(s) (see `gc.protected_labels`, plus the built-in protected wisp kinds); delete one deliberately with `bd delete <id>`",
 		skips.LabelProtected)
 }
 
@@ -255,7 +257,7 @@ func emitSweepEmpty(scope purgeScope, olderThan, pattern string, result issueops
 	fmt.Println(msg)
 	if result.Skipped.LabelProtected > 0 {
 		fmt.Println(ui.MutedStyle.Render(fmt.Sprintf(
-			"  (%d closed bead(s) protected by gc.protected_labels)", result.Skipped.LabelProtected)))
+			"  (%d closed bead(s) protected by gc.protected_labels or a protected wisp kind)", result.Skipped.LabelProtected)))
 	}
 	if result.Skipped.Referenced > 0 {
 		fmt.Println(ui.MutedStyle.Render(fmt.Sprintf(
@@ -314,7 +316,7 @@ func emitSweepDryRun(scope purgeScope, result issueops.SweepResult) error {
 func emitSweepConfirm(scope purgeScope, olderThan, pattern string, result issueops.SweepResult) error {
 	fmt.Printf("Found %d %s(s) to %s\n", result.Swept, scope.subjectNoun, scope.cmdName)
 	if result.Skipped.LabelProtected > 0 {
-		fmt.Printf("Skipping %d label-protected bead(s)\n", result.Skipped.LabelProtected)
+		fmt.Printf("Skipping %d protected bead(s)\n", result.Skipped.LabelProtected)
 	}
 	if result.Skipped.Pinned > 0 {
 		fmt.Printf("Skipping %d pinned bead(s)\n", result.Skipped.Pinned)

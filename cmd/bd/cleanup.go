@@ -8,7 +8,50 @@ import (
 	"github.com/steveyegge/beads/internal/metrics"
 	"github.com/steveyegge/beads/internal/types"
 	"github.com/steveyegge/beads/internal/ui"
+	"github.com/steveyegge/beads/internal/workapi"
 )
+
+// cleanupSkips counts the closed beads `bd admin cleanup` held back, by
+// reason.
+type cleanupSkips struct {
+	// Protected counts beads the workspace's GC protection held back: a
+	// protected label, or a protected wisp kind such as an escalation.
+	Protected int
+	// Pinned counts beads held back by the pinned flag — the only guard this
+	// command had before bd-724.
+	Pinned int
+}
+
+// filterCleanupCandidates keeps the closed beads `bd admin cleanup` may
+// delete.
+//
+// THE GC PROTECTION BELONGS HERE for the same reason it belongs in `bd purge`:
+// this command deletes closed beads in bulk, and for the protected classes
+// "closed" is the trigger for deletion rather than evidence that deleting is
+// safe. Until bd-724 the pinned flag was the ONLY guard on this path, so
+// `bd admin cleanup --ephemeral --force` destroyed exactly the records
+// `bd purge` and `bd mol wisp gc` had been taught to keep — and a protection
+// that only some of the sibling sweeps honor is not a protection, it is a
+// reason to believe the record is safe while one command still takes it.
+//
+// It is a separate function from the command body so the decision is testable
+// without a SQL server: `bd admin cleanup` refuses to run in embedded mode
+// (requireServerMode), which is the harness the end-to-end sweep cases use.
+func filterCleanupCandidates(closed []*types.Issue, protected workapi.GCProtectedLabels) ([]*types.Issue, cleanupSkips) {
+	var skips cleanupSkips
+	kept := make([]*types.Issue, 0, len(closed))
+	for _, issue := range closed {
+		switch {
+		case protected.Protects(issue):
+			skips.Protected++
+		case issue.Pinned:
+			skips.Pinned++
+		default:
+			kept = append(kept, issue)
+		}
+	}
+	return kept, skips
+}
 
 // CleanupEmptyResponse is returned when there are no closed issues to delete
 type CleanupEmptyResponse struct {
@@ -38,6 +81,9 @@ EXAMPLES:
   bd admin cleanup --dry-run                        # Preview what would be deleted
 
 SAFETY:
+- Skips pinned beads, beads carrying a GC-protected label
+  (` + "`gc.protected_labels`" + `) and beads of a GC-protected wisp kind
+  (escalations). No flag overrides those — delete one with ` + "`bd delete <id>`" + `.
 - Requires --force flag to actually delete (unless --dry-run)
 - Supports --cascade to delete dependents
 - Shows preview of what will be deleted
@@ -101,19 +147,19 @@ SEE ALSO:
 			return HandleError("listing issues: %v", err)
 		}
 
-		pinnedCount := 0
-		filteredIssues := make([]*types.Issue, 0, len(closedIssues))
-		for _, issue := range closedIssues {
-			if issue.Pinned {
-				pinnedCount++
-				continue
-			}
-			filteredIssues = append(filteredIssues, issue)
-		}
-		closedIssues = filteredIssues
+		protected := resolveGCProtectedLabels(ctx, store)
+		var skips cleanupSkips
+		closedIssues, skips = filterCleanupCandidates(closedIssues, protected)
 
-		if pinnedCount > 0 && !jsonOutput {
-			fmt.Printf("Skipping %d pinned issue(s) (protected from cleanup)\n", pinnedCount)
+		// stderr, and unconditional, so it survives --json and so "nothing to
+		// clean up" and "nothing to clean up except the record you came for"
+		// are not the same output.
+		if skips.Protected > 0 {
+			WarnError("kept %d protected bead(s) (%s); delete one deliberately with `bd delete <id>`",
+				skips.Protected, protected.Describe())
+		}
+		if skips.Pinned > 0 && !jsonOutput {
+			fmt.Printf("Skipping %d pinned issue(s) (protected from cleanup)\n", skips.Pinned)
 		}
 
 		if len(closedIssues) == 0 {

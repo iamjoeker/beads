@@ -124,13 +124,19 @@ type SweepRequest struct {
 // Referenced are PROTECTIONS a user can override or re-express, and the other
 // three are the sweep declining to trust its own input.
 type SweepSkips struct {
-	// LabelProtected counts candidates held back because they carry one of the
-	// workspace's GC-protected labels (workapi.ConfigKeyGCProtectedLabels,
-	// defaulting to merge-request and message records). Like Pinned, NO
-	// request field overrides it: the classes it names are closed as a normal
-	// part of their life and are the sole record of what they describe, so
-	// "closed" is the trigger for their deletion rather than evidence it is
-	// safe. A caller that means to delete one names it to `bd delete`.
+	// LabelProtected counts candidates held back by the workspace's GC
+	// protection: they carry one of its protected labels
+	// (workapi.ConfigKeyGCProtectedLabels, defaulting to merge-request and
+	// message records), or they are one of the protected wisp KINDS, which is
+	// a fact of the record rather than a setting and which no configuration
+	// switches off (workapi.GCProtectedWispTypes — escalations). The bucket
+	// keeps its shipped name; it has counted both since bd-724.
+	//
+	// Like Pinned, NO request field overrides it: the classes it names are
+	// closed as a normal part of their life and are the sole record of what
+	// they describe, so "closed" is the trigger for their deletion rather than
+	// evidence it is safe. A caller that means to delete one names it to
+	// `bd delete`.
 	LabelProtected int
 	// Pinned counts candidates protected by the pinned flag. Pinning is the
 	// workspace's own "never sweep this", and no request field overrides it —

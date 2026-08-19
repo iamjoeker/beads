@@ -41,6 +41,9 @@ func TestSweeperContract(t *testing.T) {
 	t.Run("ProtectsLabelProtectedRecords", func(t *testing.T) {
 		conformance.RunSweeperProtectsLabelProtectedRecords(t, ctx, fixture)
 	})
+	t.Run("ProtectsEscalationWisps", func(t *testing.T) {
+		conformance.RunSweeperProtectsEscalationWisps(t, ctx, fixture)
+	})
 	t.Run("HonorsTheCutoffAndThePattern", func(t *testing.T) {
 		conformance.RunSweeperHonorsTheCutoffAndThePattern(t, ctx, fixture)
 	})

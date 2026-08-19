@@ -242,6 +242,45 @@ func RunSweeperProtectsLabelProtectedRecords(t *testing.T, ctx context.Context, 
 	sweeperAssertWispRows(t, ctx, fixture, 1, protected)
 }
 
+// RunSweeperProtectsEscalationWisps pins the other half of the same
+// protection: the one a workspace cannot switch off.
+//
+// IT IS A SEPARATE CASE FROM THE LABEL ONE because it fails in a place the
+// label case cannot reach. A label is written and read back through the labels
+// table; a wisp KIND is a column on the row itself, so this is the case that
+// catches a backend whose sweep-candidate query forgets to select wisp_type —
+// which hydrates the field as empty, matches no protected kind, and deletes
+// the record while every label case still passes.
+//
+// NEITHER ROW CARRIES A LABEL, deliberately. That is the shape bd-724 was
+// measured in: 69 escalation wisps on the town, zero labels on any wisp in the
+// database, and gc.protected_labels unset — so the configurable axis held back
+// none of them. The control is a heartbeat wisp closed at the same instant;
+// its deletion is what makes the escalation's survival evidence of the guard.
+func RunSweeperProtectsEscalationWisps(t *testing.T, ctx context.Context, fixture SweeperFixture) {
+	t.Helper()
+	control := sweeperSeed(t, ctx, fixture, sweeperIssue(fixture, "gcesc", "heartbeat", true), func(issue *types.Issue) {
+		issue.WispType = types.WispTypeHeartbeat
+	})
+	escalation := sweeperSeed(t, ctx, fixture, sweeperIssue(fixture, "gcesc", "keep", true), func(issue *types.Issue) {
+		issue.WispType = types.WispTypeEscalation
+	})
+
+	result := sweeperSweep(t, ctx, fixture, publicops.SweepRequest{
+		Tier:      publicops.SweepEphemeral,
+		IDPattern: sweeperPattern(fixture, "gcesc"),
+	})
+
+	if result.Swept != 1 {
+		t.Errorf("Swept = %d, want 1 — the escalation must not be one of them", result.Swept)
+	}
+	if result.Skipped.LabelProtected != 1 {
+		t.Errorf("Skipped.LabelProtected = %d, want 1", result.Skipped.LabelProtected)
+	}
+	sweeperAssertWispRows(t, ctx, fixture, 0, control)
+	sweeperAssertWispRows(t, ctx, fixture, 1, escalation)
+}
+
 // RunSweeperHonorsTheCutoffAndThePattern pins the two narrowing fields.
 //
 // The CUTOFF is HALF-OPEN: a row closed exactly at the cutoff is KEPT
