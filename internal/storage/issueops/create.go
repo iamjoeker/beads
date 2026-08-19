@@ -543,6 +543,13 @@ func PrepareIssueForInsert(issue *types.Issue, customStatuses, customTypes []str
 	} else {
 		issue.UpdatedAt = issue.UpdatedAt.UTC()
 	}
+	// The optional instants answer to the same rule, and the embedded driver
+	// is why the rule has teeth: unlike go-sql-driver it binds a time.Time by
+	// its wall clock without converting to the connection zone, so a zone-aware
+	// due_at written from a UTC-7 host lands seven hours early in a column every
+	// reader parses as UTC. created_at/updated_at were already immune only
+	// because they are normalized right here, two frames before the bind.
+	NormalizeIssueOptionalTimestampsUTC(issue)
 
 	// Ensure closed issues have a closed_at timestamp.
 	if issue.Status == types.StatusClosed && issue.ClosedAt == nil {
