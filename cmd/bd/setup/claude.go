@@ -46,7 +46,7 @@ func defaultClaudeEnv() (claudeEnv, error) {
 		return claudeEnv{}, fmt.Errorf("working directory: %w", err)
 	}
 	return claudeEnv{
-		stdout:     os.Stdout,
+		stdout:     progressWriter(),
 		stderr:     os.Stderr,
 		homeDir:    home,
 		projectDir: workDir,
@@ -551,7 +551,7 @@ func addHookCommand(hooks map[string]interface{}, event, command string) bool {
 				continue
 			}
 			if cmdMap["command"] == command {
-				fmt.Printf("✓ Hook already registered: %s\n", event)
+				_, _ = fmt.Fprintf(progressWriter(), "✓ Hook already registered: %s\n", event)
 				return false
 			}
 		}

@@ -168,7 +168,7 @@ func InstallCursorProject() error {
 	if err := installCursorHooks(cursorHooksPath); err != nil {
 		return err
 	}
-	fmt.Println("✓ Cursor integration installed (rules + skill + hooks)")
+	_, _ = fmt.Fprintln(progressWriter(), "✓ Cursor integration installed (rules + skill + hooks)")
 	return nil
 }
 
@@ -186,7 +186,7 @@ func cursorAgentSkillEnv(global bool) (agentSkillEnv, error) {
 		base = home
 	}
 	return agentSkillEnv{
-		stdout:     os.Stdout,
+		stdout:     progressWriter(),
 		stderr:     os.Stderr,
 		projectDir: base,
 		ensureDir:  EnsureDir,

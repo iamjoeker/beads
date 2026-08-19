@@ -56,7 +56,7 @@ func defaultCodexEnv() (codexEnv, error) {
 		return codexEnv{}, fmt.Errorf("working directory: %w", err)
 	}
 	return codexEnv{
-		stdout:     os.Stdout,
+		stdout:     progressWriter(),
 		stderr:     os.Stderr,
 		homeDir:    home,
 		projectDir: workDir,

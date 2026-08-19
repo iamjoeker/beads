@@ -68,6 +68,7 @@ func TestInitCommand(t *testing.T) {
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
+			isolateInitEnvForTest(t)
 			// Reset global state
 			origDBPath := dbPath
 			origStore := store
@@ -164,13 +165,9 @@ func TestInitCommand(t *testing.T) {
 				}
 			}
 
-			// Verify Dolt database directory was created
-			doltPath := filepath.Join(beadsDir, "dolt")
-			if info, err := os.Stat(doltPath); os.IsNotExist(err) {
-				t.Errorf("Dolt database directory was not created at %s", doltPath)
-			} else if !info.IsDir() {
-				t.Errorf("Expected %s to be a directory", doltPath)
-			}
+			// Verify the Dolt database directory was created, wherever the
+			// mode init chose puts it (embedded by default).
+			requireInitDataRoot(t, beadsDir)
 
 			// Database content verification (prefix, metadata) is skipped here because
 			// embedded Dolt's Close() can timeout, leaving file locks held and preventing
@@ -186,6 +183,7 @@ func TestInitCommand(t *testing.T) {
 
 func TestInitAlreadyInitialized(t *testing.T) {
 	skipIfNoDolt(t)
+	isolateInitEnvForTest(t)
 	// Reset global state
 	origDBPath := dbPath
 	defer func() { dbPath = origDBPath }()
@@ -210,8 +208,7 @@ func TestInitAlreadyInitialized(t *testing.T) {
 	}
 
 	// Verify database still works
-	dbPath := filepath.Join(tmpDir, ".beads", "dolt")
-	store, err := openExistingTestDB(t, dbPath)
+	store, err := openWorkspaceStoreForTest(t, filepath.Join(tmpDir, ".beads"))
 	if err != nil {
 		t.Fatalf("Failed to open database: %v", err)
 	}
@@ -235,6 +232,7 @@ func TestInitAlreadyInitialized(t *testing.T) {
 // os.Exit(1) and therefore cannot be exercised in-process (see the note above
 // TestInitAlreadyInitialized); this test covers the new success path.
 func TestInitIfMissing(t *testing.T) {
+	isolateInitEnvForTest(t)
 	skipIfNoDolt(t)
 	// Reset global state
 	origDBPath := dbPath
@@ -337,6 +335,7 @@ func TestInitIfMissingPrefixMismatch(t *testing.T) {
 // regress the happy path: re-running with the SAME explicit --prefix as the
 // existing workspace still skips cleanly (exit 0) rather than aborting.
 func TestInitIfMissingMatchingPrefixSkips(t *testing.T) {
+	isolateInitEnvForTest(t)
 	skipIfNoDolt(t)
 	origDBPath := dbPath
 	resetInitFlags := func() {
@@ -460,6 +459,7 @@ func TestCheckExistingBeadsDataOperationalErrorNotMasked(t *testing.T) {
 }
 
 func TestInitWithCustomDBPath(t *testing.T) {
+	isolateInitEnvForTest(t)
 	t.Skip("BEADS_DB env var does not control Dolt store location; Dolt always uses .beads/dolt/")
 	// Save original state
 	origDBPath := dbPath
@@ -889,6 +889,7 @@ func TestInitPromptRoleConfig(t *testing.T) {
 
 // TestInitPromptSkippedWithFlags verifies that --contributor and --team flags skip the prompt
 func TestInitPromptSkippedWithFlags(t *testing.T) {
+	isolateInitEnvForTest(t)
 	skipIfNoDolt(t)
 	t.Run("contributor flag skips prompt and runs wizard", func(t *testing.T) {
 		// Reset global state
@@ -982,6 +983,7 @@ func TestInitPromptTTYDetection(t *testing.T) {
 
 // TestInitPromptNonGitRepo verifies prompt is skipped in non-git directories
 func TestInitPromptNonGitRepo(t *testing.T) {
+	isolateInitEnvForTest(t)
 	skipIfNoDolt(t)
 	// Reset global state
 	origDBPath := dbPath
@@ -1020,6 +1022,7 @@ func TestInitPromptNonGitRepo(t *testing.T) {
 
 // TestInitPromptExistingRole verifies behavior when beads.role is already set
 func TestInitPromptExistingRole(t *testing.T) {
+	isolateInitEnvForTest(t)
 	skipIfNoDolt(t)
 	t.Run("existing role is preserved on reinit with --force", func(t *testing.T) {
 		// Reset global state
@@ -1084,7 +1087,16 @@ func TestInitPromptExistingRole(t *testing.T) {
 }
 
 func TestInitContributorSetsBeadsRoleContributor(t *testing.T) {
+	isolateInitEnvForTest(t)
 	skipIfNoDolt(t)
+
+	// init classifies a non-TTY stdin as non-interactive and refuses
+	// --contributor there, so this test could never pass under `go test`
+	// however it fed the wizard -- its stdin pipe is not a terminal either.
+	// BD_NON_INTERACTIVE=0 is the escape hatch isNonInteractiveInit
+	// documents for exactly this: assert interactivity, then drive the
+	// prompts from the pipe below (bd-kbx).
+	t.Setenv("BD_NON_INTERACTIVE", "0")
 
 	origDBPath := dbPath
 	defer func() { dbPath = origDBPath }()
@@ -1152,6 +1164,7 @@ func TestInitContributorSetsBeadsRoleContributor(t *testing.T) {
 // always leaves beads.role set, even when no --role flag is provided (GH#2950).
 // This is the safety net for the init flow.
 func TestInitNonInteractiveAlwaysSetsRole(t *testing.T) {
+	isolateInitEnvForTest(t)
 	skipIfNoDolt(t)
 
 	origDBPath := dbPath
@@ -1194,6 +1207,7 @@ func TestInitNonInteractiveAlwaysSetsRole(t *testing.T) {
 // not in the local .beads directory. (GH#bd-0qel)
 // TestInitRedirect groups redirect-related init tests.
 func TestInitRedirect(t *testing.T) {
+	isolateInitEnvForTest(t)
 	skipIfNoDolt(t)
 	resetRedirectState := func(t *testing.T) {
 		t.Helper()
@@ -1357,6 +1371,7 @@ func TestInitBEADS_DIR(t *testing.T) {
 	// resetBeadsDirState resets global state and env vars for each subtest.
 	resetBeadsDirState := func(t *testing.T) {
 		t.Helper()
+		isolateInitEnvForTest(t)
 		origDBPath := dbPath
 		t.Cleanup(func() {
 			dbPath = origDBPath
@@ -1474,19 +1489,10 @@ func TestInitBEADS_DIR(t *testing.T) {
 			t.Fatalf("Init with BEADS_DIR failed: %v", err)
 		}
 
-		expectedDBPath := filepath.Join(beadsDirPath, "dolt")
-		if info, err := os.Stat(expectedDBPath); os.IsNotExist(err) {
-			t.Errorf("Dolt database was not created at BEADS_DIR path: %s", expectedDBPath)
-		} else if !info.IsDir() {
-			t.Errorf("Expected %s to be a directory", expectedDBPath)
-		}
+		requireInitDataRoot(t, beadsDirPath)
+		requireNoInitDataRoot(t, filepath.Join(cwdPath, ".beads"))
 
-		cwdDBPath := filepath.Join(cwdPath, ".beads", "dolt")
-		if _, err := os.Stat(cwdDBPath); err == nil {
-			t.Errorf("Database should NOT have been created at CWD: %s", cwdDBPath)
-		}
-
-		store, err := openExistingTestDB(t, expectedDBPath)
+		store, err := openWorkspaceStoreForTest(t, beadsDirPath)
 		if err != nil {
 			t.Fatalf("Failed to open database at BEADS_DIR: %v", err)
 		}
@@ -1518,14 +1524,10 @@ func TestInitBEADS_DIR(t *testing.T) {
 			t.Fatalf("Init without BEADS_DIR failed: %v", err)
 		}
 
-		expectedDBPath := filepath.Join(tmpDir, ".beads", "dolt")
-		if info, err := os.Stat(expectedDBPath); os.IsNotExist(err) {
-			t.Errorf("Dolt database was not created at default CWD/.beads path: %s", expectedDBPath)
-		} else if !info.IsDir() {
-			t.Errorf("Expected %s to be a directory", expectedDBPath)
-		}
+		defaultBeadsDir := filepath.Join(tmpDir, ".beads")
+		requireInitDataRoot(t, defaultBeadsDir)
 
-		store, err := openExistingTestDB(t, expectedDBPath)
+		store, err := openWorkspaceStoreForTest(t, defaultBeadsDir)
 		if err != nil {
 			t.Fatalf("Failed to open database: %v", err)
 		}
@@ -1594,15 +1596,8 @@ func TestInitBEADS_DIR(t *testing.T) {
 		}
 
 		// Verify database was created at BEADS_DIR, not in the worktree
-		expectedDBPath := filepath.Join(beadsDirPath, "dolt")
-		if _, statErr := os.Stat(expectedDBPath); os.IsNotExist(statErr) {
-			t.Errorf("Dolt database was not created at BEADS_DIR path: %s", expectedDBPath)
-		}
-
-		worktreeDBPath := filepath.Join(worktreeDir, ".beads", "dolt")
-		if _, statErr := os.Stat(worktreeDBPath); statErr == nil {
-			t.Errorf("Database should NOT have been created in worktree: %s", worktreeDBPath)
-		}
+		requireInitDataRoot(t, beadsDirPath)
+		requireNoInitDataRoot(t, filepath.Join(worktreeDir, ".beads"))
 	})
 
 	// Precedence: BEADS_DB > BEADS_DIR
@@ -1661,6 +1656,7 @@ func TestInitBEADS_DIR(t *testing.T) {
 // creates the database at BEADS_DIR when the environment variable is set.
 // This tests requirements FR-002 for Dolt backend.
 func TestInit_WithBEADS_DIR_DoltBackend(t *testing.T) {
+	isolateInitEnvForTest(t)
 	// Skip on Windows
 	if runtime.GOOS == "windows" {
 		t.Skip("Skipping BEADS_DIR Dolt test on Windows")
@@ -1737,6 +1733,7 @@ func TestInitDoltMetadata(t *testing.T) {
 		t.Skip("Skipping Dolt metadata test on Windows")
 	}
 
+	isolateInitEnvForTest(t)
 	saveAndRestoreGlobals(t)
 	dbPath = ""
 
@@ -1766,8 +1763,7 @@ func TestInitDoltMetadata(t *testing.T) {
 
 	// Open the dolt store to verify metadata was written
 	ctx := context.Background()
-	doltPath := filepath.Join(tmpDir, ".beads", "dolt")
-	doltStore, err := openDoltStoreForTest(t, ctx, doltPath, "test")
+	doltStore, err := openWorkspaceStoreForTest(t, filepath.Join(tmpDir, ".beads"))
 	if err != nil {
 		t.Fatalf("failed to open dolt store for verification: %v", err)
 	}
@@ -1799,16 +1795,6 @@ func TestInitDoltMetadata(t *testing.T) {
 	if cloneID == "" {
 		t.Error("clone_id metadata was not written")
 	}
-}
-
-// openDoltStoreForTest opens an existing Dolt store for read-only verification in tests.
-func openDoltStoreForTest(t *testing.T, ctx context.Context, doltPath, dbName string) (*dolt.DoltStore, error) {
-	t.Helper()
-	return dolt.New(ctx, &dolt.Config{
-		Path:     doltPath,
-		Database: dbName,
-		ReadOnly: true,
-	})
 }
 
 // TestVerifyMetadataSuccess verifies that verifyMetadata writes and reads back metadata.
@@ -1848,6 +1834,7 @@ func TestInitDoltMetadataNoGit(t *testing.T) {
 		t.Skip("Skipping Dolt metadata test on Windows")
 	}
 
+	isolateInitEnvForTest(t)
 	saveAndRestoreGlobals(t)
 	dbPath = ""
 
@@ -1878,13 +1865,8 @@ func TestInitDoltMetadataNoGit(t *testing.T) {
 	// creates a brand-new git repo with no remotes, and the upstream warning
 	// is intentionally skipped for repos with no remotes (not noise-worthy).
 
-	// Verify .beads/dolt directory was created (init succeeded)
-	doltPath := filepath.Join(tmpDir, ".beads", "dolt")
-	if info, err := os.Stat(doltPath); os.IsNotExist(err) {
-		t.Errorf("Dolt database directory was not created: %s", doltPath)
-	} else if !info.IsDir() {
-		t.Errorf("Expected Dolt path to be a directory: %s", doltPath)
-	}
+	// Verify the Dolt database directory was created (init succeeded)
+	requireInitDataRoot(t, filepath.Join(tmpDir, ".beads"))
 
 	// Verify no SQLite database was created (backend-specific)
 	sqlitePath := filepath.Join(tmpDir, ".beads", "beads.db")
@@ -1894,6 +1876,7 @@ func TestInitDoltMetadataNoGit(t *testing.T) {
 }
 
 func TestInitServerModeWritesDoltCompatibilityMarker(t *testing.T) {
+	isolateInitEnvForTest(t)
 	skipIfNoDolt(t)
 	saveAndRestoreGlobals(t)
 	ensureCleanGlobalState(t)
@@ -1905,18 +1888,21 @@ func TestInitServerModeWritesDoltCompatibilityMarker(t *testing.T) {
 
 	beadsDir := filepath.Join(tmpDir, ".beads")
 	doltDir := filepath.Join(beadsDir, "dolt")
-	if err := os.MkdirAll(beadsDir, 0o700); err != nil {
-		t.Fatalf("creating beads dir: %v", err)
-	}
+	database := uniqueTestDBName(t)
+	seedCurrentEraServerWorkspace(t, beadsDir, database)
 	if err := os.MkdirAll(filepath.Join(doltDir, ".dolt"), 0o750); err != nil {
 		t.Fatalf("creating simulated server data dir: %v", err)
 	}
 
-	database := uniqueTestDBName(t)
 	t.Cleanup(func() {
 		dropTestDatabase(database, testDoltServerPort)
 	})
 
+	// --force because the fixture above is a complete server workspace, which
+	// is what the legacy-upgrade guard requires and what init's
+	// already-initialized check then refuses. The marker write is on the
+	// server init path either way.
+	t.Cleanup(func() { _ = initCmd.Flags().Set("force", "false") })
 	rootCmd.SetArgs([]string{
 		"init",
 		"--server",
@@ -1925,6 +1911,7 @@ func TestInitServerModeWritesDoltCompatibilityMarker(t *testing.T) {
 		"--server-port", fmt.Sprintf("%d", testDoltServerPort),
 		"--database", database,
 		"--prefix", "marker",
+		"--force",
 		"--quiet",
 		"--skip-hooks",
 		"--skip-agents",
@@ -1941,6 +1928,7 @@ func TestInitServerModeWritesDoltCompatibilityMarker(t *testing.T) {
 }
 
 func TestInitServerModeWarnsOnMarkerFailureInQuietMode(t *testing.T) {
+	isolateInitEnvForTest(t)
 	skipIfNoDolt(t)
 	saveAndRestoreGlobals(t)
 	ensureCleanGlobalState(t)
@@ -1952,6 +1940,8 @@ func TestInitServerModeWarnsOnMarkerFailureInQuietMode(t *testing.T) {
 
 	beadsDir := filepath.Join(tmpDir, ".beads")
 	doltDir := filepath.Join(beadsDir, "dolt")
+	database := uniqueTestDBName(t)
+	seedCurrentEraServerWorkspace(t, beadsDir, database)
 	if err := os.MkdirAll(doltDir, 0o700); err != nil {
 		t.Fatalf("creating dolt dir: %v", err)
 	}
@@ -1959,7 +1949,6 @@ func TestInitServerModeWarnsOnMarkerFailureInQuietMode(t *testing.T) {
 		t.Fatalf("creating invalid dot-dolt marker: %v", err)
 	}
 
-	database := uniqueTestDBName(t)
 	t.Cleanup(func() {
 		dropTestDatabase(database, testDoltServerPort)
 	})
@@ -1974,6 +1963,8 @@ func TestInitServerModeWarnsOnMarkerFailureInQuietMode(t *testing.T) {
 		os.Stderr = oldStderr
 	}()
 
+	// --force: see the note in TestInitServerModeWritesDoltCompatibilityMarker.
+	t.Cleanup(func() { _ = initCmd.Flags().Set("force", "false") })
 	rootCmd.SetArgs([]string{
 		"init",
 		"--server",
@@ -1982,6 +1973,7 @@ func TestInitServerModeWarnsOnMarkerFailureInQuietMode(t *testing.T) {
 		"--server-port", fmt.Sprintf("%d", testDoltServerPort),
 		"--database", database,
 		"--prefix", "marker",
+		"--force",
 		"--quiet",
 		"--skip-hooks",
 		"--skip-agents",
@@ -2059,6 +2051,7 @@ func setupBareParentInitWorktree(t *testing.T) (string, string) {
 //
 // Each subtest runs bd init in a temp directory and verifies metadata.json.
 func TestInitDatabaseFlag(t *testing.T) {
+	isolateInitEnvForTest(t)
 	skipIfNoDolt(t)
 	bd := buildBDForInitTests(t)
 
@@ -2087,9 +2080,7 @@ func TestInitDatabaseFlag(t *testing.T) {
 		if cfg.DoltDatabase != "myapp_production" {
 			t.Errorf("Expected DoltDatabase %q, got %q", "myapp_production", cfg.DoltDatabase)
 		}
-		if cfg.DoltMode != configfile.DoltModeServer {
-			t.Errorf("Expected DoltMode %q, got %q", configfile.DoltModeServer, cfg.DoltMode)
-		}
+		requireDefaultInitMode(t, cfg)
 	})
 
 	t.Run("BareParentWorktreeAutoInit", func(t *testing.T) {
@@ -2111,9 +2102,14 @@ func TestInitDatabaseFlag(t *testing.T) {
 		bareDir, worktreeDir := setupBareParentInitWorktree(t)
 		bareBeadsDir := filepath.Join(bareDir, ".beads")
 
+		// Shared-server mode with no configured port resolves to the fixed,
+		// machine-global 3308 and init STARTS that server, so this passed
+		// only while nothing else on the box held it (bd-kbx).
+		sharedEnv := sharedServerTestEnv(t)
+
 		cmd := exec.Command(bd, "init", "--prefix", "bare-fallback", "--skip-hooks", "--quiet")
 		cmd.Dir = worktreeDir
-		cmd.Env = append(os.Environ(), "BEADS_DOLT_SHARED_SERVER=1")
+		cmd.Env = sharedEnv
 		out, err := cmd.CombinedOutput()
 		if err != nil {
 			t.Fatalf("bd init from bare-parent worktree failed: %v\n%s", err, out)
@@ -2128,7 +2124,7 @@ func TestInitDatabaseFlag(t *testing.T) {
 
 		retry := exec.Command(bd, "init", "--prefix", "bare-fallback", "--skip-hooks", "--quiet")
 		retry.Dir = worktreeDir
-		retry.Env = append(os.Environ(), "BEADS_DOLT_SHARED_SERVER=1")
+		retry.Env = sharedEnv
 		retryOut, retryErr := retry.CombinedOutput()
 		if retryErr == nil {
 			t.Fatal("expected second bd init to fail against existing bare-parent .beads")
@@ -2168,8 +2164,7 @@ func TestInitDatabaseFlag(t *testing.T) {
 
 		// Verify the database was opened and issue_prefix was set
 		// by reopening the store and checking config
-		dbPath := filepath.Join(beadsDir, "dolt")
-		s, err := openExistingTestDB(t, dbPath)
+		s, err := openWorkspaceStoreForTest(t, beadsDir)
 		if err != nil {
 			t.Fatalf("Failed to reopen database: %v", err)
 		}
@@ -2210,9 +2205,7 @@ func TestInitDatabaseFlag(t *testing.T) {
 		if cfg.DoltDatabase != "test_server_cfg" {
 			t.Errorf("Expected DoltDatabase %q, got %q", "test_server_cfg", cfg.DoltDatabase)
 		}
-		if cfg.DoltMode != configfile.DoltModeServer {
-			t.Errorf("Expected DoltMode %q, got %q", configfile.DoltModeServer, cfg.DoltMode)
-		}
+		requireDefaultInitMode(t, cfg)
 		if cfg.Backend != configfile.BackendDolt {
 			t.Errorf("Expected Backend %q, got %q", configfile.BackendDolt, cfg.Backend)
 		}
@@ -2223,7 +2216,12 @@ func TestInitDatabaseFlag(t *testing.T) {
 
 		cmd := exec.Command(bd, "init", "--shared-server", "--prefix", "shared-mode-test", "--skip-hooks")
 		cmd.Dir = tmpDir
-		cmd.Env = os.Environ()
+		// --shared-server IS what is under test here, so pin only the port
+		// and the server directory -- setting BEADS_DOLT_SHARED_SERVER too
+		// would make the flag a no-op. Without the pin the flag resolves to
+		// the machine-global 3308 and init tries to start a server there
+		// (bd-kbx).
+		cmd.Env = sharedServerPortOnlyTestEnv(t)
 		out, err := cmd.CombinedOutput()
 		if err != nil {
 			t.Fatalf("bd init --shared-server failed: %v\n%s", err, out)
@@ -2324,6 +2322,7 @@ func TestInitDatabaseFlag(t *testing.T) {
 }
 
 func TestBareParentWorktreeCoreCommandsWithoutRedirect(t *testing.T) {
+	isolateInitEnvForTest(t)
 	skipIfNoDolt(t)
 	if runtime.GOOS == "windows" {
 		t.Skip("Skipping worktree test on Windows")
@@ -2385,6 +2384,7 @@ func initBackendTestEnv(beadsDir string) []string {
 }
 
 func TestInitBackendFlag(t *testing.T) {
+	isolateInitEnvForTest(t)
 	bd := buildBDForInitTests(t)
 
 	// The SQLite backend was rolled back with the other alternative backends:
@@ -2497,6 +2497,7 @@ func TestInitBackendFlag(t *testing.T) {
 // This prevents PROJECT IDENTITY MISMATCH errors when multiple users connect to
 // a shared remote Dolt server. (GH#2922)
 func TestInitDatabaseAdoptsExistingProjectID(t *testing.T) {
+	isolateInitEnvForTest(t)
 	skipIfNoDolt(t)
 
 	// Reset global state

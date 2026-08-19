@@ -2125,6 +2125,10 @@ Non-interactive mode (--non-interactive or BD_NON_INTERACTIVE=1):
 		// Auto-setup Claude hooks, Codex, and Cursor project integration. Skip in
 		// stealth mode or when agents are skipped.
 		if !stealth && !skipAgents && !isBareGitRepo() {
+			// The installers narrate their progress to stdout on success;
+			// --quiet promises none of it (bd-kbx).
+			restoreSetupQuiet := setup.SetQuiet(quiet)
+			defer restoreSetupQuiet()
 			if err := setup.InstallClaudeProject(stealth); err != nil {
 				if !quiet {
 					fmt.Fprintf(os.Stderr, "Warning: failed to setup Claude hooks: %v\n", err)
