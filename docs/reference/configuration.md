@@ -313,7 +313,14 @@ Use `bd statuses` and `bd types` to list everything configured.
 
 `bd purge`, `bd gc` and `bd mol wisp gc` select what to delete by status: closed beads of one tier. For most beads that is right — a closed patrol step is finished with. For some it is exactly backwards. A merge-request bead closed *without* merging is the only record that the work never landed, and a message bead is closed by being successfully delivered; both are records *about* work rather than work itself, and both are destroyed by the sweep that reads them as done.
 
-Beads carrying a protected label are held back by every bulk deletion — at any age, in any status, with or without `--force`:
+Two axes hold a bead back from every bulk deletion — at any age, in any status, with or without `--force`:
+
+| Axis | What it matches | Configurable |
+|---|---|---|
+| protected **label** | any bead carrying one of the named labels | yes — `gc.protected_labels` |
+| protected wisp **kind** | escalation wisps, by the wisp's own type | no |
+
+Name the labels you want held back:
 
 ```bash
 bd config set gc.protected_labels "gt:merge-request,gt:message"
@@ -321,13 +328,19 @@ bd config set gc.protected_labels "gt:merge-request,gt:message"
 
 The default protects `gt:merge-request` and `gt:message`. Setting the key replaces that list rather than adding to it, so name every label you want protected. An empty value is treated as unset.
 
+The kind axis has no setting because a label cannot reach what it protects. An escalation's ephemeral half carries its kind and no labels at all, so a label list — however you configure it — holds back none of them, while an open escalation is an unresolved incident by definition and age is no evidence it is finished. That guard therefore stays on even when `gc.protected_labels` names nothing.
+
+A sweep names the whole protecting set rather than the axis that fired, so narrowing the label list never quietly leaves a class of bead standing:
+
 ```console
 $ bd mol wisp gc --closed --force
-kept 1 label-protected wisp(s) (gt:merge-request); delete one deliberately with `bd delete <id>`
+Warning: kept 1 protected wisp(s) (labels: gt:merge-request, gt:message; wisp types: escalation); delete one deliberately with `bd delete <id>`
+Found 12 closed wisp(s)
+
 ✓ Deleted 12 issue(s)
 ```
 
-Protection is by label rather than status because a status is not durable: anything that closes a bead returns it to the delete set, while a label survives the close. To delete a protected bead, name it to `bd delete <id>` — the protection covers bulk sweeps, not deliberate single deletions.
+Protection keys off a label or a kind rather than a status because a status is not durable: anything that closes a bead returns it to the delete set, while both a label and a kind survive the close. To delete a protected bead, name it to `bd delete <id>` — the protection covers bulk sweeps, not deliberate single deletions.
 
 <Warning>
 Wisps live in tables the version-control plane ignores, so a deleted wisp has no history and no backup to restore from. Keep durable records — merge requests, decisions, incident notes — on regular beads rather than wisps.
