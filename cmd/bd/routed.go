@@ -77,10 +77,13 @@ func resolveAndGetIssueWithRoutingAccess(ctx context.Context, localStore storage
 	// If not found locally, try prefix-based routing via routes.jsonl.
 	// This handles cross-rig lookups where the ID's prefix maps to a different
 	// database (e.g., hr-8wn.1 routes to the herald rig's database).
+	var prefixErr error
 	if isNotFoundErr(err) {
-		if prefixResult, prefixErr := resolveViaPrefixRoutingWithAccess(ctx, id, writablePrefixRoute); prefixErr == nil {
+		prefixResult, routeErr := resolveViaPrefixRoutingWithAccess(ctx, id, writablePrefixRoute)
+		if routeErr == nil {
 			return prefixResult, nil
 		}
+		prefixErr = routeErr
 	}
 
 	// If not found via prefix routing, try contributor auto-routing as fallback (GH#2345).
@@ -94,7 +97,7 @@ func resolveAndGetIssueWithRoutingAccess(ctx context.Context, localStore storage
 		}
 	}
 
-	return nil, err
+	return nil, annotateLookupFailure(err, prefixErr)
 }
 
 // resolveAndGetFromStore resolves a partial ID and gets the issue from a specific store.
@@ -141,6 +144,101 @@ func resolveViaAutoRouting(ctx context.Context, localStore storage.DoltStorage, 
 	return result, nil
 }
 
+// prefixRouteFailure records why prefix routing did not produce an issue, so a
+// failed lookup can name the database it actually addressed.
+//
+// A bare "no issue found" cannot distinguish an absent bead from a bead that
+// lives in a database the command never opened. Agents have read the first as
+// the second and concluded that live P1 beads had been destroyed by a purge
+// (bd-4sw). An unroutable prefix and an absent bead are different answers and
+// must not print the same string.
+type prefixRouteFailure struct {
+	Prefix      string // bead ID prefix, e.g. "hq-"
+	RoutesFile  string // routes.jsonl consulted ("" when none was found)
+	RoutePath   string // matched route's path, relative to the town root
+	TargetDB    string // dolt database the route resolves to
+	Searched    bool   // the routed database was opened and queried
+	SameAsLocal bool   // the route resolves back to the local database
+	Err         error
+}
+
+func (f *prefixRouteFailure) Error() string {
+	if f.Err == nil {
+		return fmt.Sprintf("prefix routing failed for %q", f.Prefix)
+	}
+	return f.Err.Error()
+}
+
+func (f *prefixRouteFailure) Unwrap() error { return f.Err }
+
+// explain renders the routing half of a lookup failure for the user. It
+// returns "" when there is nothing worth saying: when no routes.jsonl exists at
+// all (the ordinary single-repo case, not a routing problem), and when the
+// route resolves back to the database the caller already named as searched.
+func (f *prefixRouteFailure) explain() string {
+	switch {
+	case f.RoutesFile == "" || f.SameAsLocal:
+		return ""
+	case f.Searched:
+		return fmt.Sprintf("prefix %q routes to %s (database %q), which was also searched",
+			f.Prefix, f.describeTarget(), f.TargetDB)
+	case f.RoutePath != "":
+		return fmt.Sprintf("prefix %q routes to %s, but that database could not be searched: %v",
+			f.Prefix, f.describeTarget(), f.Err)
+	default:
+		return fmt.Sprintf("prefix %q has no route in %s", f.Prefix, f.RoutesFile)
+	}
+}
+
+// describeTarget names the routed target the way a reader can act on. The town
+// route is recorded as "." in routes.jsonl, which is meaningless on its own.
+func (f *prefixRouteFailure) describeTarget() string {
+	if f.RoutePath == "." {
+		return "the town root"
+	}
+	return f.RoutePath
+}
+
+// annotateLookupFailure names the database a not-found lookup actually searched
+// and, when the ID's prefix routes somewhere else, says where (bd-4sw). Other
+// errors pass through untouched.
+//
+// The original error is wrapped, so errors.Is(storage.ErrNotFound) and the
+// "no issue found matching" text that isNotFoundErr and the protocol contract
+// match on both still hold.
+func annotateLookupFailure(err error, prefixErr error) error {
+	if !isNotFoundErr(err) {
+		return err
+	}
+	var parts []string
+	if where := describeLocalDatabase(); where != "" {
+		parts = append(parts, "searched "+where)
+	}
+	var routeFailure *prefixRouteFailure
+	if errors.As(prefixErr, &routeFailure) {
+		if explanation := routeFailure.explain(); explanation != "" {
+			parts = append(parts, explanation)
+		}
+	}
+	if len(parts) == 0 {
+		return err
+	}
+	return fmt.Errorf("%w (%s)", err, strings.Join(parts, "; "))
+}
+
+// describeLocalDatabase names the database the command opened, so a not-found
+// answer says which database it is an answer about.
+func describeLocalDatabase() string {
+	beadsDir := resolveCommandBeadsDir(dbPath)
+	if beadsDir == "" {
+		return ""
+	}
+	if database := readDoltDatabase(beadsDir); database != "" {
+		return fmt.Sprintf("database %q at %s", database, beadsDir)
+	}
+	return beadsDir
+}
+
 // prefixRoute represents a prefix-to-path routing rule from routes.jsonl.
 type prefixRoute struct {
 	Prefix string `json:"prefix"` // Issue ID prefix (e.g., "hr-")
@@ -172,47 +270,65 @@ func resolveViaPrefixRoutingWithAccess(ctx context.Context, id string, writable 
 		return nil, fmt.Errorf("no prefix in ID %q", id)
 	}
 
-	// Find the resolved beads directory (where routes.jsonl lives)
+	// The beads directory this command resolved to. It is the town's own
+	// .beads only when cwd happens to sit at the town root; everywhere else it
+	// is a rig's (often redirected) .beads.
 	currentBeadsDir := resolveCommandBeadsDir(dbPath)
-	if currentBeadsDir == "" {
-		return nil, fmt.Errorf("no beads directory available")
-	}
 
-	// Load routes from routes.jsonl
-	routes, err := loadPrefixRoutes(currentBeadsDir)
-	if err != nil || len(routes) == 0 {
-		return nil, fmt.Errorf("no routes available")
+	// Locate routes.jsonl by search rather than assuming it sits in the
+	// resolved beads directory (bd-4sw).
+	src := findPrefixRoutesSource(currentBeadsDir)
+	if src == nil {
+		return nil, &prefixRouteFailure{
+			Prefix: prefix,
+			Err:    errors.New("no routes.jsonl found"),
+		}
 	}
 
 	// Find matching route for this prefix
 	var matchedRoute *prefixRoute
-	for i, r := range routes {
+	for i, r := range src.Routes {
 		if r.Prefix == prefix {
-			matchedRoute = &routes[i]
+			matchedRoute = &src.Routes[i]
 			break
 		}
 	}
 	if matchedRoute == nil {
-		return nil, fmt.Errorf("no route for prefix %q", prefix)
+		return nil, &prefixRouteFailure{
+			Prefix:     prefix,
+			RoutesFile: src.File,
+			Err:        fmt.Errorf("no route for prefix %q", prefix),
+		}
 	}
 
-	// Skip if the route points to current directory (town-level, already checked)
-	if matchedRoute.Path == "." {
-		return nil, fmt.Errorf("route points to current database")
-	}
-
-	// Derive the town root from the current beads dir.
-	// currentBeadsDir is typically <town_root>/.beads
-	townRoot := filepath.Dir(currentBeadsDir)
-
-	// Resolve the target rig's .beads directory
-	rigDir := filepath.Join(townRoot, matchedRoute.Path)
+	// Resolve the target rig's .beads directory. Path "." is the town itself,
+	// which filepath.Join resolves to the town root.
+	rigDir := filepath.Join(src.TownRoot, matchedRoute.Path)
 	targetBeadsDir := beads.FollowRedirect(filepath.Join(rigDir, ".beads"))
 
-	// Check that the target has a different dolt_database
+	// A route resolving back to the database this command already searched has
+	// nothing to add. Compare the resolved directories instead of skipping the
+	// town route ("." ) outright: from a rig context the town database is a
+	// genuinely different database and must be followed (bd-4sw).
+	if sameResolvedDir(targetBeadsDir, currentBeadsDir) {
+		return nil, &prefixRouteFailure{
+			Prefix:      prefix,
+			RoutesFile:  src.File,
+			RoutePath:   matchedRoute.Path,
+			SameAsLocal: true,
+			Err:         errors.New("route points to the database already searched"),
+		}
+	}
+
+	// Check that the target declares a dolt_database
 	targetDB := readDoltDatabase(targetBeadsDir)
 	if targetDB == "" {
-		return nil, fmt.Errorf("target rig has no dolt_database configured")
+		return nil, &prefixRouteFailure{
+			Prefix:     prefix,
+			RoutesFile: src.File,
+			RoutePath:  matchedRoute.Path,
+			Err:        fmt.Errorf("target rig %s has no dolt_database configured", targetBeadsDir),
+		}
 	}
 
 	debug.Logf("[routing] Prefix %q matched route to %s (database: %s)\n", prefix, matchedRoute.Path, targetDB)
@@ -235,13 +351,26 @@ func resolveViaPrefixRoutingWithAccess(ctx context.Context, id string, writable 
 		_ = os.Unsetenv("BEADS_DOLT_SERVER_DATABASE")
 	}
 	if openErr != nil {
-		return nil, fmt.Errorf("opening routed store for %s: %w", matchedRoute.Path, openErr)
+		return nil, &prefixRouteFailure{
+			Prefix:     prefix,
+			RoutesFile: src.File,
+			RoutePath:  matchedRoute.Path,
+			TargetDB:   targetDB,
+			Err:        fmt.Errorf("opening routed store for %s: %w", matchedRoute.Path, openErr),
+		}
 	}
 
 	result, err := resolveAndGetFromStore(ctx, targetStore, id, true)
 	if err != nil {
 		_ = targetStore.Close()
-		return nil, err
+		return nil, &prefixRouteFailure{
+			Prefix:     prefix,
+			RoutesFile: src.File,
+			RoutePath:  matchedRoute.Path,
+			TargetDB:   targetDB,
+			Searched:   isNotFoundErr(err),
+			Err:        err,
+		}
 	}
 	result.closeFn = func() { _ = targetStore.Close() }
 
@@ -265,9 +394,99 @@ func extractBeadPrefix(beadID string) string {
 	return beadID[:idx+1]
 }
 
-// loadPrefixRoutes loads prefix-to-path routes from routes.jsonl in the beads directory.
-func loadPrefixRoutes(beadsDir string) ([]prefixRoute, error) {
-	routesPath := filepath.Join(beadsDir, "routes.jsonl")
+// prefixRoutesSource is a routes.jsonl located for prefix routing, together
+// with the town root that the routes' relative paths are anchored to.
+type prefixRoutesSource struct {
+	File     string // absolute path to the routes.jsonl that was loaded
+	TownRoot string // directory owning the .beads dir that holds File
+	Routes   []prefixRoute
+}
+
+// findPrefixRoutesSource locates the routes.jsonl that governs prefix routing.
+//
+// routes.jsonl lives only in the town's own .beads directory. The beads
+// directory a command resolved to is that directory only when cwd happens to
+// sit at the town root; from any rig worktree it is the rig's (often
+// redirected) .beads, which carries no routes at all. Loading routes from the
+// resolved directory — and deriving the town root as that directory's parent —
+// therefore made prefix routing silently unavailable everywhere except the
+// town root, so every foreign-prefix bead reported "no issue found" (bd-4sw).
+//
+// Search the resolved beads directory first (that is the town's own .beads at
+// the town root, and preserves the historical behavior), then walk up from cwd
+// and from the resolved beads directory. The town root is derived from where
+// routes.jsonl actually was, never assumed.
+func findPrefixRoutesSource(currentBeadsDir string) *prefixRoutesSource {
+	var candidates []string
+	if currentBeadsDir != "" {
+		candidates = append(candidates, filepath.Join(currentBeadsDir, "routes.jsonl"))
+	}
+	if cwd, err := os.Getwd(); err == nil {
+		candidates = append(candidates, routesFilesAbove(cwd)...)
+	}
+	if currentBeadsDir != "" {
+		candidates = append(candidates, routesFilesAbove(filepath.Dir(currentBeadsDir))...)
+	}
+
+	seen := make(map[string]bool, len(candidates))
+	for _, path := range candidates {
+		if seen[path] {
+			continue
+		}
+		seen[path] = true
+		routes, err := loadPrefixRoutesFile(path)
+		if err != nil || len(routes) == 0 {
+			continue
+		}
+		debug.Logf("[routing] Loaded %d prefix route(s) from %s\n", len(routes), path)
+		return &prefixRoutesSource{
+			File: path,
+			// <town>/.beads/routes.jsonl -> <town>
+			TownRoot: filepath.Dir(filepath.Dir(path)),
+			Routes:   routes,
+		}
+	}
+	return nil
+}
+
+// routesFilesAbove returns candidate routes.jsonl paths for dir and each of its
+// ancestors, nearest first.
+func routesFilesAbove(dir string) []string {
+	if dir == "" {
+		return nil
+	}
+	abs, err := filepath.Abs(dir)
+	if err != nil {
+		abs = dir
+	}
+	var out []string
+	for d := filepath.Clean(abs); ; d = filepath.Dir(d) {
+		out = append(out, filepath.Join(d, ".beads", "routes.jsonl"))
+		if parent := filepath.Dir(d); parent == d {
+			return out
+		}
+	}
+}
+
+// sameResolvedDir reports whether two paths denote the same directory,
+// resolving symlinks when both sides can be resolved.
+func sameResolvedDir(a, b string) bool {
+	if a == "" || b == "" {
+		return false
+	}
+	if filepath.Clean(a) == filepath.Clean(b) {
+		return true
+	}
+	resolvedA, errA := filepath.EvalSymlinks(a)
+	resolvedB, errB := filepath.EvalSymlinks(b)
+	if errA != nil || errB != nil {
+		return false
+	}
+	return resolvedA == resolvedB
+}
+
+// loadPrefixRoutesFile loads prefix-to-path routes from a routes.jsonl file.
+func loadPrefixRoutesFile(routesPath string) ([]prefixRoute, error) {
 	file, err := os.Open(routesPath) //nolint:gosec // G304: path is constructed from trusted beads directory
 	if err != nil {
 		return nil, err
@@ -326,10 +545,13 @@ func getIssueWithRouting(ctx context.Context, localStore storage.DoltStorage, id
 	}
 
 	// If not found locally, try prefix-based routing via routes.jsonl.
+	var prefixErr error
 	if isNotFoundErr(err) {
-		if prefixResult, prefixErr := resolveViaPrefixRouting(ctx, id); prefixErr == nil {
+		prefixResult, routeErr := resolveViaPrefixRouting(ctx, id)
+		if routeErr == nil {
 			return prefixResult, nil
 		}
+		prefixErr = routeErr
 	}
 
 	// If not found via prefix routing, try contributor auto-routing as fallback (GH#2345).
@@ -341,5 +563,5 @@ func getIssueWithRouting(ctx context.Context, localStore storage.DoltStorage, id
 		}
 	}
 
-	return nil, err
+	return nil, annotateLookupFailure(err, prefixErr)
 }

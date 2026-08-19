@@ -810,8 +810,9 @@ func resolveCloseTargets(ctx context.Context, localStore storage.DoltStorage, id
 		// writable for the same reason — a close is an explicit mutation of the
 		// named issue, and an issue that lives only in the routed store could
 		// otherwise never be closed at all (bd-gq7).
-		if r, err := resolveViaPrefixRoutingWithAccess(ctx, id, true); err == nil {
-			results = append(results, r)
+		prefixResult, prefixErr := resolveViaPrefixRoutingWithAccess(ctx, id, true)
+		if prefixErr == nil {
+			results = append(results, prefixResult)
 			continue
 		}
 		// Contributor auto-routing uses one shared store for the whole batch.
@@ -823,7 +824,10 @@ func resolveCloseTargets(ctx context.Context, localStore storage.DoltStorage, id
 			}
 		}
 		cleanup()
-		return nil, func() {}, fmt.Errorf("resolving ID %s: no issue found matching %q", id, id)
+		// Name the database that was searched and where the prefix routes, so a
+		// close against the wrong database doesn't read as a missing bead (bd-4sw).
+		notFound := annotateLookupFailure(fmt.Errorf("no issue found matching %q", id), prefixErr)
+		return nil, func() {}, fmt.Errorf("resolving ID %s: %w", id, notFound)
 	}
 	return results, cleanup, nil
 }
