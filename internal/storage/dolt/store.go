@@ -1819,8 +1819,11 @@ func newServerMode(ctx context.Context, cfg *Config) (*DoltStore, error) {
 					cfg.ServerHost, cfg.ServerPort,
 					cfg.ServerHost, cfg.ServerPort)
 			} else if !cfg.AutoStart && doltserver.IsAutoStartDisabled() {
-				hint = "Dolt server auto-start is disabled (dolt.auto-start: false).\n" +
-					"Start the server manually:\n  bd dolt start"
+				// The dial above already failed, so nothing is listening and
+				// there is no PID to trace back to a supervisor. Say what bd
+				// knows — why it did not start a server — and leave the cause
+				// open instead of blaming dolt.auto-start (bd-8ef).
+				hint = doltserver.ExplainAutoStartDisabled()
 			} else {
 				hint = "The Dolt server may not be running. Try:\n  bd dolt start"
 			}
