@@ -62,11 +62,18 @@ func gatherListInput(cmd *cobra.Command) (listInput, error) {
 	in.AllFlag, _ = cmd.Flags().GetBool("all")
 
 	in.formatStr, _ = cmd.Flags().GetString("format")
-	if strings.EqualFold(in.formatStr, "json") {
-		jsonOutput = true
-		in.formatStr = ""
-	}
 	in.jsonOutput = jsonOutput
+	// --format json is not a rendering preset, it is the --json alias: it
+	// leaves no format behind for the renderer to dispatch on, and it selects
+	// JSON. Recorded on the input struct, not on the jsonOutput global — this
+	// runs inside list's Run, so a write to the global outlives the command
+	// and the next one in the same process inherits it. The global itself was
+	// already resolved for this command by the root pre-run, from the same
+	// flag (see resolveJSONOutput), so the two agree.
+	if strings.EqualFold(in.formatStr, "json") {
+		in.formatStr = ""
+		in.jsonOutput = true
+	}
 
 	in.Labels, _ = cmd.Flags().GetStringSlice("label")
 	in.LabelsAny, _ = cmd.Flags().GetStringSlice("label-any")

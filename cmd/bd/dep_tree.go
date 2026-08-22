@@ -87,8 +87,11 @@ func runDepTree(cmd *cobra.Command, ctx context.Context, args []string) error {
 	directionFlag, _ := cmd.Flags().GetString("direction")
 	statusFilter, _ := cmd.Flags().GetString("status")
 	formatStr, _ := cmd.Flags().GetString("format")
+	// The --json alias, not a preset: clear it so the preset switch below has
+	// nothing to dispatch on. jsonOutput itself was already resolved for this
+	// command by the root pre-run (resolveJSONOutput); setting it from here
+	// would outlive the command.
 	if strings.EqualFold(formatStr, "json") {
-		jsonOutput = true
 		formatStr = ""
 	}
 
