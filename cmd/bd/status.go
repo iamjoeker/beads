@@ -71,11 +71,9 @@ Examples:
 		showAssigned, _ := cmd.Flags().GetBool("assigned")
 		noActivity, _ := cmd.Flags().GetBool("no-activity")
 		noBlocked, _ := cmd.Flags().GetBool("no-blocked")
-		jsonFormat, _ := cmd.Flags().GetBool("json")
-
-		if jsonFormat {
-			jsonOutput = true
-		}
+		// --json is not read here: the root pre-run already resolved it into
+		// jsonOutput for this command (resolveJSONOutput), and setting the
+		// global from inside a Run leaves it set for whatever runs next.
 
 		reporter, err := openStatsReporter()
 		if err != nil {

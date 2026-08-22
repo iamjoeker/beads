@@ -646,9 +646,11 @@ func refreshBoundCommandConfig(cmd *cobra.Command) {
 	if root == nil {
 		root = cmd
 	}
-	if !root.PersistentFlags().Changed("json") && !root.PersistentFlags().Changed("format") {
-		jsonOutput = config.GetBool("json")
-	}
+	// Re-resolved rather than conditionally reassigned: resolveJSONOutput
+	// already keeps explicit flags authoritative, and going through it here
+	// too keeps this rebinding path on the same rules as the pre-run — a
+	// rerouted command honors its own --json exactly as a direct one does.
+	jsonOutput = resolveJSONOutput(cmd, config.GetBool("json"))
 	if !root.PersistentFlags().Changed("readonly") {
 		readonlyMode = config.GetBool("readonly")
 	}
@@ -1038,17 +1040,13 @@ var rootCmd = &cobra.Command{
 			WasSet bool
 		})
 
-		// Handle --format json alias (desire-path from GH#2612)
-		if cmd.Root().PersistentFlags().Changed("format") {
-			format, _ := cmd.Root().PersistentFlags().GetString("format")
-			if strings.EqualFold(format, "json") {
-				jsonOutput = true
-			}
-		}
-		// If flag wasn't explicitly set, use viper value
-		if !cmd.Root().PersistentFlags().Changed("json") && !cmd.Root().PersistentFlags().Changed("format") {
-			jsonOutput = config.GetBool("json")
-		} else {
+		// Resolve the output mode for THIS command, unconditionally. The
+		// assignment is the whole point: several commands used to set
+		// jsonOutput from a flag inside their own Run with nothing to put it
+		// back, which the real CLI survives by exiting and an in-process test
+		// binary does not. See resolveJSONOutput.
+		jsonOutput = resolveJSONOutput(cmd, config.GetBool("json"))
+		if cmd.Flags().Changed("json") || cmd.Flags().Changed("format") {
 			flagOverrides["json"] = struct {
 				Value  interface{}
 				WasSet bool

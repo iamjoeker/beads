@@ -79,15 +79,19 @@ func runPreflight(cmd *cobra.Command, args []string) error {
 
 	check, _ := cmd.Flags().GetBool("check")
 	fix, _ := cmd.Flags().GetBool("fix")
-	jsonOutput, _ := cmd.Flags().GetBool("json")
+	// Named apart from the package-global jsonOutput on purpose: preflight
+	// renders its own report and threads the mode as an argument, so a local
+	// with the global's name would make every reader below ambiguous and hide
+	// the global from a source audit for who writes it.
+	jsonReport, _ := cmd.Flags().GetBool("json")
 	skipLint, _ := cmd.Flags().GetBool("skip-lint")
 
 	if fix {
-		return runFixes(jsonOutput)
+		return runFixes(jsonReport)
 	}
 
 	if check {
-		return runChecks(jsonOutput, skipLint)
+		return runChecks(jsonReport, skipLint)
 	}
 
 	// Static checklist mode — tailor the checklist to the detected project
@@ -191,7 +195,7 @@ func isBeadsRepo(dir string) bool {
 }
 
 // runChecks executes all preflight checks and reports results.
-func runChecks(jsonOutput, skipLint bool) error {
+func runChecks(jsonReport, skipLint bool) error {
 	var results []CheckResult
 
 	// Run test check
@@ -249,7 +253,7 @@ func runChecks(jsonOutput, skipLint bool) error {
 		summary += fmt.Sprintf(" (%d skipped)", skipCount)
 	}
 
-	if jsonOutput {
+	if jsonReport {
 		result := PreflightResult{
 			Checks:  results,
 			Passed:  allPassed,
@@ -664,7 +668,7 @@ type fixResult struct {
 }
 
 // runFixes executes auto-fix operations for fixable preflight checks.
-func runFixes(jsonOutput bool) error {
+func runFixes(jsonReport bool) error {
 	var results []fixResult
 	hasError := false
 
@@ -694,7 +698,7 @@ func runFixes(jsonOutput bool) error {
 	}
 	results = append(results, vr)
 
-	if jsonOutput {
+	if jsonReport {
 		enc := json.NewEncoder(os.Stdout)
 		enc.SetIndent("", "  ")
 		if err := enc.Encode(results); err != nil {
