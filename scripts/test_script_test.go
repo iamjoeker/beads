@@ -6,6 +6,7 @@ import (
 	"os/exec"
 	"path/filepath"
 	"runtime"
+	"strconv"
 	"strings"
 	"testing"
 )
@@ -17,7 +18,12 @@ const (
 	testScriptDriverEnv         = "BEADS_TEST_SCRIPT_DRIVER"
 	testScriptNativeSuffixEnv   = "BEADS_TEST_SCRIPT_NATIVE_SUFFIX"
 	testScriptLaunchProbeEnv    = "BEADS_TEST_SCRIPT_LAUNCH_PROBE"
+	testScriptBuildOutputEnv    = "BEADS_TEST_SCRIPT_BUILD_OUTPUT"
 )
+
+// beadsTestEnvStamp mirrors BEADS_TEST_ENV_STAMP in scripts/ci/lib/test-env.sh:
+// the per-root ownership marker whose presence means "this root is live".
+const beadsTestEnvStamp = ".beads-test-env-owner"
 
 const testScriptFakeGo = `#!/usr/bin/env bash
 set -euo pipefail
@@ -51,7 +57,15 @@ case "${1:-}" in
                 shift
             fi
         done
-        if [[ -z "$output" || "$output" != "$BEADS_TEST_SCRIPT_EXPECTED_BINARY" ]]; then
+        if [[ -z "$output" ]]; then
+            printf 'fake go: build is missing its output\n' >&2
+            exit 90
+        fi
+        printf '%s\n' "$output" >>"$BEADS_TEST_SCRIPT_BUILD_OUTPUT"
+        # An empty expectation means the caller asserts on the recorded output
+        # instead: the test.sh fallback path builds into a mktemp directory
+        # whose name it cannot know in advance.
+        if [[ -n "$BEADS_TEST_SCRIPT_EXPECTED_BINARY" && "$output" != "$BEADS_TEST_SCRIPT_EXPECTED_BINARY" ]]; then
             printf 'fake go: build output %q, want %q\n' "$output" "$BEADS_TEST_SCRIPT_EXPECTED_BINARY" >&2
             exit 90
         fi
@@ -90,6 +104,44 @@ func TestTestScriptPrebuiltBinaryContract(t *testing.T) {
 	})
 }
 
+// TestTestScriptDoesNotResurrectACleanedRoot pins the consumer half of bd-iik.
+//
+// test.sh used to `mkdir -p "$BEADS_TEST_ENV_ROOT/prebuilt-bd"` on whatever
+// root it found in the environment. When that root belonged to a shell that
+// had already cleaned up, the mkdir wrote it back into existence and a ~200 MB
+// bd binary landed in a directory nothing would ever remove again. On the host
+// that produced bd-iik, 49 of 63 stranded roots had been removed and then
+// re-created that way.
+func TestTestScriptDoesNotResurrectACleanedRoot(t *testing.T) {
+	result := runTestScript(t, testScriptRun{cleanedRoot: true, disableTestEnv: true})
+
+	assertFakeGoCommands(t, result.commands, "env", "build", "test")
+
+	if _, err := os.Stat(result.testEnvRoot); !os.IsNotExist(err) {
+		t.Fatalf("cleaned root %s was re-created (stat error %v)", result.testEnvRoot, err)
+	}
+	if len(result.buildOutputs) != 1 {
+		t.Fatalf("fake-go build outputs = %q, want exactly one", result.buildOutputs)
+	}
+	built := filepath.FromSlash(result.buildOutputs[0])
+	if strings.HasPrefix(built, filepath.Clean(result.testEnvRoot)+string(filepath.Separator)) {
+		t.Fatalf("prebuild wrote into the cleaned root: %s", built)
+	}
+	// The fallback directory is test.sh's own, so test.sh must remove it too:
+	// trading one stranded root for another would not be a fix.
+	entries, err := os.ReadDir(result.tempRoot)
+	if err != nil {
+		t.Fatalf("read fallback temp root %s: %v", result.tempRoot, err)
+	}
+	if len(entries) != 0 {
+		names := make([]string, 0, len(entries))
+		for _, entry := range entries {
+			names = append(names, entry.Name())
+		}
+		t.Fatalf("test.sh left %v behind in %s", names, result.tempRoot)
+	}
+}
+
 // TestTestScriptPrebuiltBinaryLaunchProbe is selected only by the fake go test
 // process above. Keeping the os/exec probe in a normal test avoids claiming the
 // package-wide TestMain authority needed by other script-selection contracts.
@@ -114,17 +166,55 @@ func TestTestScriptPrebuiltBinaryLaunchProbe(t *testing.T) {
 	}
 }
 
+// testScriptRun configures one scripts/test.sh invocation against the fake go.
+type testScriptRun struct {
+	// callerBinary is exported as BEADS_TEST_BD_BINARY when non-empty.
+	callerBinary string
+	// cleanedRoot leaves the inherited BEADS_TEST_ENV_ROOT nonexistent instead
+	// of creating and stamping it: a root whose owning shell already cleaned
+	// up. test.sh must not write it back into existence (bd-iik).
+	cleanedRoot bool
+	// disableTestEnv exports BEADS_TEST_ENV_DISABLE=1, which makes
+	// beads_test_env_enter a no-op so test.sh alone decides what to do with
+	// the root it inherited.
+	disableTestEnv bool
+}
+
+// testScriptResult reports what the fake go saw during one invocation.
+type testScriptResult struct {
+	commands     []string
+	buildOutputs []string
+	testEnvRoot  string
+	tempRoot     string
+}
+
 func runTestScriptWithFakeGo(t *testing.T, callerBinary string) []string {
+	t.Helper()
+	return runTestScript(t, testScriptRun{callerBinary: callerBinary}).commands
+}
+
+func runTestScript(t *testing.T, run testScriptRun) testScriptResult {
 	t.Helper()
 
 	root := filepath.Join(t.TempDir(), "test script root with spaces")
 	fakeBin := filepath.Join(root, "fake go bin")
 	testEnvRoot := filepath.Join(root, "isolated test environment")
 	tempRoot := filepath.Join(root, "temporary files")
-	for _, path := range []string{fakeBin, testEnvRoot, tempRoot} {
+	create := []string{fakeBin, tempRoot}
+	if !run.cleanedRoot {
+		create = append(create, testEnvRoot)
+	}
+	for _, path := range create {
 		if err := os.MkdirAll(path, 0o755); err != nil {
 			t.Fatalf("create fixture directory %s: %v", path, err)
 		}
+	}
+	if !run.cleanedRoot {
+		// The fixture stands in for a root an outer wrapper created and still
+		// owns, so it needs that wrapper's ownership stamp: test.sh builds
+		// into an inherited BEADS_TEST_ENV_ROOT only while the root is stamped
+		// (bd-iik).
+		writeTestEnvStamp(t, testEnvRoot, 1)
 	}
 
 	fakeGo := filepath.Join(fakeBin, "go")
@@ -132,12 +222,17 @@ func runTestScriptWithFakeGo(t *testing.T, callerBinary string) []string {
 		t.Fatalf("write fake go: %v", err)
 	}
 	callLog := filepath.Join(root, "fake go calls")
-	if err := os.WriteFile(callLog, nil, 0o600); err != nil {
-		t.Fatalf("initialize fake-go call log: %v", err)
+	buildLog := filepath.Join(root, "fake go build outputs")
+	for _, path := range []string{callLog, buildLog} {
+		if err := os.WriteFile(path, nil, 0o600); err != nil {
+			t.Fatalf("initialize fake-go log %s: %v", path, err)
+		}
 	}
 
-	expected := callerBinary
-	if expected == "" {
+	// A cleaned root sends the prebuild down test.sh's mktemp fallback, whose
+	// path no fixture can predict; the caller asserts on buildOutputs instead.
+	expected := run.callerBinary
+	if expected == "" && !run.cleanedRoot {
 		expected = filepath.Join(testEnvRoot, "prebuilt-bd", "bd"+nativeExecutableSuffix())
 	}
 
@@ -146,15 +241,17 @@ func runTestScriptWithFakeGo(t *testing.T, callerBinary string) []string {
 		t.Fatalf("bash is required to exercise scripts/test.sh: %v", err)
 	}
 	repoRoot := sourceRepoRoot(t)
-	env := testScriptEnvironment(testEnvRoot, tempRoot, expected, callerBinary)
+	env := testScriptEnvironment(testEnvRoot, tempRoot, expected, run)
 	fakeBinShellPath := shellPathUnderEnv(t, bash, fakeBin, env)
 	fakeGoShellPath := shellPathUnderEnv(t, bash, fakeGo, env)
 	driverShellPath := shellPathUnderEnv(t, bash, currentTestExecutable(t), env)
 	callLogShellPath := shellPathUnderEnv(t, bash, callLog, env)
+	buildLogShellPath := shellPathUnderEnv(t, bash, buildLog, env)
 	env = append(env,
 		"BEADS_TEST_COMMAND_PATH="+fakeBinShellPath+":/usr/bin:/bin",
 		testScriptDriverEnv+"="+driverShellPath,
 		testScriptFakeGoLogEnv+"="+callLogShellPath,
+		testScriptBuildOutputEnv+"="+buildLogShellPath,
 	)
 
 	cmd := exec.Command(
@@ -175,15 +272,39 @@ func runTestScriptWithFakeGo(t *testing.T, callerBinary string) []string {
 		t.Fatalf("scripts/test.sh failed: %v\n%s", runErr, output)
 	}
 
-	content, err := os.ReadFile(callLog)
-	if err != nil {
-		t.Fatalf("read fake-go call log: %v", err)
+	return testScriptResult{
+		commands:     readTestScriptLog(t, callLog),
+		buildOutputs: readTestScriptLog(t, buildLog),
+		testEnvRoot:  testEnvRoot,
+		tempRoot:     tempRoot,
 	}
-	return strings.Fields(string(content))
 }
 
-func testScriptEnvironment(testEnvRoot string, tempRoot string, expected string, callerBinary string) []string {
+func readTestScriptLog(t *testing.T, path string) []string {
+	t.Helper()
+	content, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatalf("read fake-go log %s: %v", path, err)
+	}
+	var lines []string
+	for _, line := range strings.Split(string(content), "\n") {
+		if line = strings.TrimRight(line, "\r"); line != "" {
+			lines = append(lines, line)
+		}
+	}
+	return lines
+}
+
+func testScriptEnvironment(testEnvRoot string, tempRoot string, expected string, run testScriptRun) []string {
 	home := filepath.Join(testEnvRoot, "home")
+	expectedBinary := ""
+	expectedBase := ""
+	launchProbe := "0"
+	if expected != "" {
+		expectedBinary = portableTestScriptPath(expected)
+		expectedBase = filepath.Base(expected)
+		launchProbe = "1"
+	}
 	env := []string{
 		"PATH=/usr/bin:/bin",
 		"HOME=" + portableTestScriptPath(home),
@@ -199,13 +320,16 @@ func testScriptEnvironment(testEnvRoot string, tempRoot string, expected string,
 		"GOFLAGS=",
 		"BEADS_TEST_ENV_ACTIVE=1",
 		"BEADS_TEST_ENV_ROOT=" + portableTestScriptPath(testEnvRoot),
-		testScriptExpectedBinaryEnv + "=" + portableTestScriptPath(expected),
-		testScriptExpectedBaseEnv + "=" + filepath.Base(expected),
+		testScriptExpectedBinaryEnv + "=" + expectedBinary,
+		testScriptExpectedBaseEnv + "=" + expectedBase,
 		testScriptNativeSuffixEnv + "=" + nativeExecutableSuffix(),
-		testScriptLaunchProbeEnv + "=1",
+		testScriptLaunchProbeEnv + "=" + launchProbe,
 	}
-	if callerBinary != "" {
-		env = append(env, "BEADS_TEST_BD_BINARY="+portableTestScriptPath(callerBinary))
+	if run.callerBinary != "" {
+		env = append(env, "BEADS_TEST_BD_BINARY="+portableTestScriptPath(run.callerBinary))
+	}
+	if run.disableTestEnv {
+		env = append(env, "BEADS_TEST_ENV_DISABLE=1")
 	}
 	for _, key := range []string{"SYSTEMROOT", "WINDIR", "COMSPEC", "PATHEXT"} {
 		if value, ok := os.LookupEnv(key); ok {
@@ -213,6 +337,16 @@ func testScriptEnvironment(testEnvRoot string, tempRoot string, expected string,
 		}
 	}
 	return env
+}
+
+// writeTestEnvStamp marks root live for scripts/ci/lib/test-env.sh by writing
+// the ownership stamp that beads_test_env_enter writes at create time.
+func writeTestEnvStamp(t *testing.T, root string, ownerPID int) {
+	t.Helper()
+	stamp := filepath.Join(root, beadsTestEnvStamp)
+	if err := os.WriteFile(stamp, []byte(strconv.Itoa(ownerPID)+"\n"), 0o600); err != nil {
+		t.Fatalf("write test-env ownership stamp %s: %v", stamp, err)
+	}
 }
 
 func assertFakeGoCommands(t *testing.T, commands []string, want ...string) {
