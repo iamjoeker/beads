@@ -61,6 +61,28 @@ type testRunner interface {
 
 func runTestsAndSweep(m testRunner) int {
 	code := m.Run()
+	if jsonOutput {
+		// bd-vm6: a test that sets the package-global jsonOutput and never
+		// restores it costs nothing in its own run and then silently changes
+		// what every later test in the same process observes —
+		// HandleErrorWithHint and friends emit JSON where the victim asserts
+		// on human-readable stderr. Nothing else in the suite reports it.
+		//
+		// This is a net, not a proof: it only sees a leak still standing at
+		// the end of the run, so a later test that happens to reset the flag
+		// hides it, and CI shards this package by test name so each shard
+		// only checks its own tail. The real defense is that every save/set
+		// site restores — saveAndRestoreGlobals covers jsonOutput for that
+		// reason. This catches the ones that go around it.
+		fmt.Fprintln(os.Stderr,
+			"FAIL: a test left the package-global jsonOutput=true. Restore it "+
+				"(saveAndRestoreGlobals(t), or an explicit t.Cleanup) in whichever "+
+				"test set it; leaving it set makes later tests in this process see "+
+				"JSON where they assert on human-readable output.")
+		if code == 0 {
+			code = 1
+		}
+	}
 	doltserver.SweepOrphanedTestServers(testTempRoot)
 	return code
 }
