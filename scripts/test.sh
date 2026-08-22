@@ -16,6 +16,24 @@ source "$REPO_ROOT/scripts/ci/lib/test-env.sh"
 
 beads_test_env_enter
 
+# Everything this script creates outside the hermetic root, removed on exit.
+TEST_SH_OWNED_TMP=()
+
+# Single EXIT handler for the whole script. beads_test_env_enter installs its
+# own; replacing it here (rather than at each new cleanup obligation) keeps the
+# ordering explicit — reap and remove what this run started, then hand off to
+# the library, which removes the root only if this shell owns it.
+test_sh_cleanup() {
+    if declare -F cleanup_shared_server >/dev/null 2>&1; then
+        cleanup_shared_server
+    fi
+    if [[ "${BEADS_TEST_ENV_KEEP:-0}" != "1" && ${#TEST_SH_OWNED_TMP[@]} -gt 0 ]]; then
+        rm -rf "${TEST_SH_OWNED_TMP[@]}"
+    fi
+    beads_test_env_cleanup
+}
+trap test_sh_cleanup EXIT
+
 # Build skip pattern from .test-skip file
 build_skip_pattern() {
     if [[ ! -f "$SKIP_FILE" ]]; then
@@ -101,10 +119,16 @@ if [[ -z "${BEADS_TEST_BD_BINARY:-}" ]]; then
     case " ${PACKAGES[*]} " in
         # Any recursive pattern (./..., ./cmd/...) can expand to cmd/bd.
         *"..."* | *"cmd/bd"*)
-            if [[ -n "${BEADS_TEST_ENV_ROOT:-}" ]]; then
+            # Only build into a root that is still live. An inherited
+            # BEADS_TEST_ENV_ROOT whose owner already cleaned up is a grave,
+            # not a workspace: `mkdir -p` would write a ~200 MB bd binary back
+            # into a directory nothing will ever remove again, which is how
+            # bd-iik's prebuilt-bd-only leftovers got there.
+            if beads_test_env_root_is_live; then
                 PREBUILT_BD_DIR="$BEADS_TEST_ENV_ROOT/prebuilt-bd"
             else
                 PREBUILT_BD_DIR=$(mktemp -d "${TMPDIR:-/tmp}/beads-prebuilt-bd-XXXXXX")
+                TEST_SH_OWNED_TMP+=("$PREBUILT_BD_DIR")
             fi
             mkdir -p "$PREBUILT_BD_DIR"
             echo "Prebuilding bd for subprocess tests..." >&2
@@ -155,12 +179,15 @@ if [[ "${BEADS_TEST_SHARED_SERVER:-}" == "1" && -z "${BEADS_DOLT_PORT:-}" ]]; th
             export BEADS_DOLT_PORT="$SHARED_PORT"
             export BEADS_TEST_MODE=1
             echo "Shared test Dolt server started on port $SHARED_PORT (PID $SHARED_DOLT_PID)" >&2
+            # Picked up by test_sh_cleanup, which is already trapped on EXIT.
+            # Defining it rather than re-trapping keeps a single handler: the
+            # old `trap ... EXIT` here silently replaced whatever the library
+            # had installed.
             cleanup_shared_server() {
                 kill "$SHARED_DOLT_PID" 2>/dev/null || true
                 wait "$SHARED_DOLT_PID" 2>/dev/null || true
                 rm -rf "$SHARED_DOLT_DIR"
             }
-            trap 'cleanup_shared_server; beads_test_env_cleanup' EXIT
         else
             echo "WARN: shared Dolt server failed to start, falling back to per-package servers" >&2
             kill "$SHARED_DOLT_PID" 2>/dev/null || true

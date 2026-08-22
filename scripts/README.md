@@ -28,6 +28,29 @@ the fast PR-core contract even on shared agent hosts. Set
 tests through these broad wrappers, or `BEADS_TEST_ENV_DISABLE=1` when debugging
 against your real local configuration.
 
+Each root is stamped at create time with the PID of the shell that made it, and
+that stamp governs its lifetime (bd-iik):
+
+- **Only the owner removes it.** A wrapper that inherited `BEADS_TEST_ENV_ROOT`
+  from a still-running outer wrapper leaves the root alone on exit.
+- **A removed root is never written back.** `HOME`, `DOLT_ROOT_PATH`,
+  `XDG_CONFIG_HOME` and `GIT_CONFIG_GLOBAL` all point inside the root, so any
+  process still holding that environment would re-create it as an empty 0755
+  directory that nothing ever cleans up. Consumers call
+  `beads_test_env_root_is_live` before writing into a root they did not create,
+  and `beads_test_env_enter` sets up a fresh root rather than adopting a
+  cleaned-up one.
+- **Holders are reaped first.** Before removing the root, cleanup terminates
+  every remaining process whose environment still names it — typically a `dolt`
+  server that outlived `go test`. Set `BEADS_TEST_ENV_NO_REAP=1` to leave
+  survivors running, and `BEADS_TEST_ENV_KEEP=1` to keep the root for
+  inspection.
+
+`trap beads_test_env_cleanup EXIT` still cannot fire on `SIGKILL`, so a run the
+kernel or a harness kills outright leaves its root behind intact (mode 0700,
+with all of its contents). Those are reclaimed out of band by
+`gt deacon sweep-tmp`.
+
 The broad Go wrappers also cap package and test parallelism to `4` by default
 (`GO_TEST_PKG_PARALLEL` and `GO_TEST_PARALLEL`). This avoids turning high-core
 shared hosts into a different test topology than GitHub Actions.
