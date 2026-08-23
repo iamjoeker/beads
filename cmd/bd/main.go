@@ -1008,6 +1008,10 @@ var rootCmd = &cobra.Command{
 		debug.SetVerbose(verboseFlag)
 		debug.SetQuiet(quietFlag)
 
+		// Now that --quiet is resolved, surface the concurrency snapshot
+		// main() took at startup if it was over the threshold (bd-x33).
+		reportProcPressure()
+
 		if err := applyChangeDirSelection(); err != nil {
 			return err
 		}
@@ -2243,7 +2247,18 @@ func main() {
 	rootCmd.InitDefaultHelpCmd()
 	registerHelpAllFlag()
 
+	// Count this process against its live peers (bd-x33). Must follow
+	// InitDefaultHelpCmd so the argv-to-subcommand lookup sees every command,
+	// and must precede ExecuteC so the entry spans the whole run.
+	releaseProcPressure := registerProcPressure()
+
 	executedCmd, err := rootCmd.ExecuteC()
+
+	// Drop this process's registry entry. Only a fast path: the os.Exit guards
+	// below and elsewhere skip it, and entries left by those — and by the OOM
+	// kills this instruments — are unlinked by the next invocation that scans
+	// and finds the process gone.
+	releaseProcPressure()
 
 	// Let this command's fire-and-forget hooks finish, for the same
 	// every-exit-path reason the metrics flush below is here rather than in

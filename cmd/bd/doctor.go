@@ -490,6 +490,14 @@ func runDiagnostics(path string) doctorResult {
 	// Check for a dangling core.hooksPath pointing at a missing directory (GH#4440)
 	hooksPathCheck := convertWithCategory(doctor.CheckHooksPath(), doctor.CategoryGit)
 	result.Checks = append(result.Checks, hooksPathCheck)
+
+	// Concurrent bd processes (bd-x33). Deliberately above the "no .beads/"
+	// early return below: a pile-up is a property of the host, not of this
+	// workspace, and the moment an operator most wants the number is when
+	// everything else is failing.
+	result.Checks = append(result.Checks, checkProcPressure())
+	// Warning-class: a high count means the database is slow, not that beads
+	// is misinstalled, so it must not fail OverallOK.
 	// Warning-class check — don't fail overall check, matching the neighboring hooks checks.
 
 	// Check git hooks Dolt compatibility (hooks without Dolt check cause errors)
