@@ -94,6 +94,9 @@ pointless).`,
 		if len(args) == 0 && !AllowLastTouchedFallback() {
 			return HandleErrorRespectJSON("no issue ID provided (the last-touched fallback only applies in interactive sessions; pass an explicit issue ID or set BD_LAST_TOUCHED_FALLBACK=1)")
 		}
+		if err := errEmptyIssueIDArg(args); err != nil {
+			return HandleErrorRespectJSON("%s", err)
+		}
 		return nil
 	},
 	SilenceUsage:  true,

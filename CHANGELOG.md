@@ -39,6 +39,31 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   payload is unchanged. Under `--quiet` the audit now skips its queries
   entirely rather than running them to discard the output.
 
+### Fixed
+
+- **`bd close` no longer closes an issue the command line never named**
+  (bd-lrk). With no ID, close falls back to the last-touched issue — handy
+  when a human types it, destructive when a shell builds it: `bd close
+  $(... | head -1) --force` whose substitution yields nothing degrades to a
+  bare `bd close --force`, which is not a no-op. It closed a live agent bead
+  in a running town. bd-m00pb already refused the no-ID case in scripts, but
+  its test is whether stdin is a terminal, and agents run in terminals too.
+  The fallback now **names the issue it picked and waits for a yes** —
+  default-no, so an unanswered or unreadable prompt closes nothing. The one
+  path that still closes without asking is an explicit
+  `BD_LAST_TOUCHED_FALLBACK=1` with stdin redirected: naming the fallback in
+  the environment is the confirmation. `--json` at a terminal is refused
+  outright rather than prompted, since a machine cannot answer.
+
+- **An empty positional issue ID is refused instead of resolved** (bd-lrk).
+  The quoted sibling of the case above: `bd close "$ID"` with an unset `$ID`
+  keeps the argument and passes an empty string. No issue ID is empty, so
+  that is a failed expansion wearing the shape of an argument. `bd close` and
+  `bd update` now reject it by name, before the store is opened, and an empty
+  ID anywhere in a batch refuses the whole command — previously it reached
+  the resolver and came back as `no issue found matching ""`, which reads as
+  "that bead is gone" rather than "your variable was empty".
+
 ### Documentation
 
 - **The heartbeat/re-home invariant and the two states it can strand are now

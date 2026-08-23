@@ -146,3 +146,92 @@ func TestNoIDFallbackGuard(t *testing.T) {
 		}
 	})
 }
+
+// TestCloseNoIDOptInStillCloses pins the one path that closes an unnamed
+// issue without asking: BD_LAST_TOUCHED_FALLBACK=1 with stdin redirected.
+// The confirmation added for bd-lrk only has a caller to ask when stdin is a
+// terminal, and naming the fallback in the environment is itself the answer —
+// so this must keep working, or scripts that opted in deliberately break.
+func TestCloseNoIDOptInStillCloses(t *testing.T) {
+	binPath := buildBDUnderTest(t)
+	workDir := t.TempDir()
+	initBeadsWorkspace(t, binPath, workDir)
+
+	id := runBDStdout(t, binPath, workDir, "q", "Opt-in close target")
+	if id == "" {
+		t.Fatal("bd q returned empty issue ID")
+	}
+	lastTouchedPath := filepath.Join(workDir, ".beads", lastTouchedFile)
+	if err := os.WriteFile(lastTouchedPath, []byte(id+"\n"), 0600); err != nil {
+		t.Fatalf("seed last-touched: %v", err)
+	}
+
+	code, out := runBDWithEnv(t, binPath, workDir,
+		[]string{"BD_LAST_TOUCHED_FALLBACK=1"}, "close")
+	if code != 0 {
+		t.Fatalf("bd close with opt-in failed (exit %d): %s", code, out)
+	}
+
+	show := runBDStdout(t, binPath, workDir, "show", id, "--json")
+	if !strings.Contains(show, `"status":"closed"`) && !strings.Contains(show, `"status": "closed"`) {
+		t.Errorf("opt-in fallback should have closed %s:\nclose output: %s\nshow: %s", id, out, show)
+	}
+}
+
+// TestEmptyIDArgGuard verifies the quoted sibling of the no-ID case. An
+// unquoted substitution that yields nothing drops the argument and hits the
+// guard above; a quoted one keeps it and hands the command an empty string.
+// `bd close ""` must refuse by name and close nothing — the incident behind
+// bd-lrk was a close with no named target, and an empty argument is no more
+// of a target than a missing one.
+func TestEmptyIDArgGuard(t *testing.T) {
+	binPath := buildBDUnderTest(t)
+	workDir := t.TempDir()
+	initBeadsWorkspace(t, binPath, workDir)
+
+	id := runBDStdout(t, binPath, workDir, "q", "Empty-arg guard issue")
+	if id == "" {
+		t.Fatal("bd q returned empty issue ID")
+	}
+	// Point last-touched at the issue: if an empty argument ever degraded to
+	// the no-ID path, this is the bead it would take out.
+	lastTouchedPath := filepath.Join(workDir, ".beads", lastTouchedFile)
+	if err := os.WriteFile(lastTouchedPath, []byte(id+"\n"), 0600); err != nil {
+		t.Fatalf("seed last-touched: %v", err)
+	}
+
+	// The opt-in is on for every case here, so a refusal proves the empty
+	// argument was rejected on its own terms and not by the no-ID guard.
+	optIn := []string{"BD_LAST_TOUCHED_FALLBACK=1"}
+
+	cases := []struct {
+		name string
+		args []string
+	}{
+		{name: "close empty string", args: []string{"close", ""}},
+		{name: "close empty string with --force", args: []string{"close", "", "--force"}},
+		{name: "close whitespace only", args: []string{"close", "   "}},
+		{name: "close empty among real ids", args: []string{"close", id, ""}},
+		{name: "update empty string", args: []string{"update", "", "--priority", "3"}},
+	}
+
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			code, out := runBDWithEnv(t, binPath, workDir, optIn, tc.args...)
+			if code == 0 {
+				t.Fatalf("bd %v succeeded with an empty ID; output: %s", tc.args, out)
+			}
+			if !strings.Contains(out, "empty issue ID") {
+				t.Errorf("refusal should name the empty ID, not report a missing bead; output: %s", out)
+			}
+		})
+	}
+
+	// Nothing above may have closed anything. Assert the surviving status
+	// positively, so a change in the JSON shape fails the test instead of
+	// quietly making the "not closed" check vacuous.
+	show := runBDStdout(t, binPath, workDir, "show", id, "--json")
+	if !strings.Contains(show, `"status":"open"`) && !strings.Contains(show, `"status": "open"`) {
+		t.Errorf("empty-ID refusals must not close anything; %s is not open:\n%s", id, show)
+	}
+}

@@ -1,6 +1,7 @@
 package main
 
 import (
+	"bufio"
 	"context"
 	"encoding/json"
 	"errors"
@@ -19,6 +20,7 @@ import (
 	"github.com/steveyegge/beads/internal/ui"
 	"github.com/steveyegge/beads/internal/validation"
 	"github.com/steveyegge/beads/issueops"
+	"golang.org/x/term"
 )
 
 var closeCmd = &cobra.Command{
@@ -28,12 +30,18 @@ var closeCmd = &cobra.Command{
 	Short:   "Close one or more issues",
 	Long: `Close one or more issues.
 
-If no issue ID is provided, closes the last touched issue (from most recent
-create, update, show, or close operation). This fallback only applies in
+If no issue ID is provided, offers to close the last touched issue (from most
+recent create, update, show, or close operation). This fallback only applies in
 interactive sessions (stdin is a terminal); in scripts and agent sessions a
 missing ID is an error, so a command built from an empty variable cannot
 silently close an unrelated issue. Set BD_LAST_TOUCHED_FALLBACK=1 to allow
 the fallback anywhere, or =0 to disable it entirely.
+
+Because closing is destructive, the fallback names the issue it picked and
+waits for a yes; only an explicit BD_LAST_TOUCHED_FALLBACK=1 with stdin
+redirected closes without asking. An empty positional ID is refused outright:
+no issue ID is empty, so bd close "$ID" with an unset $ID is a failed
+expansion, not a request.
 
 When closing multiple issues, provide one --reason for all IDs or repeat
 --reason once per ID. Reasons map positionally: the first --reason applies
@@ -45,6 +53,9 @@ the flags appear in the command line.`,
 	Args: func(cmd *cobra.Command, args []string) error {
 		if len(args) == 0 && !AllowLastTouchedFallback() {
 			return HandleErrorRespectJSON("no issue ID provided (the last-touched fallback only applies in interactive sessions; pass an explicit issue ID or set BD_LAST_TOUCHED_FALLBACK=1)")
+		}
+		if err := errEmptyIssueIDArg(args); err != nil {
+			return HandleErrorRespectJSON("%s", err)
 		}
 		return nil
 	},
@@ -65,11 +76,16 @@ the flags appear in the command line.`,
 		}
 
 		// If no IDs provided, use last touched issue (interactive only;
-		// the non-interactive case was already refused in Args validation)
+		// the non-interactive case was already refused in Args validation).
+		// Closing is destructive, so the substituted target has to be
+		// confirmed out loud before it is closed (bd-lrk).
 		if len(args) == 0 {
 			lastTouched := GetLastTouchedID()
 			if lastTouched == "" {
 				return HandleErrorRespectJSON("no issue ID provided and no last touched issue")
+			}
+			if err := confirmUnnamedClose(rootCtx, lastTouched); err != nil {
+				return HandleErrorRespectJSON("%s", err)
 			}
 			args = []string{lastTouched}
 		}
@@ -753,6 +769,62 @@ func resolveReasonFile(cmd *cobra.Command, hasExistingReason bool) (string, bool
 		return "", false, fmt.Errorf("--reason-file %q is empty; close reason is required", path)
 	}
 	return content, true, nil
+}
+
+// confirmUnnamedClose gates the no-ID last-touched fallback behind an explicit
+// yes, returning nil only when the caller confirms closing the substituted
+// issue. It names the issue — id and title — so the answer is given about a
+// specific bead rather than about the idea of one.
+//
+// The fallback exists so a human at a prompt can close what they were just
+// looking at. It becomes destructive the moment a shell builds the command:
+// `bd close $(...)` whose substitution yields nothing degrades to a bare
+// `bd close`, which is not a no-op — it closes a live bead the command line
+// never named (bd-lrk). AllowLastTouchedFallback's terminal check does not
+// separate those two cases, because agents run inside terminals too. A prompt
+// does: a human answers it, and a failed expansion has nobody to answer.
+//
+// Two callers cannot be prompted, and each is answered on its own terms:
+//   - stdin redirected: only the explicit BD_LAST_TOUCHED_FALLBACK=1 opt-in
+//     reaches here, every other non-terminal close having been refused in
+//     Args validation. Naming the fallback is the confirmation, so honor it.
+//   - --json at a terminal: a JSON consumer cannot answer, and a prompt would
+//     be answered by whatever the machine sends next. Refuse and say what to
+//     pass instead.
+func confirmUnnamedClose(ctx context.Context, id string) error {
+	if !term.IsTerminal(int(os.Stdin.Fd())) {
+		return nil
+	}
+	if jsonOutput {
+		return fmt.Errorf("no issue ID provided (--json cannot answer the confirmation prompt for closing last-touched issue %s; pass an explicit issue ID)", id)
+	}
+
+	label := id
+	if store != nil {
+		if issue, err := store.GetIssue(ctx, id); err == nil && issue != nil && issue.Title != "" {
+			label = formatFeedbackID(id, issue.Title)
+		}
+	}
+	fmt.Fprintf(os.Stderr, "No issue ID given. The last touched issue is %s.\nClose it? [y/N] ", label)
+
+	line, err := bufio.NewReader(os.Stdin).ReadString('\n')
+	return closeConfirmAnswer(id, line, err)
+}
+
+// closeConfirmAnswer turns what was typed at the fallback prompt into a
+// verdict: nil to close, an error to abort. Default-no — anything that is not
+// a yes leaves the issue open, including an unreadable answer, because the
+// caller never named this issue in the first place.
+func closeConfirmAnswer(id, line string, readErr error) error {
+	if readErr != nil && strings.TrimSpace(line) == "" {
+		return fmt.Errorf("no issue ID provided and the confirmation prompt was not answered; pass an explicit issue ID")
+	}
+	switch strings.ToLower(strings.TrimSpace(line)) {
+	case "y", "yes":
+		return nil
+	default:
+		return fmt.Errorf("aborted: nothing closed (pass an explicit issue ID to close %s)", id)
+	}
 }
 
 // resolveCloseTargets resolves a batch of partial issue IDs for `bd close`,
