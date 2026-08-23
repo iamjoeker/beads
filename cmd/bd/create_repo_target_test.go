@@ -116,6 +116,81 @@ func TestResolveRepoTargetBeadsDir(t *testing.T) {
 	})
 }
 
+// TestCheckRepoTargetInitializable pins the two refusals ensureBeadsDirForPath
+// used to hold inline (bd-cqv). They live in their own stat-only function so
+// `--dry-run` can apply them without creating the workspace it is previewing a
+// create into (bd-e7v) — which means this function must stay free of writes.
+func TestCheckRepoTargetInitializable(t *testing.T) {
+	t.Parallel()
+
+	t.Run("initialized_target_reports_initialized", func(t *testing.T) {
+		t.Parallel()
+		beadsDir := filepath.Join(t.TempDir(), ".beads")
+		if err := os.MkdirAll(beadsDir, 0o750); err != nil {
+			t.Fatal(err)
+		}
+		if err := os.WriteFile(filepath.Join(beadsDir, "metadata.json"),
+			[]byte(`{"dolt_database":"real_db"}`), 0o600); err != nil {
+			t.Fatal(err)
+		}
+
+		initialized, err := checkRepoTargetInitializable(beadsDir)
+		if err != nil {
+			t.Fatalf("checkRepoTargetInitializable: %v", err)
+		}
+		if !initialized {
+			t.Error("a target with metadata.json must report initialized")
+		}
+	})
+
+	t.Run("unresolved_redirect_is_refused", func(t *testing.T) {
+		t.Parallel()
+		// resolveRepoTargetBeadsDir already followed every redirect it could,
+		// so one surviving to here is one FollowRedirect fell back from.
+		beadsDir := filepath.Join(t.TempDir(), ".beads")
+		if err := os.MkdirAll(beadsDir, 0o750); err != nil {
+			t.Fatal(err)
+		}
+		if err := os.WriteFile(filepath.Join(beadsDir, "redirect"),
+			[]byte("/nonexistent/target/.beads\n"), 0o600); err != nil {
+			t.Fatal(err)
+		}
+
+		initialized, err := checkRepoTargetInitializable(beadsDir)
+		if err == nil {
+			t.Fatalf("expected a refusal for an unresolved redirect (initialized=%v)", initialized)
+		}
+		if !strings.Contains(err.Error(), "redirect") {
+			t.Errorf("error should name the redirect, got: %v", err)
+		}
+		// Stat-only: the refusal must leave the stub exactly as it found it.
+		if _, statErr := os.Stat(filepath.Join(beadsDir, "metadata.json")); !os.IsNotExist(statErr) {
+			t.Errorf("checking wrote an identity file beside the redirect: %v", statErr)
+		}
+	})
+
+	t.Run("uninitialized_target_reports_not_initialized_or_refuses", func(t *testing.T) {
+		t.Parallel()
+		// An existing directory with no .beads and no redirect: embedded-mode
+		// invocations may initialize it in place, server-backed ones must
+		// refuse. Which applies depends on this build's mode, so assert the
+		// pairing rather than one branch.
+		beadsDir := filepath.Join(t.TempDir(), ".beads")
+
+		initialized, err := checkRepoTargetInitializable(beadsDir)
+		if initialized {
+			t.Fatal("a target with no metadata.json must not report initialized")
+		}
+		if isEmbeddedMode() {
+			if err != nil {
+				t.Errorf("embedded mode initializes an empty target in place, got: %v", err)
+			}
+		} else if err == nil {
+			t.Error("a server-backed invocation must refuse an uninitialized --repo target")
+		}
+	})
+}
+
 // TestCreateTargetPrefixOverlay covers which workspace's config.yaml decides
 // what an explicit --id must look like (bd-5ut). A routed create writes to
 // another project's store, so reading the LOCAL overlay there judges the id by

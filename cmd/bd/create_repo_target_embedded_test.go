@@ -120,3 +120,77 @@ func TestEmbeddedCreateRepoExplicitIDPrefix(t *testing.T) {
 		assertIssueInStore(t, targetBeadsDir, "gt", issue.ID)
 	})
 }
+
+// TestEmbeddedCreateRepoDryRunTargetResolution is the end-to-end half of
+// bd-e7v. Every --repo check sat past the preview's early return, so
+// `--dry-run --repo <name-that-is-not-a-path>` printed "Would create issue"
+// and exited 0 for the exact target a real create refuses. A preview that
+// disagrees with the command it previews is the same reported failure the
+// --repo route has produced all along — a success line for a create that
+// never lands — and the one an operator is most likely to trust, since
+// checking with --dry-run first is what caution looks like here.
+func TestEmbeddedCreateRepoDryRunTargetResolution(t *testing.T) {
+	if os.Getenv("BEADS_TEST_EMBEDDED_DOLT") != "1" {
+		t.Skip("set BEADS_TEST_EMBEDDED_DOLT=1 to run embedded dolt create tests")
+	}
+	t.Parallel()
+
+	bd := buildEmbeddedBD(t)
+
+	t.Run("unresolvable_repo_name_fails_the_preview_too", func(t *testing.T) {
+		dir, _, _ := bdInit(t, bd, "--prefix", "sr")
+
+		out := bdCreateFail(t, bd, dir, "--dry-run", "--repo", "gastown", "Should not be previewed")
+		if !strings.Contains(out, "does not exist") {
+			t.Errorf("expected a --repo target error, got:\n%s", out)
+		}
+		if strings.Contains(out, "Would create issue") {
+			t.Errorf("no preview may be rendered for an unresolvable --repo target:\n%s", out)
+		}
+		if _, err := os.Stat(filepath.Join(dir, "gastown")); !os.IsNotExist(err) {
+			t.Errorf("a dry run must not invent a workspace at %s: %v", filepath.Join(dir, "gastown"), err)
+		}
+	})
+
+	t.Run("unresolved_redirect_stub_fails_the_preview", func(t *testing.T) {
+		dir, _, _ := bdInit(t, bd, "--prefix", "sr")
+
+		// A stub whose redirect names a directory that does not exist:
+		// FollowRedirect falls back to the stub, so the preview reaches the
+		// same refusal a real create reaches.
+		stubDir := t.TempDir()
+		stubBeadsDir := filepath.Join(stubDir, ".beads")
+		if err := os.MkdirAll(stubBeadsDir, 0o750); err != nil {
+			t.Fatal(err)
+		}
+		if err := os.WriteFile(filepath.Join(stubBeadsDir, "redirect"),
+			[]byte(filepath.Join(stubDir, "gone", ".beads")+"\n"), 0o600); err != nil {
+			t.Fatal(err)
+		}
+
+		out := bdCreateFail(t, bd, dir, "--dry-run", "--repo", stubDir, "Should not be previewed")
+		if !strings.Contains(out, "redirect") {
+			t.Errorf("refusal should name the redirect, got:\n%s", out)
+		}
+		// The preview must leave the stub a stub — writing an identity file
+		// beside a redirect overrides it for every later command in that tree.
+		if _, err := os.Stat(filepath.Join(stubBeadsDir, "metadata.json")); err == nil {
+			t.Errorf("a dry run wrote metadata.json into the redirect stub at %s", stubBeadsDir)
+		}
+	})
+
+	t.Run("valid_target_still_previews", func(t *testing.T) {
+		dir, _, _ := bdInit(t, bd, "--prefix", "sr")
+		targetDir, targetBeadsDir, _ := bdInit(t, bd, "--prefix", "dt")
+
+		out := bdRunOK(t, bd, dir, "create", "--dry-run", "--repo", targetDir, "Previewed only")
+		if !strings.Contains(out, "Would create issue") {
+			t.Errorf("a resolvable --repo target must still preview, got:\n%s", out)
+		}
+		// A preview is still a preview: nothing may reach the target store.
+		listed := bdRunOK(t, bd, targetDir, "list")
+		if strings.Contains(listed, "Previewed only") {
+			t.Errorf("dry run wrote into the target store at %s:\n%s", targetBeadsDir, listed)
+		}
+	})
+}

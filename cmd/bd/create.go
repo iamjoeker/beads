@@ -390,6 +390,28 @@ var createCmd = &cobra.Command{
 			return nil
 		}
 
+		// A preview has to refuse whatever the real create would refuse, or it
+		// is not a preview of it. Every --repo check lived past this early
+		// return, so `--dry-run --repo <name>` printed "Would create issue"
+		// and exited 0 for targets a real create rejects outright — the same
+		// success-without-a-write the --repo route was reported for, one
+		// command shape over (bd-e7v). --parent already resolved the target
+		// via openDryRunTargetStore; this covers the bare preview too, and
+		// running it first keeps both paths reporting the identical error.
+		//
+		// Remote --repo URLs are excluded deliberately: validating one means
+		// syncing the remote cache, and a dry-run must not mutate it (see
+		// openDryRunTargetStore).
+		if dryRun && repoPath != "." && !remotecache.IsRemoteURL(repoPath) {
+			targetBeadsDirPath, err := resolveRepoTargetBeadsDir(repoPath)
+			if err != nil {
+				return HandleError("%v", err)
+			}
+			if _, err := checkRepoTargetInitializable(targetBeadsDirPath); err != nil {
+				return HandleError("%v", err)
+			}
+		}
+
 		if dryRun && parentID == "" {
 			return renderDryRun()
 		}
@@ -1041,6 +1063,32 @@ func resolveRepoTargetBeadsDir(repoPath string) (string, error) {
 	return beads.FollowRedirect(filepath.Join(targetPath, ".beads")), nil
 }
 
+// checkRepoTargetInitializable reports whether a --repo target's
+// redirect-resolved .beads directory is already an initialized workspace, and
+// refuses the two shapes ensureBeadsDirForPath must never materialize (its doc
+// comment explains why each one strands the write).
+//
+// It only stats; the refusals therefore also hold for `--dry-run`, which must
+// not create the workspace it is previewing a create into. Keeping the checks
+// here rather than inline in ensureBeadsDirForPath is what lets the preview
+// and the real create refuse identically, with the same wording (bd-e7v).
+func checkRepoTargetInitializable(beadsDir string) (initialized bool, err error) {
+	// metadata.json is the canonical marker for an initialized beads dir.
+	if _, err := os.Stat(filepath.Join(beadsDir, "metadata.json")); err == nil {
+		return true, nil
+	}
+
+	if _, err := os.Stat(filepath.Join(beadsDir, beads.RedirectFileName)); err == nil {
+		return false, fmt.Errorf("--repo target has a redirect at %s that bd could not resolve to a database; initializing one here instead would write an identity file beside the redirect, which overrides it for every command run in that tree — repair the redirect target, or run 'bd init' in the workspace it should point at", beadsDir)
+	}
+
+	if !isEmbeddedMode() {
+		return false, fmt.Errorf("--repo target has no beads workspace at %s, and this one is server-backed; the embedded database bd would create there is invisible to the shared server every other client reads from — run 'bd init' in the target repository first", beadsDir)
+	}
+
+	return false, nil
+}
+
 // ensureBeadsDirForPath ensures a beads directory exists at beadsDir.
 // If it doesn't exist, it creates it and initializes with the same prefix as
 // the source store (T010, T012: prefix inheritance). Callers pass the
@@ -1061,20 +1109,12 @@ func resolveRepoTargetBeadsDir(repoPath string) (string, error) {
 //     .beads/embeddeddolt/ is invisible to the shared Dolt server that every
 //     other agent in the target reads from.
 func ensureBeadsDirForPath(ctx context.Context, beadsDir string, sourceStore storage.DoltStorage) error {
-	metadataPath := filepath.Join(beadsDir, "metadata.json")
-
-	// Check if beads directory already exists with a Dolt database.
-	// metadata.json is the canonical marker for an initialized beads dir.
-	if _, err := os.Stat(metadataPath); err == nil {
+	initialized, err := checkRepoTargetInitializable(beadsDir)
+	if err != nil {
+		return err
+	}
+	if initialized {
 		return nil
-	}
-
-	if _, err := os.Stat(filepath.Join(beadsDir, beads.RedirectFileName)); err == nil {
-		return fmt.Errorf("--repo target has a redirect at %s that bd could not resolve to a database; initializing one here instead would write an identity file beside the redirect, which overrides it for every command run in that tree — repair the redirect target, or run 'bd init' in the workspace it should point at", beadsDir)
-	}
-
-	if !isEmbeddedMode() {
-		return fmt.Errorf("--repo target has no beads workspace at %s, and this one is server-backed; the embedded database bd would create there is invisible to the shared server every other client reads from — run 'bd init' in the target repository first", beadsDir)
 	}
 
 	// Create .beads directory
