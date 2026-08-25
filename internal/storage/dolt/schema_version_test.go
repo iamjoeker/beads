@@ -261,8 +261,7 @@ func TestMigration0053RepairsIssuesMissingRigColumns(t *testing.T) {
 	// the schema is now at 0065, so the test was exercising migration 65 while
 	// asserting 53's behaviour and failing with "column agent_state could not
 	// be found".
-	const migration0053 = 53
-	if _, err := store.db.ExecContext(ctx, "DELETE FROM schema_migrations WHERE version >= ?", migration0053); err != nil {
+	if _, err := store.db.ExecContext(ctx, "DELETE FROM schema_migrations WHERE version >= ?", rigRepairVersion); err != nil {
 		t.Fatalf("mark 0053 pending: %v", err)
 	}
 	if _, err := schema.MigrateUp(ctx, store.db); err != nil {
@@ -279,6 +278,9 @@ func TestMigration0053RepairsIssuesMissingRigColumns(t *testing.T) {
 		t.Fatalf("promoted rig issue rows = %d, want 1 with rig columns restored and copied", promoted)
 	}
 }
+
+// rigRepairVersion is the 0053 rig-columns repair migration under test above.
+const rigRepairVersion = 53
 
 // orphanCleanupIgnoredVersion is migrations/ignored/0011_cleanup_orphaned_
 // child_counters.up.sql — the migration under test below.

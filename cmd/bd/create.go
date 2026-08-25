@@ -24,6 +24,7 @@ import (
 	"github.com/steveyegge/beads/internal/timeparsing"
 	"github.com/steveyegge/beads/internal/types"
 	"github.com/steveyegge/beads/internal/ui"
+	"github.com/steveyegge/beads/internal/utils"
 	"github.com/steveyegge/beads/internal/validation"
 	"github.com/steveyegge/beads/issueops"
 )
@@ -180,6 +181,8 @@ var createCmd = &cobra.Command{
 		if len(labelAlias) > 0 {
 			labels = append(labels, labelAlias...)
 		}
+		labels = utils.NormalizeLabels(labels)
+		warnLabelsContainingWhitespace(labels)
 
 		explicitID, _ := cmd.Flags().GetString("id")
 		parentID, _ := cmd.Flags().GetString("parent")
@@ -445,7 +448,12 @@ var createCmd = &cobra.Command{
 				debug.Logf("DEBUG: Routing to target repo: %s\n", targetBeadsDirPath)
 				routedBeadsDir = targetBeadsDirPath
 
-				if err := ensureBeadsDirForPath(rootCtx, targetBeadsDirPath, store); err != nil {
+				// Auto-routed paths (routing.mode: auto, routing.default)
+				// come from config, not caller input, so they're always
+				// allowed to auto-vivify as before; only an explicit --repo
+				// flag value can be ambiguous.
+				allowCreate := !isAmbiguousRepoTarget(cmd.Flags().Changed("repo"), repoOverride)
+				if err := ensureBeadsDirForPath(rootCtx, targetBeadsDirPath, store, allowCreate); err != nil {
 					return HandleError("failed to initialize target repo: %v", err)
 				}
 
@@ -1063,6 +1071,16 @@ func resolveRepoTargetBeadsDir(repoPath string) (string, error) {
 	return beads.FollowRedirect(filepath.Join(targetPath, ".beads")), nil
 }
 
+// isAmbiguousRepoTarget reports whether an explicit --repo value is a
+// bare/relative filesystem path (not absolute, not "~/"-prefixed). Such a
+// value silently resolves against the current working directory (see
+// routing.ExpandPath) rather than failing, so a misresolved value (e.g. a
+// typo) previously wrote a bead into a brand-new, disconnected database
+// instead of erroring (bd-8d3f).
+func isAmbiguousRepoTarget(repoFlagChanged bool, repoOverride string) bool {
+	return repoFlagChanged && !filepath.IsAbs(repoOverride) && !strings.HasPrefix(repoOverride, "~/")
+}
+
 // checkRepoTargetInitializable reports whether a --repo target's
 // redirect-resolved .beads directory is already an initialized workspace, and
 // refuses the two shapes ensureBeadsDirForPath must never materialize (its doc
@@ -1108,13 +1126,22 @@ func checkRepoTargetInitializable(beadsDir string) (initialized bool, err error)
 //  2. This invocation is server-backed. A new embedded store under
 //     .beads/embeddeddolt/ is invisible to the shared Dolt server that every
 //     other agent in the target reads from.
-func ensureBeadsDirForPath(ctx context.Context, beadsDir string, sourceStore storage.DoltStorage) error {
+//
+// A third shape is refused by the caller rather than by inspecting the target:
+// when allowCreate is false the --repo value was a bare/relative path, which
+// resolves against the current working directory and so names a target the
+// caller probably did not mean — see isAmbiguousRepoTarget.
+func ensureBeadsDirForPath(ctx context.Context, beadsDir string, sourceStore storage.DoltStorage, allowCreate bool) error {
 	initialized, err := checkRepoTargetInitializable(beadsDir)
 	if err != nil {
 		return err
 	}
 	if initialized {
 		return nil
+	}
+
+	if !allowCreate {
+		return fmt.Errorf("no beads workspace found at %s and --repo's value is a relative/bare path, so it won't be auto-created here (this is likely not the target you intended). Pass an absolute or \"~/\"-prefixed --repo path to an existing workspace instead", beadsDir)
 	}
 
 	// Create .beads directory

@@ -80,28 +80,54 @@ func NotPinned(force bool) IssueValidator {
 // string, never the substitution itself (ga-wzl83). None of ".", "_", "-"
 // carries meaning in an identity string: each is always a positional
 // separator between a rig and a role/agent name, never part of either name.
-// Collapsing any run of them to one canonical separator lets two spellings
-// of the same identity compare equal without weakening comparisons between
+// Collapsing a run of them to one canonical separator lets two spellings of
+// the same identity compare equal without weakening comparisons between
 // genuinely different identities, whose non-separator characters still
 // differ (e.g. "gastown.mayor" vs "gastown.dog-3" stay distinct).
 //
-// "/" is a separator of exactly the same kind, and is the one Gas Town uses
-// in its ADDRESS form: "<rig>/<role>" for rig-level agents ("beads/witness",
-// "deacon/dogs/charlie"), and "<role>/" for TOWN-level agents, where the
-// trailing slash holds the EMPTY RIG SLOT ("mayor/", "deacon/").
+// "/" is the separator Gas Town uses in its ADDRESS form: "<rig>/<role>" for
+// rig-level agents ("beads/witness", "deacon/dogs/charlie"), and "<role>/" for
+// TOWN-level agents, where the trailing slash holds the EMPTY RIG SLOT
+// ("mayor/", "deacon/").
 //
-// A trailing slash is therefore the one trailing separator that carries no
-// positional information — it marks an absent rig, not a missing name — so it
-// alone is stripped, before the general collapse. Trailing ".", "_" and "-"
-// keep their existing pinned behavior of being preserved as separators
+// A trailing slash is the one trailing separator that carries no positional
+// information — it marks an absent rig, not a missing name — so it alone is
+// stripped, before the general collapse. Trailing ".", "_" and "-" keep their
+// existing pinned behavior of being preserved as separators
 // (TestCanonicalActor), because in the dotted-alias world they may still
 // distinguish identities; this change does not touch them.
 //
-// Without this, every ownership check on a town-level agent compares an
-// ADDRESS to an IDENTITY and refuses. Measured 2026-08-16: all 77 escalation
-// beads are assigned "mayor/" while BD_ACTOR is "mayor", so the Mayor could
-// not close a single escalation through the intended command, and
+// Without the trailing strip, every ownership check on a town-level agent
+// compares an ADDRESS to an IDENTITY and refuses. Measured 2026-08-16: all 77
+// escalation beads are assigned "mayor/" while BD_ACTOR is "mayor", so the
+// Mayor could not close a single escalation through the intended command, and
 // `gt escalate close` has no --force to take the error's own advice.
+//
+// An INTERIOR "/" is NOT folded into the generic separator run, and that is
+// deliberate rather than an omission (bd-uzt, reconciling ga-2vy9p2 with the
+// trailing-slash fix above). A run that is the exact two-byte sequence "--" is
+// a second, distinct axis: gascity's session-name encoding (session_name.go)
+// substitutes "--" for a rig-qualified agent's "/" — a DIFFERENT identity from
+// one substituting "_" or "__" for a dotted alias's "." — so it decodes to a
+// literal "/" instead of collapsing into the generic "_" separator. Any other
+// run, including "__" and longer or mixed runs, still collapses to "_": those
+// keep meaning nothing but "here was some separator". A raw "/" passes through
+// unchanged (it hits the default case below), which is what makes the "--"
+// decode land on the same canonical form: "gastown/mayor" and "gastown--mayor"
+// both canonicalize to "gastown/mayor", while "gastown--mayor" and
+// "gastown__mayor" no longer collapse to the same value — collapsing them was
+// a real widening: "gastown--mayor" is a rig-qualified agent named "mayor",
+// "gastown__mayor" is a dotted alias "gastown.mayor"; treating them as the
+// same actor was wrong regardless of whether either happens to be held by the
+// same principal today. Folding interior "/" into the run would re-open
+// exactly that widening, so an address and a dotted alias of the same
+// principal ("beads/witness" vs "beads.witness") are once again distinct
+// identities here; only the empty rig slot is normalized away.
+//
+// Byte-scanned rather than rune-scanned so a 2-byte lookahead can detect an
+// exact "--" run: safe because '.', '_', '-' are single-byte ASCII that never
+// appear as a continuation byte of a multi-byte UTF-8 rune, so slicing on
+// them cannot split one.
 //
 // Empty stays empty: an actual absence of an actor must never canonicalize
 // to the same value as a non-empty one, or AssigneeMatches would start
@@ -117,18 +143,24 @@ func CanonicalActor(s string) string {
 	}
 	var b strings.Builder
 	b.Grow(len(s))
-	inSeparator := false
-	for _, r := range s {
-		switch r {
-		case '.', '_', '-', '/':
-			if !inSeparator {
-				b.WriteByte('_')
-				inSeparator = true
+	i := 0
+	for i < len(s) {
+		c := s[i]
+		if c == '.' || c == '_' || c == '-' {
+			j := i
+			for j < len(s) && (s[j] == '.' || s[j] == '_' || s[j] == '-') {
+				j++
 			}
-		default:
-			b.WriteRune(r)
-			inSeparator = false
+			if s[i:j] == "--" {
+				b.WriteByte('/')
+			} else {
+				b.WriteByte('_')
+			}
+			i = j
+			continue
 		}
+		b.WriteByte(c)
+		i++
 	}
 	return b.String()
 }

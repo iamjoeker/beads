@@ -463,6 +463,17 @@ func (s *DoltStore) filteredPushToPeer(ctx context.Context, peer string, exclude
 	// Pin a single long-timeout connection for the session-scoped staging
 	// operation. RecomputeAllIsBlockedInTx can exceed the shared pool's
 	// 10-second I/O deadline, and branch state is connection-scoped.
+	//
+	// Audited upstream for be-b0am's fresh-connection branch hazard and found
+	// safe on its own: unlike recomputeAllBlocked/recomputeBlockedTx, this
+	// never depends on the fresh connection's default checkout — it explicitly
+	// creates stagingBranch FROM sourceBranch (CALL DOLT_BRANCH(stagingBranch,
+	// sourceBranch) in stageFilteredBranch) and checks that out by name, so the
+	// source ref is named, not inherited. We still open on the active branch:
+	// the audit covers the staging path, but cleanupFilteredStaging restores
+	// sourceBranch on this same connection, and a store whose active branch is
+	// not the connection default (every test store on a private branch) must
+	// not have that restore land on the default checkout.
 	db, err := s.openLongTimeoutConnOnActiveBranch(ctx)
 	if err != nil {
 		return fmt.Errorf("federation filter: open long-timeout connection: %w", err)

@@ -275,7 +275,7 @@ func TestEnsureBeadsDirForPathRefusesToStrandAWrite(t *testing.T) {
 			t.Fatal(err)
 		}
 
-		err := ensureBeadsDirForPath(rootCtx, beadsDir, nil)
+		err := ensureBeadsDirForPath(rootCtx, beadsDir, nil, true)
 		if err == nil {
 			t.Fatal("expected a refusal to initialize a database beside a redirect")
 		}
@@ -301,7 +301,7 @@ func TestEnsureBeadsDirForPathRefusesToStrandAWrite(t *testing.T) {
 		target := t.TempDir()
 		beadsDir := filepath.Join(target, ".beads")
 
-		err := ensureBeadsDirForPath(rootCtx, beadsDir, nil)
+		err := ensureBeadsDirForPath(rootCtx, beadsDir, nil, true)
 		if err == nil {
 			t.Fatal("expected a refusal to initialize an embedded database from a server-backed workspace")
 		}
