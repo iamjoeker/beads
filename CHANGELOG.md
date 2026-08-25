@@ -53,6 +53,24 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Changed
 
+- **`CanonicalActor` no longer folds an interior `/` into the generic
+  separator run** (bd-uzt). Merging upstream brought ga-2vy9p2, which decodes
+  an exact two-byte `--` run to a literal `/` — gascity's session-name
+  spelling of a rig-qualified agent — while this fork's own fix had added `/`
+  to the run that collapses to `_`. **The two cannot both hold:** if `/`
+  collapses to `_`, then `gastown--mayor` and `gastown__mayor` canonicalize
+  alike again, which is exactly the widening ga-2vy9p2 exists to close
+  (`gastown--mayor` is the agent `mayor` on rig `gastown`; `gastown__mayor` is
+  the dotted alias `gastown.mayor`). The narrower reading wins.
+  **What still works:** the TRAILING-slash strip is untouched, so a town-level
+  address closes under its bare identity (`mayor/` matches `mayor`) — that was
+  the measured defect, 77 escalation beads the Mayor could not close.
+  **What changes:** an address no longer matches a *dotted alias* of the same
+  principal — `beads/witness` and `beads.witness` are distinct identities
+  again, and `deacon/dogs/charlie` no longer matches `deacon-dogs-charlie`.
+  `--` is now the one spelling that crosses that axis, so `beads--witness`
+  matches `beads/witness`.
+
 - **`bd -C <dir>` now actually changes directory, as its help has always
   claimed** (bd-det). It used to resolve `<dir>` to a `.beads` project and set
   `BEADS_DIR` — nothing more. That moved the *store* half of every
