@@ -478,27 +478,68 @@ func TestApplyConfigDefaults_ExplicitPortPreservedWhenEnvUnset(t *testing.T) {
 
 // TestApplyConfigDefaults_ServerPortEnvShadowsLegacyPort pins the resolver
 // precedence that produced bd-799. BEADS_DOLT_SERVER_PORT is consulted before
-// the legacy BEADS_DOLT_PORT, and an env port overwrites whatever the caller
-// put in cfg.ServerPort. A test harness that starts a Dolt container and
-// publishes its port under the legacy var alone therefore never reaches bd:
-// the ambient BEADS_DOLT_SERVER_PORT (agent shells export the production 3307)
-// wins, the test-mode guard rewrites it to the unreachable sentinel port 1,
-// and the tests fail with a connection error that names neither the container
-// nor the environment. See testutil.publishDoltPortEnv, which now writes both.
+// the legacy BEADS_DOLT_PORT. A test harness that starts a Dolt container and
+// publishes its port under the legacy var alone therefore never reaches bd
+// unless it also passes the port to the caller: the ambient
+// BEADS_DOLT_SERVER_PORT (agent shells export the production 3307) wins, the
+// test-mode guard rewrites it to the unreachable sentinel port 1, and the
+// tests fail with a connection error that names neither the container nor the
+// environment. See testutil.publishDoltPortEnv, which now writes both.
+//
+// RECONCILED with be-wf9a.1 (bd-uzt): a caller-explicit ServerPort now
+// outranks the ambient env vars, so a partial publish no longer poisons a
+// caller that DID name its container. That does not weaken bd-799's guard —
+// the test-mode production check runs last and unconditionally, whatever the
+// port's source, so the two shapes that could reach production still resolve
+// to the sentinel. Both are pinned below; measured, not assumed.
 func TestApplyConfigDefaults_ServerPortEnvShadowsLegacyPort(t *testing.T) {
 	const containerPort = 54321
 
-	t.Run("legacy var alone loses to an ambient production port", func(t *testing.T) {
+	t.Run("partial publish with no caller port still sentinels", func(t *testing.T) {
 		t.Setenv("BEADS_TEST_MODE", "1")
 		t.Setenv("BEADS_DOLT_SERVER_PORT", fmt.Sprintf("%d", DefaultSQLPort)) // ambient
 		t.Setenv("BEADS_DOLT_PORT", fmt.Sprintf("%d", containerPort))         // partial publish
 
-		// The caller passed the container port explicitly; env still wins.
-		cfg := &Config{ServerPort: containerPort}
+		// bd-799's actual shape: nothing told the caller about the container,
+		// so the ambient production port is what the resolver finds.
+		cfg := &Config{}
 		applyConfigDefaults(cfg)
 
 		if cfg.ServerPort != 1 {
 			t.Errorf("expected sentinel port 1 (ambient production port shadows the legacy var), got %d", cfg.ServerPort)
+		}
+	})
+
+	t.Run("caller-explicit container port outranks the ambient production var", func(t *testing.T) {
+		t.Setenv("BEADS_TEST_MODE", "1")
+		t.Setenv("BEADS_DOLT_SERVER_PORT", fmt.Sprintf("%d", DefaultSQLPort))
+		t.Setenv("BEADS_DOLT_PORT", fmt.Sprintf("%d", containerPort))
+
+		cfg := &Config{ServerPort: containerPort}
+		applyConfigDefaults(cfg)
+
+		if cfg.ServerPort != containerPort {
+			t.Errorf("expected the caller's container port %d to survive the ambient var, got %d", containerPort, cfg.ServerPort)
+		}
+		if cfg.ServerPortSource != doltserver.PortSourceCallerExplicit {
+			t.Errorf("expected ServerPortSource=%q, got %q", doltserver.PortSourceCallerExplicit, cfg.ServerPortSource)
+		}
+	})
+
+	t.Run("a caller-explicit PRODUCTION port is still sentinelled", func(t *testing.T) {
+		// The half of bd-799 that must survive be-wf9a.1: caller-explicit
+		// outranks env, but nothing outranks the test-mode production guard.
+		for _, ambient := range []string{"", fmt.Sprintf("%d", containerPort)} {
+			t.Setenv("BEADS_TEST_MODE", "1")
+			t.Setenv("BEADS_DOLT_SERVER_PORT", ambient)
+			t.Setenv("BEADS_DOLT_PORT", ambient)
+
+			cfg := &Config{ServerPort: DefaultSQLPort}
+			applyConfigDefaults(cfg)
+
+			if cfg.ServerPort != 1 {
+				t.Errorf("ambient=%q: expected sentinel port 1 for an explicit production port, got %d", ambient, cfg.ServerPort)
+			}
 		}
 	})
 
