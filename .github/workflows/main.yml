@@ -881,7 +881,10 @@ jobs:
           cache: false
 
       - name: Install Dolt CLI
-        run: curl -fsSL https://github.com/dolthub/dolt/releases/latest/download/install.sh | sudo bash
+        # Pinned, not releases/latest: the CLI and the sql-server container
+        # image must be the same Dolt release (TestWorkflowsInstallPinnedDolt,
+        # TestPinnedDoltCLIMatchesContainerImage).
+        run: ./scripts/ci/install-dolt.sh
 
       - name: Verify dolt on PATH
         run: dolt version
