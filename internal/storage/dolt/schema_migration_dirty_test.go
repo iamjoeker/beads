@@ -315,6 +315,10 @@ func TestSchemaMigrationRejectsChangedPreExistingDirtyTable(t *testing.T) {
 	// "applied == 0 && !backfilled" early return, and the changed-dirty-table
 	// guard was never reached: the test asserted a rejection the pass had no
 	// opportunity to make, and failed with "error = <nil>".
+	//
+	// (Historically this test dirtied dolt_ignore and relied on the pass's
+	// pattern re-seed to flip it; dolt_ignore is now pass-owned state exempt
+	// from the guard, so the canary is a real user table.)
 	if _, err := store.db.ExecContext(ctx, "DELETE FROM custom_statuses"); err != nil {
 		t.Fatalf("dirty custom_statuses by emptying it uncommitted: %v", err)
 	}

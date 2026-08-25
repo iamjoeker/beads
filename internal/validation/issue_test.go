@@ -159,20 +159,26 @@ func TestCanonicalActor(t *testing.T) {
 		{name: "mixed separators each collapse to one canonical separator", in: "gastown.dog-3", want: "gastown_dog_3"},
 		{name: "leading separator is preserved as a separator, not dropped", in: ".mayor", want: "_mayor"},
 		{name: "trailing separator is preserved as a separator, not dropped", in: "mayor.", want: "mayor_"},
+		{name: "exact double-hyphen separator decodes to the rig-qualified slash (ga-2vy9p2)", in: "gastown--mayor", want: "gastown/mayor"},
+		{name: "raw slash passes through unchanged", in: "gastown/mayor", want: "gastown/mayor"},
+		{name: "a hyphen run longer than two is not the exact slash spelling and falls back to generic collapse", in: "gastown---mayor", want: "gastown_mayor"},
 
-		// Gas Town address form. "/" separates rig from role, and a TRAILING
-		// slash marks a town-level agent's empty rig slot — it is the one
-		// trailing separator carrying no positional meaning, so it collapses
-		// onto the bare identity that BD_ACTOR supplies.
-		{name: "slash separator canonicalizes like the other separators", in: "beads/witness", want: "beads_witness"},
-		{name: "slash and dot spellings of one identity agree", in: "beads.witness", want: "beads_witness"},
+		// Gas Town address form. A TRAILING slash marks a town-level agent's
+		// empty rig slot — it is the one separator carrying no positional
+		// meaning, so it collapses onto the bare identity that BD_ACTOR
+		// supplies. An INTERIOR slash is left alone: it is the canonical form
+		// the "--" session-name encoding decodes TO, so folding it into the
+		// generic "_" run would make "gastown--mayor" and "gastown__mayor"
+		// equal again — the widening ga-2vy9p2 exists to stop (bd-uzt).
+		{name: "rig address keeps its interior slash", in: "beads/witness", want: "beads/witness"},
+		{name: "a dotted alias is a different identity from the address form", in: "beads.witness", want: "beads_witness"},
 		{name: "town-level address drops its empty-rig trailing slash", in: "mayor/", want: "mayor"},
 		{name: "town-level address for deacon likewise", in: "deacon/", want: "deacon"},
 		{name: "bare identity is unchanged and equals the address form", in: "mayor", want: "mayor"},
-		{name: "nested rig address canonicalizes fully", in: "deacon/dogs/charlie", want: "deacon_dogs_charlie"},
+		{name: "nested rig address keeps its interior slashes", in: "deacon/dogs/charlie", want: "deacon/dogs/charlie"},
 		// Degenerate input must not canonicalize to empty: an absent actor
 		// must never compare equal to a present one.
-		{name: "lone slash stays non-empty", in: "/", want: "_"},
+		{name: "lone slash stays non-empty", in: "/", want: "/"},
 	}
 
 	for _, tt := range tests {
@@ -196,6 +202,9 @@ func TestActorMatches(t *testing.T) {
 		{name: "genuinely different identities do not match", assignee: "gastown.mayor", actor: "gastown.dog-3", want: false},
 		{name: "both empty match", assignee: "", actor: "", want: true},
 		{name: "empty assignee never matches a non-empty actor", assignee: "", actor: "mayor", want: false},
+		{name: "double-hyphen and double-underscore spellings no longer widen to the same identity (ga-2vy9p2)", assignee: "gastown--mayor", actor: "gastown__mayor", want: false},
+		{name: "double-hyphen spelling matches its raw-slash identity (ga-2vy9p2)", assignee: "gastown--mayor", actor: "gastown/mayor", want: true},
+		{name: "raw slash and raw dot stay genuinely distinct identities", assignee: "gastown/mayor", actor: "gastown.mayor", want: false},
 	}
 
 	for _, tt := range tests {
@@ -802,10 +811,18 @@ func TestAssigneeMatchesTownLevelAddress(t *testing.T) {
 		{name: "town-level address closed by bare identity", assignee: "mayor/", actor: "mayor", wantErr: false},
 		{name: "bare identity closed by town-level address", assignee: "mayor", actor: "mayor/", wantErr: false},
 		{name: "deacon town-level address likewise", assignee: "deacon/", actor: "deacon", wantErr: false},
-		{name: "rig-level address closed by dotted alias", assignee: "beads/witness", actor: "beads.witness", wantErr: false},
-		{name: "nested dog address closed by its identity", assignee: "deacon/dogs/charlie", actor: "deacon-dogs-charlie", wantErr: false},
+		{name: "rig address closed by its gascity session-name spelling", assignee: "beads/witness", actor: "beads--witness", wantErr: false},
+		{name: "nested dog address closed by its session-name spelling", assignee: "deacon/dogs/charlie", actor: "deacon--dogs--charlie", wantErr: false},
 
-		// The guard must NOT become permissive. Different principals still refuse.
+		// The guard must NOT become permissive. Different principals still
+		// refuse — and as of bd-uzt that includes an ADDRESS against a DOTTED
+		// ALIAS. Reconciling ga-2vy9p2 (the "--" axis decodes to "/") with the
+		// trailing-slash fix forces a choice: interior "/" cannot both fold
+		// into the generic "_" run and stay the form "--" decodes to, or
+		// "gastown--mayor" and "gastown__mayor" become one actor again. The
+		// narrower reading wins; "--" is the spelling that crosses the axis.
+		{name: "rig address is not closed by a dotted alias", assignee: "beads/witness", actor: "beads.witness", wantErr: true},
+		{name: "nested dog address is not closed by a hyphenated alias", assignee: "deacon/dogs/charlie", actor: "deacon-dogs-charlie", wantErr: true},
 		{name: "different role still refuses", assignee: "mayor/", actor: "deacon", wantErr: true},
 		{name: "different rig still refuses", assignee: "beads/witness", actor: "gastown/witness", wantErr: true},
 		{name: "empty actor against an assigned issue still refuses", assignee: "mayor/", actor: "", wantErr: true},

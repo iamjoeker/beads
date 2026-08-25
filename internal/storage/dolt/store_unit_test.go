@@ -9,6 +9,7 @@ import (
 	"time"
 
 	mysql "github.com/go-sql-driver/mysql"
+	"github.com/steveyegge/beads/internal/doltserver"
 	"github.com/steveyegge/beads/internal/storage/doltutil"
 	"github.com/steveyegge/beads/internal/storage/schema"
 )
@@ -356,11 +357,19 @@ func TestApplyConfigDefaults_TestModeBlocksProdPort_EvenWithTestServerOptIn(t *t
 	}
 }
 
-// TestApplyConfigDefaults_EnvOverridesConfig verifies that BEADS_DOLT_PORT
-// overrides a port already set by metadata.json, even outside test mode.
-// This is the fix for hq-27t (test pollution): callers like the orchestrator set
-// BEADS_DOLT_PORT to route bd to a test server instead of production.
-func TestApplyConfigDefaults_EnvOverridesConfig(t *testing.T) {
+// TestApplyConfigDefaults_ExplicitPortOverridesEnv verifies that a
+// caller-preset, already-nonzero cfg.ServerPort wins over
+// BEADS_DOLT_PORT/BEADS_DOLT_SERVER_PORT, and that the resulting
+// ServerPortSource is PortSourceCallerExplicit (authoritative) so
+// newServerMode's auto-start fail-closed check (GH#4052) still protects it.
+//
+// Until be-wf9a.1, BEADS_DOLT_PORT unconditionally clobbered any pre-set
+// ServerPort here (formerly asserted by this same test under the name
+// TestApplyConfigDefaults_EnvOverridesConfig, added for hq-27t). That let an
+// ambient orchestrator env var silently override an explicit caller
+// assertion (e.g. `bd init --server-port`); this test now asserts the fixed,
+// correct precedence instead.
+func TestApplyConfigDefaults_ExplicitPortOverridesEnv(t *testing.T) {
 	origTestMode := os.Getenv("BEADS_TEST_MODE")
 	origPort := os.Getenv("BEADS_DOLT_PORT")
 	defer func() {
@@ -380,39 +389,157 @@ func TestApplyConfigDefaults_EnvOverridesConfig(t *testing.T) {
 	os.Unsetenv("BEADS_TEST_MODE")         // NOT in test mode
 	os.Setenv("BEADS_DOLT_PORT", "19999")
 
-	// Simulate metadata.json having set port to production default
+	// Caller (e.g. `bd init --server-port`) preset an explicit port before
+	// applyConfigDefaults runs.
 	cfg := &Config{ServerPort: DefaultSQLPort}
 	applyConfigDefaults(cfg)
 
-	if cfg.ServerPort != 19999 {
-		t.Errorf("expected BEADS_DOLT_PORT=19999 to override config port %d, got %d",
+	if cfg.ServerPort != DefaultSQLPort {
+		t.Errorf("expected explicit ServerPort=%d to win over BEADS_DOLT_PORT=19999, got %d",
 			DefaultSQLPort, cfg.ServerPort)
+	}
+	if cfg.ServerPortSource != doltserver.PortSourceCallerExplicit {
+		t.Errorf("expected ServerPortSource=%q, got %q",
+			doltserver.PortSourceCallerExplicit, cfg.ServerPortSource)
+	}
+	if !cfg.ServerPortSource.IsAuthoritative() {
+		t.Errorf("expected PortSourceCallerExplicit to be authoritative (GH#4052 fail-closed guard)")
+	}
+}
+
+// TestApplyConfigDefaults_EnvWinsWhenExplicitUnset verifies that when no
+// caller has preset ServerPort (it is still the zero value), BEADS_DOLT_PORT
+// resolves it — unchanged from before be-wf9a.1.
+func TestApplyConfigDefaults_EnvWinsWhenExplicitUnset(t *testing.T) {
+	origTestMode := os.Getenv("BEADS_TEST_MODE")
+	origPort := os.Getenv("BEADS_DOLT_PORT")
+	defer func() {
+		if origTestMode == "" {
+			os.Unsetenv("BEADS_TEST_MODE")
+		} else {
+			os.Setenv("BEADS_TEST_MODE", origTestMode)
+		}
+		if origPort == "" {
+			os.Unsetenv("BEADS_DOLT_PORT")
+		} else {
+			os.Setenv("BEADS_DOLT_PORT", origPort)
+		}
+	}()
+
+	t.Setenv("BEADS_DOLT_SERVER_PORT", "") // clear new primary port env so legacy path runs
+	os.Unsetenv("BEADS_TEST_MODE")         // NOT in test mode
+	os.Setenv("BEADS_DOLT_PORT", "19999")
+
+	cfg := &Config{} // ServerPort left unset (0)
+	applyConfigDefaults(cfg)
+
+	if cfg.ServerPort != 19999 {
+		t.Errorf("expected BEADS_DOLT_PORT=19999 to resolve unset config port, got %d", cfg.ServerPort)
+	}
+	if cfg.ServerPortSource != doltserver.PortSourceEnv {
+		t.Errorf("expected ServerPortSource=%q, got %q", doltserver.PortSourceEnv, cfg.ServerPortSource)
+	}
+}
+
+// TestApplyConfigDefaults_ExplicitPortPreservedWhenEnvUnset verifies that an
+// explicit ServerPort survives when no env var is set — unchanged from
+// before be-wf9a.1 — and is stamped PortSourceCallerExplicit (authoritative).
+func TestApplyConfigDefaults_ExplicitPortPreservedWhenEnvUnset(t *testing.T) {
+	origTestMode := os.Getenv("BEADS_TEST_MODE")
+	origPort := os.Getenv("BEADS_DOLT_PORT")
+	defer func() {
+		if origTestMode == "" {
+			os.Unsetenv("BEADS_TEST_MODE")
+		} else {
+			os.Setenv("BEADS_TEST_MODE", origTestMode)
+		}
+		if origPort == "" {
+			os.Unsetenv("BEADS_DOLT_PORT")
+		} else {
+			os.Setenv("BEADS_DOLT_PORT", origPort)
+		}
+	}()
+
+	t.Setenv("BEADS_DOLT_SERVER_PORT", "") // clear new primary port env so legacy path runs
+	os.Unsetenv("BEADS_TEST_MODE")         // NOT in test mode
+	os.Unsetenv("BEADS_DOLT_PORT")
+
+	cfg := &Config{ServerPort: 25432}
+	applyConfigDefaults(cfg)
+
+	if cfg.ServerPort != 25432 {
+		t.Errorf("expected explicit ServerPort=25432 to survive with no env set, got %d", cfg.ServerPort)
+	}
+	if cfg.ServerPortSource != doltserver.PortSourceCallerExplicit {
+		t.Errorf("expected ServerPortSource=%q, got %q",
+			doltserver.PortSourceCallerExplicit, cfg.ServerPortSource)
 	}
 }
 
 // TestApplyConfigDefaults_ServerPortEnvShadowsLegacyPort pins the resolver
 // precedence that produced bd-799. BEADS_DOLT_SERVER_PORT is consulted before
-// the legacy BEADS_DOLT_PORT, and an env port overwrites whatever the caller
-// put in cfg.ServerPort. A test harness that starts a Dolt container and
-// publishes its port under the legacy var alone therefore never reaches bd:
-// the ambient BEADS_DOLT_SERVER_PORT (agent shells export the production 3307)
-// wins, the test-mode guard rewrites it to the unreachable sentinel port 1,
-// and the tests fail with a connection error that names neither the container
-// nor the environment. See testutil.publishDoltPortEnv, which now writes both.
+// the legacy BEADS_DOLT_PORT. A test harness that starts a Dolt container and
+// publishes its port under the legacy var alone therefore never reaches bd
+// unless it also passes the port to the caller: the ambient
+// BEADS_DOLT_SERVER_PORT (agent shells export the production 3307) wins, the
+// test-mode guard rewrites it to the unreachable sentinel port 1, and the
+// tests fail with a connection error that names neither the container nor the
+// environment. See testutil.publishDoltPortEnv, which now writes both.
+//
+// RECONCILED with be-wf9a.1 (bd-uzt): a caller-explicit ServerPort now
+// outranks the ambient env vars, so a partial publish no longer poisons a
+// caller that DID name its container. That does not weaken bd-799's guard —
+// the test-mode production check runs last and unconditionally, whatever the
+// port's source, so the two shapes that could reach production still resolve
+// to the sentinel. Both are pinned below; measured, not assumed.
 func TestApplyConfigDefaults_ServerPortEnvShadowsLegacyPort(t *testing.T) {
 	const containerPort = 54321
 
-	t.Run("legacy var alone loses to an ambient production port", func(t *testing.T) {
+	t.Run("partial publish with no caller port still sentinels", func(t *testing.T) {
 		t.Setenv("BEADS_TEST_MODE", "1")
 		t.Setenv("BEADS_DOLT_SERVER_PORT", fmt.Sprintf("%d", DefaultSQLPort)) // ambient
 		t.Setenv("BEADS_DOLT_PORT", fmt.Sprintf("%d", containerPort))         // partial publish
 
-		// The caller passed the container port explicitly; env still wins.
-		cfg := &Config{ServerPort: containerPort}
+		// bd-799's actual shape: nothing told the caller about the container,
+		// so the ambient production port is what the resolver finds.
+		cfg := &Config{}
 		applyConfigDefaults(cfg)
 
 		if cfg.ServerPort != 1 {
 			t.Errorf("expected sentinel port 1 (ambient production port shadows the legacy var), got %d", cfg.ServerPort)
+		}
+	})
+
+	t.Run("caller-explicit container port outranks the ambient production var", func(t *testing.T) {
+		t.Setenv("BEADS_TEST_MODE", "1")
+		t.Setenv("BEADS_DOLT_SERVER_PORT", fmt.Sprintf("%d", DefaultSQLPort))
+		t.Setenv("BEADS_DOLT_PORT", fmt.Sprintf("%d", containerPort))
+
+		cfg := &Config{ServerPort: containerPort}
+		applyConfigDefaults(cfg)
+
+		if cfg.ServerPort != containerPort {
+			t.Errorf("expected the caller's container port %d to survive the ambient var, got %d", containerPort, cfg.ServerPort)
+		}
+		if cfg.ServerPortSource != doltserver.PortSourceCallerExplicit {
+			t.Errorf("expected ServerPortSource=%q, got %q", doltserver.PortSourceCallerExplicit, cfg.ServerPortSource)
+		}
+	})
+
+	t.Run("a caller-explicit PRODUCTION port is still sentinelled", func(t *testing.T) {
+		// The half of bd-799 that must survive be-wf9a.1: caller-explicit
+		// outranks env, but nothing outranks the test-mode production guard.
+		for _, ambient := range []string{"", fmt.Sprintf("%d", containerPort)} {
+			t.Setenv("BEADS_TEST_MODE", "1")
+			t.Setenv("BEADS_DOLT_SERVER_PORT", ambient)
+			t.Setenv("BEADS_DOLT_PORT", ambient)
+
+			cfg := &Config{ServerPort: DefaultSQLPort}
+			applyConfigDefaults(cfg)
+
+			if cfg.ServerPort != 1 {
+				t.Errorf("ambient=%q: expected sentinel port 1 for an explicit production port, got %d", ambient, cfg.ServerPort)
+			}
 		}
 	})
 

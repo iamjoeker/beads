@@ -56,10 +56,12 @@ func TestDoltImagePullWorkflowsUseRetryHelper(t *testing.T) {
 	// main.yml and pr.yml went from two to three when bd-9jl added the
 	// cmd/bd real-Dolt jobs; these counts were not bumped with them, so the
 	// test has been red on main since (found while draining bd-2k4).
+	// pr-risk.yml gained its third upstream. Counted against the merged
+	// workflows, not carried over from either side (bd-uzt).
 	wantCalls := map[string]int{
 		"main.yml":       3,
 		"pr.yml":         3,
-		"pr-risk.yml":    2,
+		"pr-risk.yml":    3,
 		"regression.yml": 1,
 	}
 
