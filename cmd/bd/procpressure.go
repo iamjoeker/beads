@@ -57,6 +57,13 @@ var capExemptCommands = map[string]bool{
 	"send-metrics":   true,
 }
 
+// readOOMScoreAdj is a seam for tests. Raising a process's own oom_score_adj is
+// permitted but lowering it again is not without CAP_SYS_RESOURCE, so a test
+// that set the real value would leave the whole `go test` process sacrificial
+// for the rest of the run. Swapping the reader is the only way to exercise the
+// sacrificial branch without doing that.
+var readOOMScoreAdj = procpressure.OOMScoreAdj
+
 // capPolicyFor resolves the cap for one invocation, disabling it for the
 // commands that must never queue.
 func capPolicyFor(command string) procpressure.Policy {
@@ -105,10 +112,35 @@ func reportProcPressure() {
 	}
 	if msg := procPressureReport.Warning(); msg != "" {
 		fmt.Fprintln(os.Stderr, msg)
+		// Only alongside the pile-up warning, and only then. A standing OOM
+		// bias is not news on its own — it is news when a pile-up is already
+		// under way, because that is the pairing that killed the host on
+		// 2026-08-16: many processes, each one picked first. Printing it on
+		// every invocation would also cost every invocation a /proc read for a
+		// line nobody is reading yet. `bd doctor` is where to ask on purpose.
+		if msg := oomSacrificeNote(); msg != "" {
+			fmt.Fprintln(os.Stderr, msg)
+		}
 	}
 	if msg := procPressureAdmission.Notice(); msg != "" {
 		fmt.Fprintln(os.Stderr, msg)
 	}
+}
+
+// oomSacrificeNote is the second line of a pile-up warning: what the kernel
+// will do with this pile. It is empty unless bd is actually biased toward being
+// killed, so the common case adds nothing.
+func oomSacrificeNote() string {
+	adj, ok := readOOMScoreAdj()
+	if !ok || !procpressure.SacrificialOOMScore(adj) {
+		return ""
+	}
+	return fmt.Sprintf(
+		"Warning: bd is running at oom_score_adj %d, so the kernel kills these processes before an "+
+			"average one. An OOM kill is SIGKILL: bd cannot report it, and the calls simply stop "+
+			"answering. If bd invocations are vanishing without an error, look here first.",
+		adj,
+	)
 }
 
 // checkProcPressure is the `bd doctor` readout of concurrent bd processes. It
@@ -171,6 +203,64 @@ func capDetail(report procpressure.Report) string {
 		detail += fmt.Sprintf(", %d waiting for a slot", waiting)
 	}
 	return detail
+}
+
+// checkOOMScore is the `bd doctor` readout of where bd sits in the kernel's
+// kill order (bd-kih, from bd-x33).
+//
+// This check exists because the failure it describes cannot report itself. An
+// OOM kill is SIGKILL: the process does not log, does not run its deferred
+// release, and returns no exit code to anyone watching. On 2026-08-16 seven bd
+// processes died that way over ninety minutes and nothing surfaced anywhere, so
+// a queueing collapse looked like nothing at all. The bias that selected them
+// is readable from inside a healthy bd, which makes it the one part of that
+// story a diagnostic can show BEFORE the kills start.
+//
+// Warning, never error: a sacrificial bias is a property of whatever spawned
+// bd, not of the beads installation, and failing doctor over it would send
+// people to fix the wrong thing.
+func checkOOMScore() doctorCheck {
+	check := doctorCheck{Name: "OOM Priority", Category: doctor.CategoryRuntime}
+
+	adj, ok := readOOMScoreAdj()
+	if !ok {
+		// Deliberately not "oom_score_adj 0". An absent reading is not the
+		// kernel default, and rendering it as one would assert bd is unbiased
+		// on a host where that is simply unknown.
+		check.Status = statusOK
+		check.Message = "not reported on this host"
+		check.Detail = "the per-process OOM bias is a Linux interface; bd cannot tell where it sits " +
+			"in this kernel's kill order"
+		return check
+	}
+
+	if !procpressure.SacrificialOOMScore(adj) {
+		check.Status = statusOK
+		if adj == 0 {
+			check.Message = "oom_score_adj 0 (kernel default)"
+			check.Detail = "bd is no more likely to be killed under memory pressure than any other process"
+		} else {
+			check.Message = fmt.Sprintf("oom_score_adj %d (protected)", adj)
+			check.Detail = "bd is biased away from the OOM killer"
+		}
+		return check
+	}
+
+	check.Status = statusWarning
+	check.Message = fmt.Sprintf("oom_score_adj %d (killed before an average process)", adj)
+	check.Detail = "an OOM kill is SIGKILL, so bd cannot log it, run its cleanup, or return an exit " +
+		"code; under memory pressure these calls stop answering with no error anywhere"
+	// Deliberately points at the ancestry rather than at bd. Measured on the
+	// town host 2026-08-25: bd under tmux read 0 while bd launched from a
+	// desktop terminal read 200, inherited unchanged down
+	// systemd(100) -> konsole(200) -> shell -> gt -> bd. bd cannot lower this
+	// for itself — raising oom_score_adj is unprivileged, lowering it needs
+	// CAP_SYS_RESOURCE — so the only place to act is the ancestor that set it.
+	check.Fix = "bd inherits this from whatever spawned it, and cannot lower it without " +
+		"CAP_SYS_RESOURCE; trace the ancestry (cat /proc/PID/oom_score_adj up the parents) and " +
+		"clear it at the ancestor that sets it — commonly a desktop terminal's systemd app scope, " +
+		"a supervisor's OOMScoreAdjust, or a shell profile"
+	return check
 }
 
 func pluralProcess(n int) string {
