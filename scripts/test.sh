@@ -13,6 +13,8 @@ SKIP_FILE="$REPO_ROOT/.test-skip"
 source "$REPO_ROOT/.buildflags"
 # shellcheck source=ci/lib/test-env.sh
 source "$REPO_ROOT/scripts/ci/lib/test-env.sh"
+# shellcheck source=ci/lib/dolt-coverage.sh
+source "$REPO_ROOT/scripts/ci/lib/dolt-coverage.sh"
 
 beads_test_env_enter
 
@@ -72,6 +74,10 @@ COVERPKG="${TEST_COVERPKG:-}"
 
 # Parse arguments
 PACKAGES=()
+# Set by a caller-supplied -run/-skip. A narrowed run is a targeted debugging
+# pass, not the gate a merge decision is made on, so it does not owe the Dolt
+# coverage tier below.
+NARROWED_BY_CALLER=0
 while [[ $# -gt 0 ]]; do
     case $1 in
         -v|--verbose)
@@ -93,6 +99,7 @@ while [[ $# -gt 0 ]]; do
             else
                 SKIP_PATTERN="$2"
             fi
+            NARROWED_BY_CALLER=1
             shift 2
             ;;
         *)
@@ -102,9 +109,118 @@ while [[ $# -gt 0 ]]; do
     esac
 done
 
+# TEST_RUN narrows the run exactly as -run does.
+if [[ -n "$RUN_PATTERN" ]]; then
+    NARROWED_BY_CALLER=1
+fi
+
 # Default to all packages if none specified
 if [[ ${#PACKAGES[@]} -eq 0 ]]; then
     PACKAGES=("./...")
+fi
+
+# ---------------------------------------------------------------------------
+# Dolt coverage tier (bd-dln)
+#
+# beads_test_env_enter has just added `dolt` to BEADS_TEST_SKIP, and
+# internal/storage/embeddeddolt self-skips without BEADS_TEST_EMBEDDED_DOLT=1.
+# Both are the right default for a contributor without Docker; both are wrong
+# for the run a merge decision rests on. An MR touching backend/conformance/
+# was gated on TestImporterContract / TestRelationsContract /
+# TestCycleDetectorContract at SKIP 0.00s and reported "96 packages ok".
+#
+# So: when the tree under test differs from its merge base in a Dolt-backed
+# path, this wrapper owes those contracts a real run. It either runs them (as a
+# second, narrow pass after the main suite, where the eye lands) or it refuses
+# to start — never a green over code it did not execute. Set
+# BEADS_TEST_DOLT_COVERAGE=off to waive it, which prints a banner naming what
+# the result is not evidence for. That is a decision a human makes and the log
+# records, rather than one a 0.348s runtime hides.
+# ---------------------------------------------------------------------------
+DOLT_COVERAGE_MODE="${BEADS_TEST_DOLT_COVERAGE:-auto}"
+DOLT_COVERAGE_PKGS=()
+DOLT_COVERAGE_ON_HOOK=""
+
+# A misspelt waiver is worth an error rather than a silent fall-through to
+# auto: the user who typed it believed they had waived the tier, and would
+# read whatever came next as the result of that decision.
+if [[ "$DOLT_COVERAGE_MODE" != "auto" && "$DOLT_COVERAGE_MODE" != "off" ]]; then
+    echo "FATAL: BEADS_TEST_DOLT_COVERAGE=$DOLT_COVERAGE_MODE; valid values are 'auto' (default) and 'off'" >&2
+    exit 1
+fi
+
+if [[ "$NARROWED_BY_CALLER" != "1" ]]; then
+    if _changed="$(beads_dolt_coverage_changed_files "$REPO_ROOT")"; then
+        DOLT_COVERAGE_ON_HOOK="$(printf '%s\n' "$_changed" |
+            grep -E '^(backend/conformance/|internal/storage/(uow|dolt|embeddeddolt)/)' || true)"
+        while IFS= read -r _pkg; do
+            [[ -n "$_pkg" ]] || continue
+            beads_dolt_coverage_requested "$_pkg" "${PACKAGES[@]}" || continue
+            # Already covered by the main run's own environment.
+            case "$_pkg" in
+                ./internal/storage/embeddeddolt/)
+                    [[ "${BEADS_TEST_EMBEDDED_DOLT:-0}" == "1" ]] && continue
+                    ;;
+                *)
+                    [[ "${BEADS_TEST_ENV_RUN_DOLT:-0}" == "1" ]] && continue
+                    ;;
+            esac
+            DOLT_COVERAGE_PKGS+=("$_pkg")
+        done < <(printf '%s\n' "$_changed" | beads_dolt_coverage_packages)
+    else
+        # An unanswerable probe and a clean tree both produce no packages. Say
+        # which one this was, so a missing tier is never mistaken for the
+        # absence of a Dolt-backed change ($_changed holds the reason here).
+        echo "WARN: Dolt coverage tier could not run: $_changed" >&2
+    fi
+fi
+
+if ((${#DOLT_COVERAGE_PKGS[@]} > 0)) && [[ "$DOLT_COVERAGE_MODE" == "off" ]]; then
+    {
+        echo ""
+        echo "=============================================================="
+        echo "  DOLT COVERAGE WAIVED (BEADS_TEST_DOLT_COVERAGE=off)"
+        echo ""
+        echo "  This tree changes:"
+        printf '%s\n' "$DOLT_COVERAGE_ON_HOOK" | sed 's/^/    /'
+        echo ""
+        echo "  The contracts covering it self-skip at 0.00s in this run."
+        echo "  Whatever it reports is NOT evidence for those paths."
+        echo "=============================================================="
+        echo ""
+    } >&2
+    DOLT_COVERAGE_PKGS=()
+fi
+
+# Refuse BEFORE the main suite rather than after it: a missing dependency is
+# knowable now, and finding out 20 minutes later that the gate cannot finish is
+# the same wasted run with a worse ending.
+if ((${#DOLT_COVERAGE_PKGS[@]} > 0)); then
+    _blocked=""
+    for _pkg in "${DOLT_COVERAGE_PKGS[@]}"; do
+        if ! _reason="$(beads_dolt_coverage_precondition "$_pkg")"; then
+            _blocked+="  $_pkg: $_reason"$'\n'
+        fi
+    done
+    if [[ -n "$_blocked" ]]; then
+        {
+            echo ""
+            echo "FATAL: this tree changes Dolt-backed code whose contracts cannot run here."
+            echo ""
+            echo "Changed paths on the hook:"
+            printf '%s\n' "$DOLT_COVERAGE_ON_HOOK" | sed 's/^/  /'
+            echo ""
+            echo "Blocked:"
+            printf '%s' "$_blocked"
+            echo "Install the missing dependency, or waive the tier with:"
+            echo "  BEADS_TEST_DOLT_COVERAGE=off ./scripts/test.sh ..."
+            echo ""
+            echo "Waiving is a decision, not a default: the contracts self-skip at 0.00s"
+            echo "and the suite still prints 'ok', which is how bd-dln happened."
+            echo ""
+        } >&2
+        exit 1
+    fi
 fi
 
 # Prebuild bd once for subprocess-style tests (wy-4mtr0). cmd/bd has a dozen
@@ -224,12 +340,55 @@ echo "Running: ${CMD[*]}" >&2
 echo "Skipping: $SKIP_PATTERN" >&2
 echo "" >&2
 
-"${CMD[@]}"
-status=$?
+status=0
+"${CMD[@]}" || status=$?
 
 if [[ -n "$COVERAGE" ]]; then
     total=$(go tool cover -func="$COVERPROFILE" | awk '/^total:/ {print $NF}')
     echo "Total coverage: ${total} (profile: ${COVERPROFILE})" >&2
+fi
+
+# The Dolt coverage tier runs LAST, so its result is the last thing on screen —
+# the place the eye lands on a gate. It runs only over the packages the change
+# put on the hook, and only over the contracts (BEADS_DOLT_COVERAGE_RUN), so it
+# does not drag each package's whole real-Dolt surface into a local run that
+# never carried it. A red main suite is already a red gate; nothing to add.
+if ((status == 0)) && ((${#DOLT_COVERAGE_PKGS[@]} > 0)); then
+    DOLT_COVERAGE_ENV=()
+    for _pkg in "${DOLT_COVERAGE_PKGS[@]}"; do
+        while IFS= read -r _assign; do
+            [[ -n "$_assign" ]] || continue
+            _seen=0
+            for _have in ${DOLT_COVERAGE_ENV[@]+"${DOLT_COVERAGE_ENV[@]}"}; do
+                [[ "$_have" == "$_assign" ]] && _seen=1 && break
+            done
+            ((_seen)) || DOLT_COVERAGE_ENV+=("$_assign")
+        done < <(beads_dolt_coverage_enable_env "$_pkg")
+    done
+
+    DOLT_CMD=(env "${DOLT_COVERAGE_ENV[@]}"
+        go test -p "$GO_TEST_PKG_PARALLEL" -parallel "$GO_TEST_PARALLEL"
+        -timeout "$TIMEOUT" -run "$BEADS_DOLT_COVERAGE_RUN")
+    if [[ -n "$VERBOSE" ]]; then
+        DOLT_CMD+=(-v)
+    fi
+    DOLT_CMD+=("${DOLT_COVERAGE_PKGS[@]}")
+
+    {
+        echo ""
+        echo "==> Dolt coverage tier: this tree changes"
+        printf '%s\n' "$DOLT_COVERAGE_ON_HOOK" | sed 's/^/      /'
+        echo "    so the contracts covering it must run rather than skip (bd-dln)."
+        echo "Running: ${DOLT_CMD[*]}"
+        echo ""
+    } >&2
+
+    "${DOLT_CMD[@]}" || status=$?
+    if ((status != 0)); then
+        echo "FAIL: Dolt coverage tier" >&2
+    else
+        echo "==> Dolt coverage tier OK" >&2
+    fi
 fi
 
 exit $status

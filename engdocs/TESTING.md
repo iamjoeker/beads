@@ -80,6 +80,50 @@ To skip an optional service explicitly, use the existing skip mechanism:
 BEADS_TEST_SKIP=dolt ./scripts/test.sh ./...
 ```
 
+### The Dolt Coverage Tier
+
+That default is right for a contributor without Docker and wrong for the run a
+merge decision rests on. An MR touching only `backend/conformance/` was gated
+on
+
+```
+TestImporterContract       SKIP (0.00s)
+TestRelationsContract      SKIP (0.00s)
+TestCycleDetectorContract  SKIP (0.00s)
+```
+
+reported as `96 packages ok, 0 FAIL`. The only tell was a runtime —
+`internal/storage/uow` finished in 0.348s, and nothing that drives importer and
+relations contracts against a storage backend runs in a third of a second
+(bd-dln).
+
+So `scripts/test.sh` no longer leaves that to whoever is reading the timings.
+When the tree differs from its merge base with `origin/main` under
+`backend/conformance/`, `internal/storage/uow/`, `internal/storage/dolt/` or
+`internal/storage/embeddeddolt/`, the wrapper owes those contracts a real run
+and does one of three things — never a green over code it did not execute:
+
+- **runs them**, as a narrow second pass after the main suite, over just the
+  packages the change put on the hook and just their `*Contract` and
+  `TestConformance` tests. It is the last thing on screen, where the eye lands
+  on a gate. Three backends measured 2m44s together;
+- **refuses to start**, naming the missing dependency, when this machine cannot
+  run them (`dolt` off `PATH`, no Docker daemon, no cached image). It checks
+  before the main suite, so a gate that cannot finish costs seconds;
+- **prints a waiver banner** naming the paths the result is not evidence for,
+  under `BEADS_TEST_DOLT_COVERAGE=off`.
+
+The tier stands down for a run narrowed by `-run`/`-skip` or `TEST_RUN` — a
+targeted debugging pass is not the gate — and for a package set that does not
+include the affected packages. `BEADS_TEST_ENV_RUN_DOLT=1` and
+`BEADS_TEST_EMBEDDED_DOLT=1` already cover their halves, so a run that sets
+them does not repeat the work.
+
+`scripts/ci/lib/dolt-coverage.sh` holds the path table and the preconditions;
+`scripts/dolt_coverage_lib_test.go` grades it by behaviour, including that an
+unrelated change selects nothing and that a git probe which cannot answer says
+so rather than reporting a clean tree.
+
 ### The `internal/storage/dolt` Suite
 
 Because the runner and every CI job that walks `./...` skip Dolt, no routine
