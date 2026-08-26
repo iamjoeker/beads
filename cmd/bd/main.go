@@ -2249,10 +2249,11 @@ func main() {
 	rootCmd.InitDefaultHelpCmd()
 	registerHelpAllFlag()
 
-	// Count this process against its live peers (bd-x33). Must follow
-	// InitDefaultHelpCmd so the argv-to-subcommand lookup sees every command,
-	// and must precede ExecuteC so the entry spans the whole run.
-	releaseProcPressure := registerProcPressure()
+	// Count this process against its live peers (bd-x33) and wait for a slot if
+	// the concurrency cap is full (bd-91c). Must follow InitDefaultHelpCmd so
+	// the argv-to-subcommand lookup sees every command, and must precede
+	// ExecuteC so the entry spans the whole run.
+	releaseProcPressure := acquireProcPressure()
 
 	executedCmd, err := rootCmd.ExecuteC()
 
