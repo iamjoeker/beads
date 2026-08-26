@@ -10,6 +10,7 @@ import (
 	"testing"
 
 	"github.com/steveyegge/beads/internal/storage/dolt"
+	"github.com/steveyegge/beads/internal/testenv"
 	"github.com/steveyegge/beads/internal/testutil"
 )
 
@@ -23,6 +24,10 @@ var testSharedDB string
 var testSharedConn *sql.DB
 
 func TestMain(m *testing.M) {
+	// First statement in TestMain: point every Dolt port variable at a dead
+	// port before anything in this package can resolve one. Helpers that
+	// start a server publish their own port and must run after this.
+	testenv.GuardProductionDolt()
 	os.Exit(testMainInner(m))
 }
 

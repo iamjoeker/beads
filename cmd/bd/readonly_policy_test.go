@@ -20,6 +20,7 @@ import (
 	"github.com/steveyegge/beads/internal/storage"
 	"github.com/steveyegge/beads/internal/storage/dolt"
 	"github.com/steveyegge/beads/internal/storage/doltutil"
+	"github.com/steveyegge/beads/internal/testenv"
 )
 
 func TestEffectiveRootStorePolicy(t *testing.T) {
@@ -294,8 +295,13 @@ func readonlyCanaryEnv(home, beadsDir, circuitDir string, port int) []string {
 }
 
 func TestConfigValidateReadOnlyIsHermetic(t *testing.T) {
+	// A positive port is a PROXY for "a shared Dolt server is available", and
+	// the two came apart when the process-wide Dolt guard landed: it publishes
+	// testenv.GuardedDoltPort, which is positive and definitionally dead, so
+	// this predicate stopped firing and the test dialed a port nothing can bind
+	// (bd-4xn). Ask about the guard rather than about the sign of the number.
 	port, err := strconv.Atoi(os.Getenv("BEADS_DOLT_PORT"))
-	if err != nil || port <= 0 {
+	if err != nil || port <= 0 || port == testenv.GuardedDoltPort {
 		t.Skip("shared Dolt test server is unavailable")
 	}
 	circuitDir := os.Getenv("BEADS_TEST_CIRCUIT_DIR")

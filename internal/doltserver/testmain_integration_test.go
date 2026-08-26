@@ -8,6 +8,7 @@ import (
 	"testing"
 
 	"github.com/steveyegge/beads/internal/doltserver"
+	"github.com/steveyegge/beads/internal/testenv"
 )
 
 // TestMain covers the integration-tagged tests in this file's package
@@ -29,6 +30,10 @@ import (
 // the case Pdeathsig is meant to protect. See procattr_linux.go for why
 // this is a narrower, separate flag from BEADS_TEST_MODE.
 func TestMain(m *testing.M) {
+	// First statement in TestMain: point every Dolt port variable at a dead
+	// port before anything in this package can resolve one. Helpers that
+	// start a server publish their own port and must run after this.
+	testenv.GuardProductionDolt()
 	os.Setenv("BEADS_TEST_MODE", "1")
 	os.Setenv("BEADS_TEST_PDEATHSIG", "1")
 

@@ -15,6 +15,8 @@ import (
 	"strings"
 	"sync"
 	"testing"
+
+	"github.com/steveyegge/beads/internal/testenv"
 )
 
 // scenario is a named sequence of bd CLI invocations. IDs are pinned with --id so
@@ -467,6 +469,10 @@ var (
 // single test — hence a package-scoped temp dir cleaned here rather than a per-test
 // t.TempDir, which Go deletes when its owning test returns.
 func TestMain(m *testing.M) {
+	// First statement in TestMain: point every Dolt port variable at a dead
+	// port before anything in this package can resolve one. Helpers that
+	// start a server publish their own port and must run after this.
+	testenv.GuardProductionDolt()
 	code := m.Run()
 	if bdBinDir != "" {
 		_ = os.RemoveAll(bdBinDir)
