@@ -124,6 +124,122 @@ them does not repeat the work.
 unrelated change selects nothing and that a git probe which cannot answer says
 so rather than reporting a clean tree.
 
+### The Skip Census
+
+The tier above covers four paths and roughly 2% of this tree's self-skips. The
+other 98% are 283 `t.Skip` statements across 126 files gating on
+`BEADS_TEST_EMBEDDED_DOLT`, and they leave no tell at all — not even a runtime
+(bd-5er):
+
+```
+$ ./scripts/test.sh ./internal/storage/embeddeddolt/
+ok  	github.com/steveyegge/beads/internal/storage/embeddeddolt	34.241s
+```
+
+329 top-level tests in that package. **62 ran; 267 skipped.** Thirty-four
+seconds of real work, so the 0.348s tell that exposed bd-dln has no counterpart
+here, and the package is not empty either, so no "did anything run at all"
+check reaches it.
+
+This cannot be fixed inside the test files. Measured on go1.26.6, a `TestMain`
+that writes a census to **both** `os.Stdout` and `os.Stderr` after `m.Run()`
+produces, from `go test`, exactly `ok  probe/m  0.002s` and nothing else: the
+go tool buffers a test binary's entire output and discards it when the package
+passes. The only channels that survive a passing package are the `ok` line
+itself, `-v`, and `-json`.
+
+So `scripts/test.sh` runs the suite under `-json` and pipes it through
+`tools/testcensus`, which reconstructs the plain non-verbose output you would
+otherwise have seen and then adds what `go test` cannot say:
+
+```
+==============================================================
+  SKIP CENSUS — main suite — what this run's "ok" is not evidence for (bd-5er)
+
+  329 top-level tests: 62 ran, 267 SKIPPED
+
+  Skipped behind:
+       267  BEADS_TEST_EMBEDDED_DOLT
+==============================================================
+```
+
+Skips are grouped by the environment variable their message names, which turns
+283 individual skips back into the handful of decisions that produced them. A
+skip whose message names no variable is reported separately, with an example,
+rather than being folded into a total.
+
+| `BEADS_TEST_CENSUS` | behaviour |
+| --- | --- |
+| `on` (default) | print the census; never changes the run's status |
+| `strict` | also **fail** when a package reports `ok` having run no tests at all |
+| `off` | plain `go test` output, no census |
+
+`strict` is the merge-gate posture. It fails only on a package that ran
+*nothing*, not on a skip count: a partially skipped package's `ok` still means
+something, and a threshold on 283 would be a number nobody could maintain. A
+package with no test files at all is not vacuous and never fails it.
+
+**Measured over `./...`, no package is vacuous** — every one runs at least one
+test — so `strict` is adoptable today and costs nothing until a package goes
+fully dark. That is also the reason the count, not the vacuity check, is the
+part that had to exist: over the whole tree one run reported
+
+```
+8518 top-level tests: 6400 ran, 2118 SKIPPED
+    1050  BEADS_TEST_SKIP
+     528  BEADS_TEST_EMBEDDED_DOLT
+     376  (no environment gate named)     e.g. Dolt test server not available
+     153  BEADS_TEST_PROXIED_SERVER
+       8  BEADS_TEST_PROXIED_LOCAL
+       1  BEADS_DB / BEADS_RUN_DOLT_UPSTREAM_REPRO / BEADS_TEST_SHARED_SERVER
+```
+
+A quarter of the suite, behind eight distinct gates rather than the one this
+started from, and a strict run would have passed every bit of it.
+
+Two properties the implementation is graded on, in
+`tools/testcensus/census_test.go`, both differentially against the go tool
+itself rather than against a fixture:
+
+- what the filter prints must equal what `go test` prints without `-json`;
+- and the same under `-v`. `-json` puts the test binary in verbose mode, so a
+  filter that reconstructs the non-verbose view unconditionally would silently
+  delete the output `-v` was invoked for.
+
+The census reports `go test`'s exit status, never the pipeline's — a pipe
+otherwise replaces the exit code with its last stage's, which would make the
+census the thing being graded.
+
+#### Two things `-json` changes that will surprise you
+
+**`os.Stderr` is not `os.Stderr` under `-json`.** The go command runs the
+binary with `-test.v=test2json`, and `testing.M.Run` then points `os.Stderr`
+**at `os.Stdout`** so stderr writes join the single JSON stream. It never
+restores it. Measured on go1.26.6 in a module containing nothing but the probe:
+
+```
+TESTMAIN-BEFORE  stderr fd=2 name="/dev/stderr"     (before m.Run)
+inside a test    stderr fd=1 name="/dev/stdout"
+TESTMAIN-AFTER   stderr fd=1 name="/dev/stdout"     (after m.Run returns)
+```
+
+`cmd/bd/zz_stdio_leak_guard_test.go` captured its baseline at package-variable
+initialization — the only place it can be captured, since `m.Run` performs the
+swap — and therefore reported a stdio leak on *every* run under `-json`,
+whatever the tests did. It now expects whichever stream the runner installed,
+and a second test grades that by behaviour so it cannot quietly revert. Any
+future test that asserts stdout and stderr are distinct files will fail under
+the default runner for the same reason, and it will not be a leak.
+
+**test2json dedents subtests, and orders them innermost-first.** A failing
+subtest's lines arrive with their frame indentation stripped and before their
+parent's marker. The filter puts the nesting back (four spaces per `/` in the
+test name) and hoists each failure's header above its detail, so the default
+output matches `go test` exactly. Under `-v` it does not: `-test.v=test2json`
+is its own verbosity mode, and passthrough keeps its flat innermost-first
+shape rather than `go test -v`'s indented tree. Everything is present either
+way; reproducing `testing`'s tree printer is not worth owning.
+
 ### The `internal/storage/dolt` Suite
 
 Because the runner and every CI job that walks `./...` skip Dolt, no routine

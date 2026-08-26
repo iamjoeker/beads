@@ -502,6 +502,17 @@ linters:
         linters:
           - gosec
         text: "G306"
+      # G705: gosec's taint analysis treats any io.Writer sink as an HTTP
+      # response and every fmt.Fprint* into one as reflected XSS. tools/
+      # testcensus is a pipe filter: it reads `go test -json` on stdin (the
+      # taint source) and writes the reconstructed test output to stdout. There
+      # is no HTTP surface in the module, and echoing test output verbatim is
+      # the whole job — a filter that escaped or dropped what it could not
+      # classify would reintroduce the silence it exists to remove (bd-5er).
+      - path: 'tools/testcensus/'
+        linters:
+          - gosec
+        text: "G705"
       # G304: Safe file reads from known JSONL and error paths
       - path: 'cmd/bd/doctor/fix/sync_branch\.go|cmd/bd/doctor/git\.go|cmd/bd/doctor/sync_branch_jsonl\.go|cmd/bd/dolt\.go|cmd/bd/rename_prefix\.go|internal/beads/beads\.go|internal/syncbranch/worktree\.go'
         linters:

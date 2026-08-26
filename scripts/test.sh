@@ -119,6 +119,20 @@ if [[ ${#PACKAGES[@]} -eq 0 ]]; then
     PACKAGES=("./...")
 fi
 
+# Both run-mode strings are validated here, before any work: a typo should cost
+# nothing, and the census one would otherwise sit behind a ~200 MB bd prebuild.
+# A misspelt value is an error rather than a silent fall-through to the default
+# — whoever typed it believed they had chosen something, and would read whatever
+# came next as the result of that choice.
+CENSUS_MODE="${BEADS_TEST_CENSUS:-on}"
+case "$CENSUS_MODE" in
+    on | strict | off) ;;
+    *)
+        echo "FATAL: BEADS_TEST_CENSUS=$CENSUS_MODE; valid values are 'on' (default), 'strict' and 'off'" >&2
+        exit 1
+        ;;
+esac
+
 # ---------------------------------------------------------------------------
 # Dolt coverage tier (bd-dln)
 #
@@ -259,6 +273,102 @@ if [[ -z "${BEADS_TEST_BD_BINARY:-}" ]]; then
     esac
 fi
 
+# ---------------------------------------------------------------------------
+# Skip census (bd-5er)
+#
+# bd-dln taught this wrapper to refuse a green over Dolt-backed contracts it
+# did not execute. That covers ~2% of the tree's self-skips. The other 98% are
+# 283 t.Skip statements across 126 files gating on BEADS_TEST_EMBEDDED_DOLT,
+# and they leave NO tell at all: a package whose every test skips prints
+#
+#   ok  	github.com/steveyegge/beads/internal/storage/embeddeddolt	0.001s
+#
+# byte-for-byte what a package whose every test passed prints. bd-dln's own
+# defect was caught off a 0.348s runtime; there is no counterpart here.
+#
+# This cannot be fixed by printing harder from inside the tests. Measured on
+# go1.26.6: a TestMain writing to BOTH os.Stdout and os.Stderr after m.Run()
+# produced exactly "ok  \tprobe/m\t0.002s" and nothing else — the go tool
+# buffers a test binary's entire output and discards it when the package
+# passes. The only channels that survive a passing package are the ok line,
+# -v, and -json. So the run goes through -json and tools/testcensus turns it
+# back into the output you expect, followed by the count.
+#
+#   BEADS_TEST_CENSUS=on      (default) print the census; never changes status
+#   BEADS_TEST_CENSUS=strict  also FAIL when a package reports ok having run
+#                             no tests at all — the merge-gate posture
+#   BEADS_TEST_CENSUS=off     plain `go test` output, no census
+# ---------------------------------------------------------------------------
+CENSUS_BIN=""
+CENSUS_ARGS=()
+CENSUS_JSON=()
+if [[ "$CENSUS_MODE" != "off" ]]; then
+    # Same live-root rule as the bd prebuild above: never write into an
+    # inherited root whose owner has already cleaned up.
+    if beads_test_env_root_is_live; then
+        CENSUS_DIR="$BEADS_TEST_ENV_ROOT/testcensus"
+    else
+        CENSUS_DIR=$(mktemp -d "${TMPDIR:-/tmp}/beads-testcensus-XXXXXX")
+        TEST_SH_OWNED_TMP+=("$CENSUS_DIR")
+    fi
+    mkdir -p "$CENSUS_DIR"
+    CENSUS_CANDIDATE="$CENSUS_DIR/testcensus$(go env GOEXE)"
+    if go build -o "$CENSUS_CANDIDATE" "$REPO_ROOT/tools/testcensus"; then
+        CENSUS_BIN="$CENSUS_CANDIDATE"
+        CENSUS_JSON=(-json)
+        CENSUS_ARGS=(-trim "$(awk '/^module /{print $2; exit}' "$REPO_ROOT/go.mod")")
+        if [[ "$CENSUS_MODE" == "strict" ]]; then
+            CENSUS_ARGS+=(-strict)
+        fi
+        # -json puts the test binary in verbose mode either way; the filter
+        # reconstructs the non-verbose view from it. Under -v there is nothing
+        # to reconstruct and everything to pass through — without this, `-v`
+        # would silently produce the same output as a run without it.
+        if [[ -n "$VERBOSE" ]]; then
+            CENSUS_ARGS+=(-v)
+        fi
+    else
+        # Loud, because the fallback is the silence this exists to remove.
+        echo "WARN: tools/testcensus failed to build; this run cannot tell you what it skipped" >&2
+    fi
+fi
+
+# census_run LABEL COMMAND...
+#
+# Runs COMMAND — a `go test` invocation already carrying -json when the census
+# is on — and returns GO TEST's status, not the pipeline's. A pipe replaces the
+# exit code with its last stage's, which would make the census the thing being
+# graded; PIPESTATUS is captured inside the group so no later command can
+# clobber it. Census exit 3 is the strict-mode verdict and is the only case
+# where this returns a status go test did not produce.
+census_run() {
+    local label="$1"
+    shift
+
+    if [[ -z "$CENSUS_BIN" ]]; then
+        "$@"
+        return $?
+    fi
+
+    local -a statuses=()
+    { "$@" | "$CENSUS_BIN" "${CENSUS_ARGS[@]}" -label "$label"; statuses=("${PIPESTATUS[@]}"); } || true
+
+    local go_status="${statuses[0]:-1}"
+    local census_status="${statuses[1]:-0}"
+
+    if ((go_status != 0)); then
+        return "$go_status"
+    fi
+    if ((census_status == 3)); then
+        echo "FAIL: BEADS_TEST_CENSUS=strict — a package reported ok having run no tests at all" >&2
+        return 3
+    fi
+    if ((census_status != 0)); then
+        echo "WARN: testcensus exited $census_status; the census above may be incomplete" >&2
+    fi
+    return 0
+}
+
 # Optional: start a single shared Dolt test server for all packages.
 # When BEADS_TEST_SHARED_SERVER=1, we start one dolt sql-server and export the
 # port so every test package reuses it instead of spawning its own. This
@@ -321,8 +431,11 @@ if [[ "${BEADS_TEST_SHARED_SERVER:-}" == "1" && -z "${BEADS_DOLT_PORT:-}" && -z 
     fi
 fi
 
-# Build go test command
-CMD=(go test -p "$GO_TEST_PKG_PARALLEL" -parallel "$GO_TEST_PARALLEL" -timeout "$TIMEOUT")
+# Build go test command. -json goes in only when the census is on; it is the
+# only way a passing package's skip count reaches the log at all, and
+# tools/testcensus turns the stream back into the output you would otherwise
+# have seen.
+CMD=(go test ${CENSUS_JSON[@]+"${CENSUS_JSON[@]}"} -p "$GO_TEST_PKG_PARALLEL" -parallel "$GO_TEST_PARALLEL" -timeout "$TIMEOUT")
 
 if [[ -n "$VERBOSE" ]]; then
     CMD+=(-v)
@@ -350,7 +463,7 @@ echo "Skipping: $SKIP_PATTERN" >&2
 echo "" >&2
 
 status=0
-"${CMD[@]}" || status=$?
+census_run "main suite" "${CMD[@]}" || status=$?
 
 if [[ -n "$COVERAGE" ]]; then
     total=$(go tool cover -func="$COVERPROFILE" | awk '/^total:/ {print $NF}')
@@ -376,7 +489,8 @@ if ((status == 0)) && ((${#DOLT_COVERAGE_PKGS[@]} > 0)); then
     done
 
     DOLT_CMD=(env "${DOLT_COVERAGE_ENV[@]}"
-        go test -p "$GO_TEST_PKG_PARALLEL" -parallel "$GO_TEST_PARALLEL"
+        go test ${CENSUS_JSON[@]+"${CENSUS_JSON[@]}"}
+        -p "$GO_TEST_PKG_PARALLEL" -parallel "$GO_TEST_PARALLEL"
         -timeout "$TIMEOUT" -run "$BEADS_DOLT_COVERAGE_RUN")
     if [[ -n "$VERBOSE" ]]; then
         DOLT_CMD+=(-v)
@@ -392,7 +506,9 @@ if ((status == 0)) && ((${#DOLT_COVERAGE_PKGS[@]} > 0)); then
         echo ""
     } >&2
 
-    "${DOLT_CMD[@]}" || status=$?
+    # Censused too: a coverage tier that reports ok having run nothing is
+    # precisely the failure this tier exists to prevent, one level up.
+    census_run "Dolt coverage tier" "${DOLT_CMD[@]}" || status=$?
     if ((status != 0)); then
         echo "FAIL: Dolt coverage tier" >&2
     else
