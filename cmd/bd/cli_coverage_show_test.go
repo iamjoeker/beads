@@ -1,4 +1,16 @@
-//go:build cgo && e2e
+// This file was tagged `e2e` until bd-7c2. That tag is not dead --
+// scripts/conformance.sh (run by .github/workflows/conformance.yml) sets it --
+// but it sets it for ./test/conformance/ only. Nothing anywhere built
+// ./cmd/bd with it, so these three tests compiled in no gate and rotted
+// unseen: TestCoverage_TemplateAndPinnedProtections asserted error text the
+// commands had stopped emitting, through a runner that fataled before the
+// assertion could be reached.
+//
+// `integration` is the tag ./cmd/bd's other in-process CLI tests use
+// (cli_fast_test.go) and it IS built for this package, by main.yml's
+// test-cmd-bd shard job. Keep this file on that tag.
+
+//go:build cgo && integration
 
 package main
 
@@ -20,7 +32,27 @@ import (
 
 var cliCoverageMutex sync.Mutex
 
+// runBDForCoverage runs bd in-process and fails the test if the command
+// returns an error. Use it for commands that are expected to succeed.
+//
+// For a command whose REJECTION is the thing under test, use
+// runBDForCoverageAllowError: this wrapper t.Fatalf's on the very error such a
+// test wants to assert on, so any assertion written after a failing call here
+// is unreachable (bd-7c2).
 func runBDForCoverage(t *testing.T, dir string, args ...string) (stdout string, stderr string) {
+	t.Helper()
+
+	stdout, stderr, err := runBDForCoverageAllowError(t, dir, args...)
+	if err != nil {
+		t.Fatalf("bd %v failed: %v\nStdout: %s\nStderr: %s", args, err, stdout, stderr)
+	}
+	return stdout, stderr
+}
+
+// runBDForCoverageAllowError is like runBDForCoverage but returns the command
+// error instead of failing the test, so callers can assert on a rejection.
+// Mirrors runBDInProcessAllowError in cli_fast_test.go.
+func runBDForCoverageAllowError(t *testing.T, dir string, args ...string) (stdout string, stderr string, cmdErr error) {
 	t.Helper()
 
 	cliCoverageMutex.Lock()
@@ -147,11 +179,7 @@ func runBDForCoverage(t *testing.T, dir string, args ...string) (stdout string, 
 	stdout = outBuf.String()
 	stderr = errBuf.String()
 
-	if err != nil {
-		t.Fatalf("bd %v failed: %v\nStdout: %s\nStderr: %s", args, err, stdout, stderr)
-	}
-
-	return stdout, stderr
+	return stdout, stderr, err
 }
 
 func extractJSONPayload(s string) string {
@@ -259,9 +287,12 @@ func TestCoverage_TemplateAndPinnedProtections(t *testing.T) {
 	out, _ := runBDForCoverage(t, dir, "create", "Pinned issue", "-p", "1", "--json")
 	pinnedID := parseCreatedIssueID(t, out)
 	runBDForCoverage(t, dir, "update", pinnedID, "--status", string(types.StatusPinned), "--json")
-	_, closeErr := runBDForCoverage(t, dir, "close", pinnedID, "--reason", "Done")
-	if !strings.Contains(closeErr, "cannot close pinned issue") {
-		t.Fatalf("expected pinned close to be rejected, stderr: %s", closeErr)
+	_, closeStderr, closeErr := runBDForCoverageAllowError(t, dir, "close", pinnedID, "--reason", "Done")
+	if closeErr == nil {
+		t.Fatalf("expected pinned close to be rejected, got no error; stderr: %s", closeStderr)
+	}
+	if !strings.Contains(closeStderr, "cannot modify pinned issue") {
+		t.Fatalf("expected pinned close to be rejected, stderr: %s", closeStderr)
 	}
 
 	forceOut, _ := runBDForCoverage(t, dir, "close", pinnedID, "--force", "--reason", "Done", "--json")
@@ -333,13 +364,19 @@ func TestCoverage_TemplateAndPinnedProtections(t *testing.T) {
 		t.Fatalf("expected show JSON to include is_template=true, got: %s", showOut)
 	}
 
-	_, updErr := runBDForCoverage(t, dir, "update", template.ID, "--title", "New title")
-	if !strings.Contains(updErr, "cannot update template") {
-		t.Fatalf("expected template update to be rejected, stderr: %s", updErr)
+	_, updStderr, updErr := runBDForCoverageAllowError(t, dir, "update", template.ID, "--title", "New title")
+	if updErr == nil {
+		t.Fatalf("expected template update to be rejected, got no error; stderr: %s", updStderr)
 	}
-	_, closeTemplateErr := runBDForCoverage(t, dir, "close", template.ID, "--reason", "Done")
-	if !strings.Contains(closeTemplateErr, "cannot close template") {
-		t.Fatalf("expected template close to be rejected, stderr: %s", closeTemplateErr)
+	if !strings.Contains(updStderr, "cannot modify template") {
+		t.Fatalf("expected template update to be rejected, stderr: %s", updStderr)
+	}
+	_, closeTemplateStderr, closeTemplateErr := runBDForCoverageAllowError(t, dir, "close", template.ID, "--reason", "Done")
+	if closeTemplateErr == nil {
+		t.Fatalf("expected template close to be rejected, got no error; stderr: %s", closeTemplateStderr)
+	}
+	if !strings.Contains(closeTemplateStderr, "cannot modify template") {
+		t.Fatalf("expected template close to be rejected, stderr: %s", closeTemplateStderr)
 	}
 }
 
