@@ -121,10 +121,12 @@ func TestGlobalDBIdentityCheck(t *testing.T) {
 	}
 
 	explicitGlobalID := doltserver.GlobalIssuePrefix + "-explicit"
-	out, err := ssExec(ctx, bdBinary, projectDir, env,
+	// stdout alone: this compares the ID exactly, and bd's stderr diagnostics
+	// would otherwise be spliced onto it under a loaded suite (bd-pyu).
+	out, err := ssExecStdout(ctx, bdBinary, projectDir, env,
 		"create", "Global explicit ID", "--global", "--id", explicitGlobalID, "--silent")
 	if err != nil {
-		t.Fatalf("bd create --global --id %s failed: %v\noutput:\n%s", explicitGlobalID, err, out)
+		t.Fatalf("bd create --global --id %s failed: %v\nstdout:\n%s", explicitGlobalID, err, out)
 	}
 	if got := strings.TrimSpace(out); got != explicitGlobalID {
 		t.Fatalf("bd create --global --id returned %q, want %q", got, explicitGlobalID)

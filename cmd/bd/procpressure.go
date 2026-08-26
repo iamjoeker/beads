@@ -99,6 +99,16 @@ const capExitCode = 75
 //
 // stderr, not stdout: every bd command may be asked for --json, and a warning
 // that corrupts a JSON document is a warning that gets suppressed permanently.
+// The same holds for `create --silent`, whose stdout is a bare issue ID that
+// scripts capture with id=$(bd create --silent ...).
+//
+// --silent does NOT suppress this warning, and deliberately so (bd-pyu asked).
+// It shapes stdout for a caller parsing it; it says nothing about diagnostics,
+// which is what stderr is for. Silencing the alarm for scripted callers would
+// blind it precisely where it matters: automated fan-out is what produces a
+// pile-up in the first place, so the callers most likely to pass --silent are
+// the ones whose operator most needs to see the count climbing. --quiet, an
+// explicit request for less output, is the flag that suppresses it.
 func reportProcPressure() {
 	if debug.IsQuiet() {
 		return
