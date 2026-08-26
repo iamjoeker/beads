@@ -805,6 +805,21 @@ jobs:
   # a missing container a hard failure: a job that runs nothing must not be
   # green. Same lesson as BEADS_FIX_REQUIRE_DOLT above.
   #
+  # Since bd-nn6 the wrapper runs the same -run selection twice: once against
+  # the container, once with BEADS_TEST_EMBEDDED_DOLT=1 in-process. The two
+  # flags abort each other, so it is two passes or one backend.
+  #
+  # For THIS leg the second pass currently buys little: no TestInit* test is
+  # embedded-gated (the embedded init tests are named TestEmbedded*, and go to
+  # test-embedded-cmd), so pass 2 re-runs the same selection with the server
+  # surface skipped instead -- measured 2026-08-26 on a busy box at 65s for 43
+  # of 63 tests, the other 18 self-skipping behind BEADS_TEST_SKIP=dolt. It
+  # stays on anyway because the alternative is a per-job opt-out, and a
+  # coverage decision that lives in a workflow env block is exactly the kind
+  # that goes stale unread -- bd-nn6 is what that looks like after a few
+  # months. Set BEADS_CMD_BD_EMBEDDED=off here if that minute ever matters;
+  # the wrapper prints what waiving costs.
+  #
   # Deliberately NOT yet added to ci-gate's `needs`/`CI_GATE_REQUIRED`:
   # promoting a new job to required-for-merge, once it has run clean for a
   # while, is a separate maintainer call — same pattern as test-macos below.

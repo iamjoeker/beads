@@ -1,4 +1,4 @@
-# Known-red cmd/bd tests under a real Dolt server (bd-9jl).
+# Known-red cmd/bd tests under Dolt (bd-9jl, bd-nn6).
 #
 # THIS FILE IS EMPTY, AND THAT IS THE POINT. The CI jobs `Test (cmd/bd under
 # real Dolt N/4)` and `Test (cmd/bd init under real Dolt)` run ./cmd/bd with
@@ -7,6 +7,14 @@
 # any CI job, so it rotted: bd-kbx fixed 25 failures on pristine main and this
 # list held the 12 that survived. bd-2k4 drained all 12, so the jobs now gate
 # the whole package with nothing excused.
+#
+# This list applies to BOTH of the wrapper's passes (bd-nn6): the server one
+# above and the embedded one that follows it, which runs the same package with
+# BEADS_TEST_EMBEDDED_DOLT=1 instead. An entry therefore excuses a test in
+# whichever backend it is red under, and in the other one too. That is
+# deliberate -- a single list is what keeps the count of excused tests
+# readable -- but it means an entry costs more coverage than its one line
+# suggests, and the reason on it should say which backend it was measured in.
 #
 # Rules:
 #   - Adding an entry is a regression. It needs a bead and a reason on the
@@ -25,9 +33,15 @@
 #   BEADS_TEST_ENV_RUN_DOLT=1 BEADS_CMD_BD_REQUIRE_DOLT=1 \
 #     BEADS_TEST_BD_BINARY=/somewhere/stable/bd ./scripts/test.sh ./cmd/bd
 #
+# and for the embedded backend, WITHOUT either of those two -- they abort each
+# other, which is why the wrapper makes two passes rather than one:
+#
+#   BEADS_TEST_EMBEDDED_DOLT=1 \
+#     BEADS_TEST_BD_BINARY=/somewhere/stable/bd ./scripts/test.sh ./cmd/bd
+#
 # Note that the CI jobs shard by test name, so they never run ./cmd/bd as one
-# process. The command above is the stricter check: it is the one that catches
-# order-dependence between tests that CI's shards happen to separate. Two of
-# bd-2k4's twelve were only ever red that way.
+# process. The commands above are the stricter check: they are the ones that
+# catch order-dependence between tests that CI's shards happen to separate.
+# Two of bd-2k4's twelve were only ever red that way.
 #
 # Format: one top-level Go test name per line. `#` starts a comment.

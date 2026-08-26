@@ -862,6 +862,17 @@ jobs:
   # No -race here: the raced cmd/bd matrix already runs above, and this lane's
   # cost is the Dolt containers and subprocess bd invocations, not the
   # detector.
+  #
+  # Since bd-nn6 the wrapper makes TWO passes over each shard's test list: the
+  # container-backed one this job is named for, then an in-process
+  # BEADS_TEST_EMBEDDED_DOLT=1 one. They cannot share a process (the embedded
+  # flag short-circuits the container, and BEADS_CMD_BD_REQUIRE_DOLT then fails
+  # the run), and the second pass is the only place 79 of cmd/bd's
+  # embedded-gated tests run at all -- test-embedded-cmd discovers by
+  # `^func TestEmbedded` and cannot see them. Pass 2 prebuilds its own bd from
+  # the tree rather than reusing BEADS_TEST_BD_BINARY below, so the artifact
+  # download still serves pass 1 only. Budget accordingly if this job's
+  # timeout-minutes ever starts biting.
   test-cmd-bd-dolt:
     name: Test (cmd/bd under real Dolt ${{ matrix.shard }}/4)
     runs-on: ubuntu-latest
