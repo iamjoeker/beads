@@ -982,15 +982,12 @@ func serverClonePort(beadsDir string, cfg *configfile.Config) int {
 	if cfg != nil && cfg.DoltServerPort > 0 {
 		return cfg.DoltServerPort
 	}
-	if p := os.Getenv("BEADS_DOLT_SERVER_PORT"); p != "" {
-		if port, err := strconv.Atoi(p); err == nil && port > 0 {
-			return port
-		}
-	}
-	if p := os.Getenv("BEADS_DOLT_PORT"); p != "" {
-		if port, err := strconv.Atoi(p); err == nil && port > 0 {
-			return port
-		}
+	// Shares configfile's precedence (and its BEADS_TEST_MODE isolation
+	// guard) rather than re-spelling it here — three copies of the same
+	// two-variable order is how the guard came to sit on the losing side of
+	// one of them (bd-4xn).
+	if env := configfile.ResolveDoltPortEnv(); env.Found {
+		return env.Port
 	}
 	if resolved := doltserver.DefaultConfig(beadsDir); resolved.Port > 0 {
 		return resolved.Port

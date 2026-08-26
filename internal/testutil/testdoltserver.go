@@ -16,6 +16,7 @@ import (
 	"time"
 
 	_ "github.com/go-sql-driver/mysql" // required by testcontainers Dolt module
+	"github.com/steveyegge/beads/internal/configfile"
 	"github.com/testcontainers/testcontainers-go"
 	tcexec "github.com/testcontainers/testcontainers-go/exec"
 	"github.com/testcontainers/testcontainers-go/modules/dolt"
@@ -246,7 +247,11 @@ func terminateSharedContainer() {
 // unreachable sentinel port 1 — so a partial publish surfaces as every
 // store-backed test in the package failing with "Dolt server unreachable at
 // 127.0.0.1:1" rather than as anything naming the environment (bd-799).
-var doltPortEnvVars = []string{"BEADS_DOLT_SERVER_PORT", "BEADS_DOLT_PORT"}
+//
+// Taken from the resolver rather than re-spelled here: a list of vars to
+// publish that can drift from the list of vars that are read reintroduces the
+// shadow the moment a third spelling is added (bd-4xn).
+var doltPortEnvVars = configfile.DoltPortEnvVars
 
 // publishDoltPortEnv points every port env var bd reads at the test container,
 // overwriting any ambient value.

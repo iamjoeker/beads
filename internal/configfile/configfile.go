@@ -503,18 +503,12 @@ func (c *Config) GetDoltServerHost() string {
 // Kept for backward compatibility with external consumers.
 //
 // GetDoltServerPort returns the Dolt server port.
-// Checks BEADS_DOLT_SERVER_PORT env var first, then BEADS_DOLT_PORT (orchestrator sets this),
+// Resolves the environment first via ResolveDoltPortEnv (BEADS_DOLT_SERVER_PORT,
+// then the legacy BEADS_DOLT_PORT, with the BEADS_TEST_MODE isolation guard),
 // then config, then default.
 func (c *Config) GetDoltServerPort() int {
-	if p := os.Getenv("BEADS_DOLT_SERVER_PORT"); p != "" {
-		if port, err := strconv.Atoi(p); err == nil {
-			return port
-		}
-	}
-	if p := os.Getenv("BEADS_DOLT_PORT"); p != "" {
-		if port, err := strconv.Atoi(p); err == nil {
-			return port
-		}
+	if env := ResolveDoltPortEnv(); env.Found {
+		return env.Port
 	}
 	if c.DoltServerPort > 0 {
 		return c.DoltServerPort

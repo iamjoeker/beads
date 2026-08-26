@@ -260,10 +260,17 @@ if [[ -z "${BEADS_TEST_BD_BINARY:-}" ]]; then
 fi
 
 # Optional: start a single shared Dolt test server for all packages.
-# When BEADS_TEST_SHARED_SERVER=1, we start one dolt sql-server and export
-# BEADS_DOLT_PORT so every test package reuses it instead of spawning its own.
-# This reduces 8-16+ concurrent dolt processes down to 1.
-if [[ "${BEADS_TEST_SHARED_SERVER:-}" == "1" && -z "${BEADS_DOLT_PORT:-}" ]]; then
+# When BEADS_TEST_SHARED_SERVER=1, we start one dolt sql-server and export the
+# port so every test package reuses it instead of spawning its own. This
+# reduces 8-16+ concurrent dolt processes down to 1.
+#
+# Both port vars are read here and written below. bd resolves
+# BEADS_DOLT_SERVER_PORT before the legacy BEADS_DOLT_PORT, so naming only the
+# legacy one leaves whichever value the other holds in charge — the shape that
+# made a poisoned test-isolation guard inert (bd-4xn) and, before that, hid a
+# test container behind an ambient production port (bd-799). Either var being
+# set already means someone else has chosen the server for this run.
+if [[ "${BEADS_TEST_SHARED_SERVER:-}" == "1" && -z "${BEADS_DOLT_PORT:-}" && -z "${BEADS_DOLT_SERVER_PORT:-}" ]]; then
     if command -v dolt &>/dev/null; then
         SHARED_DOLT_DIR=$(mktemp -d /tmp/beads-shared-test-dolt-XXXXXX)
         DOLT_ROOT_PATH="$SHARED_DOLT_DIR"
@@ -292,7 +299,9 @@ if [[ "${BEADS_TEST_SHARED_SERVER:-}" == "1" && -z "${BEADS_DOLT_PORT:-}" ]]; th
         done
 
         if nc -z 127.0.0.1 "$SHARED_PORT" 2>/dev/null; then
+            # Every var bd consults for the port, not just the legacy one.
             export BEADS_DOLT_PORT="$SHARED_PORT"
+            export BEADS_DOLT_SERVER_PORT="$SHARED_PORT"
             export BEADS_TEST_MODE=1
             echo "Shared test Dolt server started on port $SHARED_PORT (PID $SHARED_DOLT_PID)" >&2
             # Picked up by test_sh_cleanup, which is already trapped on EXIT.

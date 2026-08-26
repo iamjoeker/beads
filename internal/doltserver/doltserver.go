@@ -699,6 +699,20 @@ var portSources = []portSource{
 		label:  "Environment variable (BEADS_DOLT_SERVER_PORT)",
 		source: PortSourceEnv,
 		resolve: func(beadsDir string) (int, bool) {
+			// Only the primary spelling participates in this chain — the
+			// legacy BEADS_DOLT_PORT is a storage-layer override,
+			// deliberately not a server-lifecycle source (see the external-
+			// host branch in DefaultConfig for where it is honored).
+			//
+			// The one exception is configfile's test-isolation guard. When it
+			// fires, the primary holds an ambient PRODUCTION port that the
+			// guard has already ruled out in favor of a poisoned legacy
+			// value. Reading the raw primary here would aim the server
+			// lifecycle at production while the connection goes elsewhere —
+			// the two must not disagree about which server this is (bd-4xn).
+			if env := configfile.ResolveDoltPortEnv(); env.GuardApplied {
+				return env.Port, true
+			}
 			p := os.Getenv("BEADS_DOLT_SERVER_PORT")
 			if p == "" {
 				return 0, false
