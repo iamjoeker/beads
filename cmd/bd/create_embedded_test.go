@@ -3,6 +3,7 @@
 package main
 
 import (
+	"bytes"
 	"encoding/json"
 	"fmt"
 	"os"
@@ -1214,6 +1215,49 @@ func TestEmbeddedCreateWithGitRemote(t *testing.T) {
 	}
 }
 
+// TestEmbeddedCreateSilentStdoutIsOnlyTheID pins the contract that a scripted
+// id=$(bd create --silent ...) depends on: stdout carries the issue ID and
+// nothing else, even while bd has something else to say.
+//
+// The threshold override makes the procpressure pile-up warning fire on a quiet
+// host — a create always has at least itself registered, so a threshold of 1 is
+// always over — which is what lets a single process reproduce a condition that
+// otherwise needs sixteen. Without the override this test would pass on a build
+// that routes the warning to stdout, simply because the warning never fired;
+// the stderr assertion below is the positive control that rules that out.
+func TestEmbeddedCreateSilentStdoutIsOnlyTheID(t *testing.T) {
+	if os.Getenv("BEADS_TEST_EMBEDDED_DOLT") != "1" {
+		t.Skip("set BEADS_TEST_EMBEDDED_DOLT=1 to run embedded dolt create tests")
+	}
+	t.Parallel()
+
+	bd := buildEmbeddedBD(t)
+	dir, _, _ := bdInit(t, bd, "--prefix", "ss")
+
+	cmd := exec.Command(bd, "create", "--silent", "silent-stream-contract")
+	cmd.Dir = dir
+	cmd.Env = append(bdEnv(dir), "BD_PROC_PRESSURE_THRESHOLD=1")
+	var stdout, stderr bytes.Buffer
+	cmd.Stdout = &stdout
+	cmd.Stderr = &stderr
+	if err := cmd.Run(); err != nil {
+		t.Fatalf("bd create --silent failed: %v\nstdout:\n%s\nstderr:\n%s",
+			err, stdout.String(), stderr.String())
+	}
+
+	// The contract first, so a warning routed to the wrong stream is reported
+	// as what it is rather than as a missing warning.
+	id := strings.TrimSpace(stdout.String())
+	if id == "" || len(strings.Fields(id)) != 1 {
+		t.Fatalf("bd create --silent stdout = %q, want the bare issue ID and nothing else", stdout.String())
+	}
+	// Then the positive control.
+	if !strings.Contains(stderr.String(), "running concurrently") {
+		t.Fatalf("procpressure warning did not fire at threshold 1, so this run "+
+			"cannot tell a correctly routed warning from an absent one; stderr:\n%s", stderr.String())
+	}
+}
+
 // TestEmbeddedCreateConcurrent verifies one contended create from each of six
 // CLI processes, then proves every requested issue was durably created.
 func TestEmbeddedCreateConcurrent(t *testing.T) {
@@ -1229,10 +1273,20 @@ func TestEmbeddedCreateConcurrent(t *testing.T) {
 	// create-process budget at twelve.
 	const numWorkers = 6
 
+	// stdout and diag are kept apart deliberately. The issue ID must be read
+	// from stdout ALONE: bd writes the procpressure pile-up warning to stderr,
+	// and this test is exactly the arrangement that makes it fire — six
+	// concurrent bd processes on a host already running the rest of the suite
+	// clears the threshold of 16. A CombinedOutput read spliced that warning
+	// onto the front of the ID and the test failed looking for an issue whose
+	// ID began "Warning: 16 bd processes..." (bd-pyu). diag carries both
+	// streams for the checks that ask what bd SAID — lock contention, panics,
+	// failure messages — where the warning is harmless.
 	type result struct {
-		title string
-		out   string
-		err   error
+		title  string
+		stdout string
+		diag   string
+		err    error
 	}
 
 	results := make([]result, numWorkers)
@@ -1251,8 +1305,16 @@ func TestEmbeddedCreateConcurrent(t *testing.T) {
 			cmd := exec.Command(bd, "create", "--silent", title)
 			cmd.Dir = dir
 			cmd.Env = bdEnv(dir)
-			out, err := cmd.CombinedOutput()
-			results[worker] = result{title: title, out: string(out), err: err}
+			var stdout, stderr bytes.Buffer
+			cmd.Stdout = &stdout
+			cmd.Stderr = &stderr
+			err := cmd.Run()
+			results[worker] = result{
+				title:  title,
+				stdout: stdout.String(),
+				diag:   stdout.String() + stderr.String(),
+				err:    err,
+			}
 		}(w)
 	}
 	for range numWorkers {
@@ -1264,11 +1326,19 @@ func TestEmbeddedCreateConcurrent(t *testing.T) {
 	expected := make(map[string]string, numWorkers)
 	lockLosers := make([]result, 0, numWorkers)
 	immediateSuccesses := 0
-	recordSuccess := func(title, out string) {
+	// recordSuccess takes the stdout of one create, never the combined output.
+	// The whitespace check is the tripwire for the splice described above: a
+	// bare issue ID is a single token, so anything that arrives alongside it on
+	// this stream fails here naming the stream, instead of surfacing hundreds of
+	// lines later as a missing issue.
+	recordSuccess := func(title, stdout string) {
 		t.Helper()
-		id := strings.TrimSpace(out)
+		id := strings.TrimSpace(stdout)
 		if id == "" {
 			t.Fatalf("create %q succeeded without an issue ID", title)
+		}
+		if len(strings.Fields(id)) != 1 {
+			t.Fatalf("create %q: --silent stdout must be the bare issue ID, got %q", title, stdout)
 		}
 		if previousTitle, exists := expected[id]; exists {
 			t.Fatalf("create %q returned duplicate ID %q already returned for %q", title, id, previousTitle)
@@ -1278,33 +1348,39 @@ func TestEmbeddedCreateConcurrent(t *testing.T) {
 
 	for _, r := range results {
 		if r.err == nil {
-			recordSuccess(r.title, r.out)
+			recordSuccess(r.title, r.stdout)
 			immediateSuccesses++
 			continue
 		}
-		if strings.Contains(r.out, "panic") {
-			t.Fatalf("first create %q panicked:\n%s", r.title, r.out)
+		if strings.Contains(r.diag, "panic") {
+			t.Fatalf("first create %q panicked:\n%s", r.title, r.diag)
 		}
-		if isEmbeddedLockOutput(r.out) {
+		if isEmbeddedLockOutput(r.diag) {
 			lockLosers = append(lockLosers, r)
 			continue
 		}
-		t.Fatalf("first create %q failed unexpectedly: %v\n%s", r.title, r.err, r.out)
+		t.Fatalf("first create %q failed unexpectedly: %v\n%s", r.title, r.err, r.diag)
 	}
 	if immediateSuccesses == 0 {
 		t.Fatal("expected at least one immediate create success")
 	}
 
 	// Retry only the lock losers, once each, after concurrent contention ends.
+	// Contention ending does not put the process count back under the
+	// threshold — the rest of the suite is still running — so the retry reads
+	// its ID off stdout for the same reason the first attempt does.
 	for _, r := range lockLosers {
 		cmd := exec.Command(bd, "create", "--silent", r.title)
 		cmd.Dir = dir
 		cmd.Env = bdEnv(dir)
-		out, err := cmd.CombinedOutput()
-		if err != nil {
-			t.Fatalf("retry create %q failed: %v\n%s", r.title, err, out)
+		var stdout, stderr bytes.Buffer
+		cmd.Stdout = &stdout
+		cmd.Stderr = &stderr
+		if err := cmd.Run(); err != nil {
+			t.Fatalf("retry create %q failed: %v\nstdout:\n%s\nstderr:\n%s",
+				r.title, err, stdout.String(), stderr.String())
 		}
-		recordSuccess(r.title, string(out))
+		recordSuccess(r.title, stdout.String())
 	}
 
 	if len(expected) != numWorkers {

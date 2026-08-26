@@ -3,6 +3,7 @@
 package main
 
 import (
+	"bytes"
 	"context"
 	"encoding/json"
 	"fmt"
@@ -521,12 +522,38 @@ func checkLabels(issue map[string]any, required ...string) error {
 // Subprocess + JSON helpers
 // ---------------------------------------------------------------------------
 
+// ssExec returns bd's combined output. Use it for assertions about what bd
+// SAID; for anything that parses a value out of the result, use ssExecStdout —
+// see the note there.
 func ssExec(ctx context.Context, binary, dir string, env []string, args ...string) (string, error) {
 	cmd := exec.CommandContext(ctx, binary, args...)
 	cmd.Dir = dir
 	cmd.Env = env
 	out, err := cmd.CombinedOutput()
 	return string(out), err
+}
+
+// ssExecStdout returns bd's stdout alone, with stderr folded into the error so
+// a failure is still diagnosable.
+//
+// Anything that reads a machine-readable value out of bd's output must go
+// through this rather than ssExec. bd writes diagnostics to stderr — the
+// procpressure pile-up warning is the one that bites, since it appears only
+// when enough bd processes are alive at once, which is to say only under a full
+// parallel suite. A combined read splices it onto the front of the value; that
+// is bd-pyu, where an exact ID comparison started matching against a warning
+// with the ID stuck on the end.
+func ssExecStdout(ctx context.Context, binary, dir string, env []string, args ...string) (string, error) {
+	cmd := exec.CommandContext(ctx, binary, args...)
+	cmd.Dir = dir
+	cmd.Env = env
+	var stdout, stderr bytes.Buffer
+	cmd.Stdout = &stdout
+	cmd.Stderr = &stderr
+	if err := cmd.Run(); err != nil {
+		return stdout.String(), fmt.Errorf("%w; stderr:\n%s", err, stderr.String())
+	}
+	return stdout.String(), nil
 }
 
 // ssFirstJSON returns the substring starting at the first '{' or '['.
