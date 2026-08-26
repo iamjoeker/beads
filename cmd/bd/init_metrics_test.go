@@ -8,10 +8,13 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"strconv"
 	"strings"
 	"testing"
 
+	"github.com/steveyegge/beads/internal/doltserver"
 	"github.com/steveyegge/beads/internal/metrics"
+	"github.com/steveyegge/beads/internal/testutil"
 )
 
 type metricsEvent struct {
@@ -95,7 +98,7 @@ func metricsTestEnv(home string, extra ...string) []string {
 	return append(out, extra...)
 }
 
-func runBdInitForMetrics(t *testing.T, home string, args ...string) {
+func runBdInitForMetrics(t *testing.T, home string, extraEnv []string, args ...string) {
 	t.Helper()
 	bd := buildEmbeddedBD(t)
 	repo, err := testTempDir("bd-metrics-repo-*")
@@ -107,18 +110,66 @@ func runBdInitForMetrics(t *testing.T, home string, args ...string) {
 	full := append([]string{"init", "--non-interactive", "--quiet"}, args...)
 	cmd := exec.Command(bd, full...)
 	cmd.Dir = repo
-	cmd.Env = metricsTestEnv(home)
+	cmd.Env = metricsTestEnv(home, extraEnv...)
 	var stdout, stderr bytes.Buffer
 	cmd.Stdout = &stdout
 	cmd.Stderr = &stderr
 	_ = cmd.Run()
 }
 
+// isolatedSharedServerEnv pins `bd init --shared-server` to a free port and a
+// private server directory, and stops the server it starts.
+//
+// Shared-server mode with no configured port resolves to the fixed
+// DefaultSharedServerPort (3308) and `bd init --shared-server` STARTS a real
+// dolt sql-server there — 3308 is machine-global, so without this the case
+// below bound a port the whole box shares. Both directions of that are silent
+// (bd-l9c):
+//
+//   - When something else already holds 3308, init fails with "cannot start
+//     dolt server on port 3308: port 3308 is in use", and this test still
+//     passes, because it reads .evtq files and discards the exit status.
+//   - When 3308 is free, this test is what takes it. TestMain's reaper
+//     (doltserver.SweepOrphanedTestServers) and its temp-root removal both run
+//     on the normal return path only, so a SIGKILLed run leaves the server
+//     listening — one was found still holding 3308 six hours later, ppid 1,
+//     its config still under /tmp/beads-bd-tests-*/bd-metrics-home-*/. Every
+//     shared-server test on that box skipped for as long as it lived.
+//
+// The server directory goes under testTempRoot for the same reason
+// sharedServerPortOnlyTestEnv puts it there: the sweep matches a candidate by
+// its cwd, so a server outside that root is invisible to it. The explicit Stop
+// is the primary defense; the sweep is the backstop for a run that dies before
+// cleanups run.
+func isolatedSharedServerEnv(t *testing.T) []string {
+	t.Helper()
+	port, err := testutil.FindFreePort()
+	if err != nil {
+		t.Fatalf("find free port for shared server: %v", err)
+	}
+	serverDir, err := testTempDir("bd-metrics-shared-server-*")
+	if err != nil {
+		t.Fatalf("create shared server dir: %v", err)
+	}
+	t.Cleanup(func() {
+		// Idempotent: returns ErrServerNotRunning when init never got one up.
+		_ = doltserver.Stop(serverDir)
+		_ = os.RemoveAll(serverDir)
+	})
+	return []string{
+		"BEADS_SHARED_SERVER_DIR=" + serverDir,
+		"BEADS_DOLT_SERVER_PORT=" + strconv.Itoa(port),
+	}
+}
+
 func TestInitMetricsEmittedPerDoltMode(t *testing.T) {
 	cases := []struct {
-		name            string
+		name string
+		// extraEnv is a func, not a slice, because the shared-server case has
+		// to allocate its port and server directory per-subtest and register
+		// the cleanup that stops the server.
 		extraArgs       []string
-		extraEnv        []string
+		extraEnv        func(t *testing.T) []string
 		expectedCommand string
 	}{
 		{
@@ -133,6 +184,7 @@ func TestInitMetricsEmittedPerDoltMode(t *testing.T) {
 		{
 			name:            "shared_server_via_flag",
 			extraArgs:       []string{"--shared-server"},
+			extraEnv:        isolatedSharedServerEnv,
 			expectedCommand: "init-shared-server",
 		},
 		{
@@ -149,7 +201,11 @@ func TestInitMetricsEmittedPerDoltMode(t *testing.T) {
 			if err != nil {
 				t.Fatalf("temp home: %v", err)
 			}
-			runBdInitForMetrics(t, home, tc.extraArgs...)
+			var extraEnv []string
+			if tc.extraEnv != nil {
+				extraEnv = tc.extraEnv(t)
+			}
+			runBdInitForMetrics(t, home, extraEnv, tc.extraArgs...)
 			evt := readInitEvent(t, home, tc.expectedCommand)
 
 			if evt.AppName != "beads" {
