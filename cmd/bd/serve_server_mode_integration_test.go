@@ -85,6 +85,68 @@ func (p serverModeProject) run(t *testing.T, bd string, args ...string) string {
 	return stdout.String()
 }
 
+// sharedServerEnvForContainer is the env a bd subprocess needs to run in
+// shared-server mode against the shared TEST container rather than against
+// whatever the box happens to be running.
+//
+// Selecting shared-server mode is not enough, and pinning the workspace's port
+// does not survive it. doltserver.DefaultConfig replaces beadsDir with
+// SharedServerDir() when IsSharedServerMode() is true, so the --server-port
+// newServerModeProject initialized this workspace with is discarded, no port
+// source resolves, and resolution falls through to the fixed
+// DefaultSharedServerPort — 3308, which the whole machine shares (bd-zje,
+// follow-up to bd-l9c). Nothing else pins it either: bdEnv strips every BEADS_*
+// variable out of os.Environ(), including the container port
+// testutil.EnsureDoltContainerForTestMain publishes into this process.
+//
+// Both directions of that are silent. With a shared server already on 3308 —
+// an orphan from a killed run is enough — the subprocess reads and writes a
+// stranger's databases and the test passes for a reason that has nothing to do
+// with its own container. With nothing there it fails to connect, in a test
+// whose subject is what `bd serve` REPORTS.
+//
+// BEADS_DOLT_SERVER_PORT is PortSourceEnv, the top of the precedence chain, so
+// it wins over the shared directory's (absent) port file; the private
+// BEADS_SHARED_SERVER_DIR keeps the port file, pid file and proxy root this
+// mode writes out of $HOME and inside the test's own temp tree.
+func sharedServerEnvForContainer(port int, sharedDir string) []string {
+	return []string{
+		"BEADS_DOLT_SHARED_SERVER=1",
+		"BEADS_DOLT_SERVER_PORT=" + strconv.Itoa(port),
+		"BEADS_SHARED_SERVER_DIR=" + sharedDir,
+	}
+}
+
+// provisionSharedGlobalDatabase creates beads_global, with schema, on the
+// container sharedEnv points at.
+//
+// `bd --global` opens that database, it does not create it: only a
+// shared-server init reaches initGlobalDatabaseConfig, whose CreateIfMissing
+// open is what runs the schema migration. A workspace initialized `--server`
+// never does. Before the port was pinned this step was invisible, because the
+// beads_global the subprocess found was one some other run had left on 3308.
+//
+// --external skips init's own start-the-shared-server branch (the one that
+// binds a port and is not gated on BEADS_DOLT_AUTO_START); the container is
+// exactly the externally-managed server that flag describes. The throwaway
+// workspace exists only to carry the init — the database it provisions lives
+// on the server, which is what the caller's project reaches.
+func provisionSharedGlobalDatabase(t *testing.T, bd string, sharedEnv []string) {
+	t.Helper()
+	dir := t.TempDir()
+	initGitRepoAt(t, dir)
+	cmd := exec.Command(bd, "init", "--shared-server", "--global", "--external",
+		"--prefix", "gprov",
+		"--quiet", "--non-interactive", "--skip-agents", "--skip-hooks")
+	cmd.Dir = dir
+	cmd.Env = append(bdEnv(dir), sharedEnv...)
+	stdout, stderr, err := runCommandBuffers(t, cmd)
+	if err != nil {
+		t.Fatalf("provisioning %s failed: %v\nstdout:\n%s\nstderr:\n%s",
+			doltserver.GlobalDatabaseName, err, stdout.String(), stderr.String())
+	}
+}
+
 func TestServerModeServe(t *testing.T) {
 	requireSharedProxiedServer(t)
 	t.Parallel()
@@ -281,7 +343,7 @@ func TestServerModeServeSkipsPostRunMaintenance(t *testing.T) {
 // from the global one is a lie with a straight face. Without the fix the
 // handshake and the startup line both report p.database here.
 func TestSharedServerModeServeGlobalReportsTheServedDatabase(t *testing.T) {
-	requireSharedProxiedServer(t)
+	port := requireSharedProxiedServer(t)
 	t.Parallel()
 	bd := buildEmbeddedBD(t)
 	p := newServerModeProject(t, bd, "srvgl")
@@ -291,13 +353,16 @@ func TestSharedServerModeServeGlobalReportsTheServedDatabase(t *testing.T) {
 	// the proxy root under the shared dolt directory, so the project-local
 	// cleanup newServerModeProject registered does not cover the child this test
 	// leaves behind.
-	p.env = append(p.env, "BEADS_DOLT_SHARED_SERVER=1")
-	sharedProxyRoot := filepath.Join(p.dir, ".beads", "shared-server", "dolt")
+	sharedDir := t.TempDir()
+	sharedEnv := sharedServerEnvForContainer(port, sharedDir)
+	p.env = append(p.env, sharedEnv...)
+	sharedProxyRoot := filepath.Join(sharedDir, "dolt")
 	t.Cleanup(func() {
 		if err := proxy.Shutdown(sharedProxyRoot); err != nil {
 			t.Logf("proxy.Shutdown(%s): %v", sharedProxyRoot, err)
 		}
 	})
+	provisionSharedGlobalDatabase(t, bd, sharedEnv)
 
 	// Control: the CLI reaches the global database in this workspace, so the
 	// server refusing or misreporting it is about serve, not about the setup.
