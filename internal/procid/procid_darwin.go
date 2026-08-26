@@ -14,6 +14,11 @@ import (
 
 const fallbackSignalConfirmTimeout = 2 * time.Second
 
+// statZombie is SZOMB from <sys/proc.h>, the P_stat value for a process which
+// has exited but has not yet been reaped by its parent. x/sys/unix does not
+// export the P_stat constants, so it is spelled out here.
+const statZombie = 5
+
 // Handle verifies before and after signaling. macOS has no pidfd equivalent
 // here, so a residual PID-reuse race remains between those operations.
 type Handle struct {
@@ -25,6 +30,21 @@ func Capture(pid int) (Token, error) {
 	proc, err := unix.SysctlKinfoProc("kern.proc.pid", pid)
 	if err != nil {
 		return "", fmt.Errorf("procid: sysctl process %d: %w", pid, err)
+	}
+	return tokenFromKinfoProc(pid, proc)
+}
+
+// tokenFromKinfoProc turns a live process's kinfo_proc into its birth token,
+// and rejects one which has already exited.
+//
+// kern.proc.pid keeps answering for an unreaped zombie, and answers with the
+// same P_starttime it had while running, so without this check Verify reports
+// a dead process as alive — permanently, since the entry never ages out while
+// verification keeps succeeding. This mirrors the Linux reader's rejection of
+// proc states Z, X and x.
+func tokenFromKinfoProc(pid int, proc *unix.KinfoProc) (Token, error) {
+	if proc.Proc.P_stat == statZombie {
+		return "", fmt.Errorf("procid: process %d is no longer running: %w", pid, unix.ESRCH)
 	}
 	started := proc.Proc.P_starttime
 	return Token(fmt.Sprintf("darwin-v1:%d.%d", started.Sec, started.Usec)), nil
