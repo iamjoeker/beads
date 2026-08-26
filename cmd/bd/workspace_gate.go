@@ -225,12 +225,16 @@ func acquireCommandWorkspaceGates(ctx context.Context, cmd *cobra.Command, beads
 }
 
 // acquireExclusiveWorkspaceGates is the maintenance-side acquisition used by
-// bd init and bd migrate, which live on the skip-store path and therefore
+// bd bootstrap and bd migrate, which live on the skip-store path and therefore
 // never reach the chokepoint. It takes the workspace gate plus the resolved
-// physical roots (when .beads exists — bd init on a fresh directory has
-// nothing to resolve yet) plus any extraRoots, all EXCLUSIVE in ONE
-// AcquireAll (never nested — that is a workspacegate invariant). Failures
-// are returned, not softened: maintenance refuses rather than pretends.
+// physical roots (when .beads exists — a fresh directory has nothing to
+// resolve yet) plus any extraRoots, all EXCLUSIVE in ONE AcquireAll (never
+// nested — that is a workspacegate invariant). Failures are returned, not
+// softened: maintenance refuses rather than pretends.
+//
+// bd init goes through acquireInitWorkspaceGates instead: it is the one
+// maintenance command that USES the shared-server root rather than replacing
+// it, and so must not hold that particular gate exclusively.
 //
 // Lock ordering (normative for the callers): workspace gate(s) →
 // physical-root gate(s) → migrate.lock → embedded .lock → proxy locks →
@@ -245,6 +249,78 @@ func acquireCommandWorkspaceGates(ctx context.Context, cmd *cobra.Command, beads
 // acquires these gates and then runs git must do the same, or the hook's
 // child bd will fail (fail-closed, but confusing).
 func acquireExclusiveWorkspaceGates(ctx context.Context, beadsDir, reason string, extraRoots ...string) (*workspacegate.MultiHandle, error) {
+	return acquireMaintenanceWorkspaceGates(ctx, beadsDir, reason, false, extraRoots...)
+}
+
+// sharedServerRootGate returns the gate for the shared-server database root
+// (<BEADS_SHARED_SERVER_DIR|~/.beads/shared-server>/dolt), and whether it
+// could be resolved at all. Failure is not an error for the callers: a
+// shared root whose parent does not exist cannot be in any gate set either
+// (buildWorkspaceGateSet skips exactly those), so an unresolvable answer and
+// "not present in this set" lead to the same decision.
+func sharedServerRootGate() (workspacegate.Gate, bool) {
+	root, err := doltserver.SharedDoltPath()
+	if err != nil {
+		return workspacegate.Gate{}, false
+	}
+	g, gerr := workspacegate.ForPhysicalRoot(root)
+	if gerr != nil {
+		return workspacegate.Gate{}, false
+	}
+	return g, true
+}
+
+// planMaintenanceGateModes assigns each gate the mode a maintenance
+// acquisition should take it in: EXCLUSIVE for all of them, except that when
+// shareSharedServerRoot is set, the shared-server database root is taken
+// SHARED.
+//
+// Only bd init sets that flag, and the asymmetry is the point. The
+// shared-server root is not this workspace's root — it is the one root every
+// workspace on the machine resolves to, so an exclusive claim on it is a
+// claim over other people's workspaces. bd init does not earn that claim: it
+// creates a database ON that server (with --external it never writes the
+// directory at all), it does not replace the root the way `bd migrate
+// from-*-to-*` and `bd backup restore` do. Those keep EXCLUSIVE.
+//
+// The demotion loses nothing bd init needs. SHARED still conflicts with
+// EXCLUSIVE, so an init still cannot run underneath a migration replacing
+// that root — which is the only holder it had to be excluded by. What it
+// stops doing is excluding holders it never had a reason to exclude: other
+// inits, and every ordinary command in every unrelated workspace, whose
+// SHARED acquisition is non-blocking and whose contention path is a hard
+// error (see acquireCommandWorkspaceGates). Before this, a single bd init
+// made concurrent `bd list` in an unrelated shared-server workspace fail
+// with "a maintenance operation is running on this workspace" (bd-436).
+//
+// gates[0] is the workspace gate — both builders (buildWorkspaceGateSet and
+// metadataFreeGateSet) put it there — and it is never demoted, whatever it
+// resolves to. That matters for one degenerate configuration: a workspace
+// whose .beads directory IS the shared root's directory resolves both gates
+// to the same file, and the workspace gate is precisely the hold that keeps
+// two inits out of each other's workspace. Exclusivity there is never the
+// machine-wide claim this function exists to give up.
+func planMaintenanceGateModes(gates []workspacegate.Gate, shareSharedServerRoot bool) []workspacegate.GateMode {
+	sharedGate, haveShared := workspacegate.Gate{}, false
+	if shareSharedServerRoot {
+		sharedGate, haveShared = sharedServerRootGate()
+	}
+	modes := make([]workspacegate.GateMode, 0, len(gates))
+	for i, g := range gates {
+		mode := workspacegate.Exclusive
+		if i > 0 && haveShared && g.SameAs(sharedGate) {
+			mode = workspacegate.Shared
+		}
+		modes = append(modes, workspacegate.GateMode{Gate: g, Mode: mode})
+	}
+	return modes
+}
+
+// acquireMaintenanceWorkspaceGates is the body of
+// acquireExclusiveWorkspaceGates, with the shared-server-root demotion
+// described on planMaintenanceGateModes as an explicit parameter so that
+// only bd init opts into it.
+func acquireMaintenanceWorkspaceGates(ctx context.Context, beadsDir, reason string, shareSharedServerRoot bool, extraRoots ...string) (*workspacegate.MultiHandle, error) {
 	// Defense against callers that computed no workspace (bootstrap plans
 	// are the untrusted case): gating "" would resolve against the CWD and
 	// fence an arbitrary directory.
@@ -278,8 +354,8 @@ func acquireExclusiveWorkspaceGates(ctx context.Context, beadsDir, reason string
 			return nil, werr
 		}
 	}
-	return workspacegate.AcquireAll(ctx, workspacegate.Exclusive,
-		exclusiveGateOptions(reason), gates...)
+	return workspacegate.AcquireMixed(ctx, exclusiveGateOptions(reason),
+		planMaintenanceGateModes(gates, shareSharedServerRoot)...)
 }
 
 // metadataFreeGateSet builds the gates that can be derived without reading
@@ -304,19 +380,26 @@ func metadataFreeGateSet(beadsDir string, extraRoots ...string) ([]workspacegate
 	return gates, nil
 }
 
-// acquireExclusiveWorkspaceGatesForRepair is acquireExclusiveWorkspaceGates for
-// the one caller that is explicitly authorized to REWRITE this workspace's
-// metadata. Gate planning refuses to guess when metadata.json cannot be parsed,
-// which is right for every command that goes on to open a store — but the roots
-// it would have derived are exactly what the repair is about to replace, and
-// refusing there leaves a truncated metadata.json with no in-tool recovery at
-// all: the reinitialize path that the fail-closed checks name as the escape
-// hatch cannot itself run. Fall back to the gates that do not depend on that
-// file (the workspace gate plus the caller's own target root), which still
-// excludes every gated opener of this workspace. Contention, an unbuildable
-// gate file, and every other resolution failure stay hard errors.
-func acquireExclusiveWorkspaceGatesForRepair(ctx context.Context, beadsDir, reason string, extraRoots ...string) (*workspacegate.MultiHandle, error) {
-	handle, err := acquireExclusiveWorkspaceGates(ctx, beadsDir, reason, extraRoots...)
+// acquireInitWorkspaceGates is bd init's acquisition. It differs from
+// acquireExclusiveWorkspaceGates in two ways, both specific to init.
+//
+// First, init is the one caller explicitly authorized to REWRITE this
+// workspace's metadata. Gate planning refuses to guess when metadata.json
+// cannot be parsed, which is right for every command that goes on to open a
+// store — but the roots it would have derived are exactly what the repair is
+// about to replace, and refusing there leaves a truncated metadata.json with no
+// in-tool recovery at all: the reinitialize path that the fail-closed checks
+// name as the escape hatch cannot itself run. Fall back to the gates that do
+// not depend on that file (the workspace gate plus the caller's own target
+// root), which still excludes every gated opener of this workspace. Contention,
+// an unbuildable gate file, and every other resolution failure stay hard errors.
+//
+// Second, it takes the shared-server database root SHARED rather than
+// EXCLUSIVE — see planMaintenanceGateModes for why that is init's scope and not
+// migrate's. The fallback path below applies the same demotion, so a repair
+// init cannot re-acquire machine-wide exclusivity by the back door.
+func acquireInitWorkspaceGates(ctx context.Context, beadsDir, reason string, extraRoots ...string) (*workspacegate.MultiHandle, error) {
+	handle, err := acquireMaintenanceWorkspaceGates(ctx, beadsDir, reason, true, extraRoots...)
 	if err == nil || !errors.Is(err, doltserver.ErrUnresolvableWorkspaceMetadata) {
 		return handle, err
 	}
@@ -330,6 +413,6 @@ func acquireExclusiveWorkspaceGatesForRepair(ctx context.Context, beadsDir, reas
 	if gerr != nil {
 		return nil, gerr
 	}
-	return workspacegate.AcquireAll(ctx, workspacegate.Exclusive,
-		exclusiveGateOptions(reason), gates...)
+	return workspacegate.AcquireMixed(ctx, exclusiveGateOptions(reason),
+		planMaintenanceGateModes(gates, true)...)
 }

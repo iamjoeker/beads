@@ -23,10 +23,11 @@
 //
 //   - a gated operation must never replace or rename the gate file's
 //     parent directory;
-//   - every gate a call path needs is acquired in a single AcquireAll —
-//     never nest a Gate.Acquire inside a held MultiHandle, or acquire
-//     gates one by one in ad-hoc order; the sorted-path total order only
-//     protects callers that go through one AcquireAll.
+//   - every gate a call path needs is acquired in a single AcquireAll (or
+//     AcquireMixed, when the gates need different modes) — never nest a
+//     Gate.Acquire inside a held MultiHandle, or acquire gates one by one
+//     in ad-hoc order; the sorted-path total order only protects callers
+//     that go through one such call.
 //
 // The gate is cooperative. Processes that predate it, or library
 // consumers using the ungated beads.Open, acquire nothing; operations
@@ -129,6 +130,18 @@ type Gate struct {
 // Path returns the gate file location (diagnostics only — never lock this
 // file through other means, and never delete it).
 func (g Gate) Path() string { return g.path }
+
+// SameAs reports whether two gates denote the same gate FILE, using the same
+// equality AcquireAll dedupes and orders by — so callers that need to
+// recognize a particular gate inside a planned set (e.g. "is this the
+// shared-server root?") agree with acquisition rather than string-comparing
+// paths and disagreeing on case-insensitive filesystems.
+func (g Gate) SameAs(other Gate) bool {
+	if g.path == "" || other.path == "" {
+		return false
+	}
+	return gateKey(g.path) == gateKey(other.path)
+}
 
 // gateKey derives the comparison key AcquireAll uses to dedupe and sort
 // gate paths. On case-insensitive-capable filesystems (Windows, macOS
@@ -511,23 +524,61 @@ func (m *MultiHandle) Release() error {
 // lock: callers must call AcquireAll before touching migrate.lock, the
 // init lock, proxy locks, the dolt-server start lock, or schema GET_LOCK,
 // and release it after those.
+//
+// Use AcquireMixed when one call path needs different modes for different
+// gates; this is the uniform-mode wrapper over it.
 func AcquireAll(ctx context.Context, mode Mode, opts Options, gates ...Gate) (*MultiHandle, error) {
+	mixed := make([]GateMode, 0, len(gates))
+	for _, g := range gates {
+		mixed = append(mixed, GateMode{Gate: g, Mode: mode})
+	}
+	return AcquireMixed(ctx, opts, mixed...)
+}
+
+// GateMode pairs a gate with the mode to take it in, for AcquireMixed.
+type GateMode struct {
+	Gate Gate
+	Mode Mode
+}
+
+// AcquireMixed is AcquireAll with a per-gate mode, for the one shape a
+// uniform mode cannot express: an operation that REPLACES one root while
+// merely USING another. bd init is the case — it creates a workspace (its
+// own gate, exclusive) on a shared-server database root that every other
+// workspace on the machine is entitled to keep using (that gate, shared).
+// Claiming the shared root exclusively serializes every init on the box and
+// hard-fails unrelated workspaces' ordinary commands, which acquire shared
+// and non-blocking.
+//
+// It preserves both AcquireAll guarantees. Ordering is by canonical path
+// only, so a mixed acquirer and a uniform one still traverse overlapping
+// gate sets in the same total order and cannot deadlock. Dedupe keeps the
+// STRONGER mode when one gate is listed twice: a caller that names a gate
+// exclusively anywhere in the set gets exclusivity, so collapsing duplicates
+// can never quietly downgrade a hold the caller asked for.
+func AcquireMixed(ctx context.Context, opts Options, gates ...GateMode) (*MultiHandle, error) {
 	// See Acquire: nil contexts are normalized, not dereferenced.
 	if ctx == nil {
 		ctx = context.Background()
 	}
-	uniq := make(map[string]Gate, len(gates))
-	for _, g := range gates {
-		if g.path == "" {
-			return nil, errors.New("workspacegate: zero Gate in AcquireAll")
+	uniq := make(map[string]GateMode, len(gates))
+	for _, gm := range gates {
+		if gm.Gate.path == "" {
+			return nil, errors.New("workspacegate: zero Gate in acquisition set")
 		}
-		uniq[gateKey(g.path)] = g
+		key := gateKey(gm.Gate.path)
+		if prev, ok := uniq[key]; ok && prev.Mode == Exclusive {
+			continue
+		}
+		uniq[key] = gm
 	}
-	ordered := make([]Gate, 0, len(uniq))
-	for _, g := range uniq {
-		ordered = append(ordered, g)
+	ordered := make([]GateMode, 0, len(uniq))
+	for _, gm := range uniq {
+		ordered = append(ordered, gm)
 	}
-	sort.Slice(ordered, func(i, j int) bool { return gateKey(ordered[i].path) < gateKey(ordered[j].path) })
+	sort.Slice(ordered, func(i, j int) bool {
+		return gateKey(ordered[i].Gate.path) < gateKey(ordered[j].Gate.path)
+	})
 
 	perGate := opts
 	if opts.OnWait != nil {
@@ -538,14 +589,14 @@ func AcquireAll(ctx context.Context, mode Mode, opts Options, gates ...Gate) (*M
 	deadline := time.Now().Add(opts.Wait)
 
 	m := &MultiHandle{handles: make([]*Handle, 0, len(ordered))}
-	for _, g := range ordered {
+	for _, gm := range ordered {
 		if opts.Wait > 0 {
 			perGate.Wait = time.Until(deadline)
 			if perGate.Wait < 0 {
 				perGate.Wait = 0
 			}
 		}
-		h, err := g.Acquire(ctx, mode, perGate)
+		h, err := gm.Gate.Acquire(ctx, gm.Mode, perGate)
 		if err != nil {
 			rerr := m.Release()
 			return nil, errors.Join(err, rerr)

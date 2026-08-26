@@ -272,7 +272,7 @@ func ResolvePhysicalRoots(beadsDir string) (PhysicalRoots, error) {
 			// ErrUnresolvableWorkspaceMetadata separates this from every other
 			// resolution failure, so a caller that is authorized to REWRITE
 			// that file can gate what it does know instead of being locked out
-			// of the repair (see acquireExclusiveWorkspaceGatesForRepair).
+			// of the repair (see cmd/bd acquireInitWorkspaceGates).
 			return PhysicalRoots{}, fmt.Errorf("loading config for gate resolution: %w: %w", ErrUnresolvableWorkspaceMetadata, loadErr)
 		}
 		cfg = loaded

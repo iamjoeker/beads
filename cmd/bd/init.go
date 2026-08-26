@@ -1027,13 +1027,16 @@ Non-interactive mode (--non-interactive or BD_NON_INTERACTIVE=1):
 
 		// Workspace operation gate: bd init REPLACES/creates workspace state,
 		// so it holds the workspace gate (plus any resolvable physical-root
-		// gates, e.g. a shared-server dolt dir) EXCLUSIVELY for the rest of
-		// init. init is in noDbCommands, so the PersistentPreRunE chokepoint
-		// never covers it — this is its own acquisition site. The workspace
-		// gate file lives BESIDE .beads (<parent>/.beads.gate.lock), so it
-		// works before .beads exists; the acquisition must come before any
-		// directory writes below, and before acquireEmbeddedLock (lock
-		// ordering: gates rank before every other beads lock).
+		// gates) EXCLUSIVELY for the rest of init — with one exception, the
+		// shared-server dolt dir, which it holds SHARED because that root
+		// belongs to every workspace on the machine rather than this one
+		// (bd-436; see planMaintenanceGateModes). init is in noDbCommands, so
+		// the PersistentPreRunE chokepoint never covers it — this is its own
+		// acquisition site. The workspace gate file lives BESIDE .beads
+		// (<parent>/.beads.gate.lock), so it works before .beads exists; the
+		// acquisition must come before any directory writes below, and before
+		// acquireEmbeddedLock (lock ordering: gates rank before every other
+		// beads lock).
 		initDBPathAbs, err := filepath.Abs(initDBPath)
 		if err != nil {
 			initDBPathAbs = filepath.Clean(initDBPath)
@@ -1051,7 +1054,7 @@ Non-interactive mode (--non-interactive or BD_NON_INTERACTIVE=1):
 		// reinitialization was explicitly requested, because checkExistingBeadsData
 		// above refuses a plain `bd init` on exactly that input. Gate what is
 		// knowable rather than locking init out of the file it is here to rewrite.
-		initGateHandle, gateErr := acquireExclusiveWorkspaceGatesForRepair(rootCtx, beadsDirAbs, "bd init", initDBPathAbs)
+		initGateHandle, gateErr := acquireInitWorkspaceGates(rootCtx, beadsDirAbs, "bd init", initDBPathAbs)
 		if gateErr != nil {
 			return fmt.Errorf("bd init refuses to run over live bd activity on this workspace: %w", gateErr)
 		}
