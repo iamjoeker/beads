@@ -489,13 +489,15 @@ func cycleDetectorTouching(report publicops.CycleReport, ids ...string) [][]stri
 // expectation itself.
 func assertCycleDetectorPath(t *testing.T, cycle publicops.Cycle, edgeOrder ...string) {
 	t.Helper()
-	lowest := 0
+	// The lowest id is carried as a value rather than re-read through
+	// edgeOrder[lowest]: an index the loop computes is one gosec cannot bound,
+	// and it reported that re-read as G602 while accepting the two slice
+	// expressions below. Nothing else changes — an empty edgeOrder still
+	// leaves lowest at 0 and want empty.
+	lowest, lowestID := 0, ""
 	for i, id := range edgeOrder {
-		//nolint:gosec // G602: lowest starts at 0 and is only ever assigned i,
-		// an index of edgeOrder itself, so it indexes edgeOrder in bounds. The
-		// empty-slice case never evaluates this — the loop body does not run.
-		if id < edgeOrder[lowest] {
-			lowest = i
+		if i == 0 || id < lowestID {
+			lowest, lowestID = i, id
 		}
 	}
 	want := append(append([]string{}, edgeOrder[lowest:]...), edgeOrder[:lowest]...)
