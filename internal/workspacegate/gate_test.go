@@ -14,6 +14,8 @@ import (
 	"strings"
 	"testing"
 	"time"
+
+	"github.com/steveyegge/beads/internal/testenv"
 )
 
 // TestMain doubles as the cross-process helper: when WORKSPACEGATE_HELPER
@@ -21,6 +23,10 @@ import (
 // runner. This keeps the cross-process tests self-contained in the normal
 // `go test` binary with no fixture binaries to build.
 func TestMain(m *testing.M) {
+	// First statement in TestMain: point every Dolt port variable at a dead
+	// port before anything in this package can resolve one. Helpers that
+	// start a server publish their own port and must run after this.
+	testenv.GuardProductionDolt()
 	if os.Getenv("WORKSPACEGATE_HELPER") != "" {
 		helperMain()
 		return

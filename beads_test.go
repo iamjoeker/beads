@@ -11,6 +11,7 @@ import (
 	"time"
 
 	"github.com/steveyegge/beads"
+	"github.com/steveyegge/beads/internal/testenv"
 	"github.com/steveyegge/beads/internal/testutil"
 )
 
@@ -18,6 +19,10 @@ import (
 var testServerPort int
 
 func TestMain(m *testing.M) {
+	// First statement in TestMain: point every Dolt port variable at a dead
+	// port before anything in this package can resolve one. Helpers that
+	// start a server publish their own port and must run after this.
+	testenv.GuardProductionDolt()
 	os.Exit(testMainInner(m))
 }
 

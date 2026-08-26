@@ -16,6 +16,7 @@ import (
 
 	"github.com/steveyegge/beads/internal/storage"
 	"github.com/steveyegge/beads/internal/storage/embeddeddolt"
+	"github.com/steveyegge/beads/internal/testenv"
 	"github.com/steveyegge/beads/internal/types"
 )
 
@@ -42,6 +43,10 @@ type pristineEmbeddedDoltFixture struct {
 }
 
 func TestMain(m *testing.M) {
+	// First statement in TestMain: point every Dolt port variable at a dead
+	// port before anything in this package can resolve one. Helpers that
+	// start a server publish their own port and must run after this.
+	testenv.GuardProductionDolt()
 	root, err := os.MkdirTemp("", "embeddeddolt-test-fixtures-")
 	if err != nil {
 		fmt.Fprintln(os.Stderr, "create embedded Dolt test fixture root:", err)
