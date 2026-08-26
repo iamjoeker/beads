@@ -29,6 +29,7 @@ func TestCountIncludeInfraFlagShape(t *testing.T) {
 		t.Fatalf("--include-infra must default to false, got %q", flag.DefValue)
 	}
 
+	initConfigWithExcludeLabels(t, "", "")
 	request, _, err := parseCountRequest(newCountFlagSet(t))
 	if err != nil {
 		t.Fatalf("parseCountRequest with no flags set: %v", err)
@@ -43,6 +44,11 @@ func TestCountIncludeInfraFlagShape(t *testing.T) {
 // Every filter flag is set to a value distinguishable from its zero and read
 // back off the request.
 func TestParseCountRequestCarriesEveryFilterFlag(t *testing.T) {
+	// parseCountRequest resolves --exclude-label against the workspace's
+	// list.exclude-labels, so the key is pinned UNSET here: an ambient value or
+	// this repository's own .beads/config.yaml would otherwise be unioned into
+	// the expectation below and the case would be measuring the machine.
+	initConfigWithExcludeLabels(t, "", "")
 	flags := newCountFlagSet(t)
 	for flag, value := range map[string]string{
 		"status":            "closed",
@@ -50,6 +56,7 @@ func TestParseCountRequestCarriesEveryFilterFlag(t *testing.T) {
 		"type":              "bug",
 		"label":             "alpha,beta",
 		"label-any":         "gamma",
+		"exclude-label":     "delta",
 		"title":             "needle",
 		"id":                "bd-1,bd-2",
 		"title-contains":    "tc",
@@ -102,6 +109,7 @@ func TestParseCountRequestCarriesEveryFilterFlag(t *testing.T) {
 		PriorityMax:   &max,
 		Labels:        []string{"alpha", "beta"},
 		LabelsAny:     []string{"gamma"},
+		ExcludeLabels: []string{"delta"},
 		TitleSearch:   "needle",
 		IDFilter:      "bd-1,bd-2",
 		TitleContains: "tc",
@@ -169,6 +177,72 @@ func TestParseCountRequestRejectsAnUnparseableDate(t *testing.T) {
 	if _, _, err := parseCountRequest(flags); err == nil {
 		t.Fatal("an unparseable --created-after was accepted, want a refusal")
 	}
+}
+
+// TestParseCountRequestAppliesTheConfiguredExclusions is bd-1v3's symptom
+// asserted directly: on a store that sets list.exclude-labels, the number
+// `bd count` returns must describe the same set `bd list` shows rows for.
+//
+// The three sub-cases are the three states the pairing has to get right, and
+// the FIRST is the one that protects everyone else — a workspace that does not
+// set the key must see no change at all.
+func TestParseCountRequestAppliesTheConfiguredExclusions(t *testing.T) {
+	// Not parallel: config is process-global viper state, as the sibling cases
+	// in list_exclude_labels_test.go note.
+	t.Run("unset key changes nothing", func(t *testing.T) {
+		initConfigWithExcludeLabels(t, "", "")
+		var request issueops.CountRequest
+		captureStderrLines(t, func() {
+			var err error
+			request, _, err = parseCountRequest(newCountFlagSet(t))
+			if err != nil {
+				t.Errorf("parseCountRequest: %v", err)
+			}
+		})
+		// EMPTY, not nil: resolveExcludeLabels returns NormalizeLabels' own
+		// slice, which is allocated and empty for an unset key. What matters is
+		// that it contributes no exclusion — BuildCountFilter tests len — and
+		// an empty slice is what `bd list` has always carried here too.
+		if len(request.ExcludeLabels) != 0 {
+			t.Errorf("ExcludeLabels = %v, want none on an unconfigured store", request.ExcludeLabels)
+		}
+	})
+
+	t.Run("configured key reaches the request", func(t *testing.T) {
+		initConfigWithExcludeLabels(t, "BD_LIST_EXCLUDE_LABELS", "gt:message")
+		var request issueops.CountRequest
+		captureStderrLines(t, func() {
+			var err error
+			request, _, err = parseCountRequest(newCountFlagSet(t))
+			if err != nil {
+				t.Errorf("parseCountRequest: %v", err)
+			}
+		})
+		if want := []string{"gt:message"}; !reflect.DeepEqual(request.ExcludeLabels, want) {
+			t.Errorf("ExcludeLabels = %v, want %v — the count still answers about the unfiltered set",
+				request.ExcludeLabels, want)
+		}
+	})
+
+	t.Run("include-hidden drops it", func(t *testing.T) {
+		initConfigWithExcludeLabels(t, "BD_LIST_EXCLUDE_LABELS", "gt:message")
+		flags := newCountFlagSet(t)
+		if err := flags.Flags().Set(includeHiddenFlag, "true"); err != nil {
+			t.Fatalf("set --%s: %v", includeHiddenFlag, err)
+		}
+		var request issueops.CountRequest
+		captureStderrLines(t, func() {
+			var err error
+			request, _, err = parseCountRequest(flags)
+			if err != nil {
+				t.Errorf("parseCountRequest: %v", err)
+			}
+		})
+		if len(request.ExcludeLabels) != 0 {
+			t.Errorf("ExcludeLabels = %v, want none: --%s is the opt-out that makes the default safe",
+				request.ExcludeLabels, includeHiddenFlag)
+		}
+	})
 }
 
 // newCountFlagSet returns a command carrying `bd count`'s flags at their

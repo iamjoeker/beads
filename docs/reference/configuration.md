@@ -137,7 +137,7 @@ Any key whose name contains `api_key`, `api-key`, `secret`, `token`, or `passwor
 | `routing.maintainer` | — | — | `.` | Maintainer-routed path |
 | `routing.contributor` | — | — | `~/.beads-planning` | Contributor-routed path |
 | `list.limit` | `--limit` / `-n` | `BD_LIST_LIMIT` | `50` | Default limit for `bd list` results |
-| `list.exclude-labels` | `--include-hidden` (turns it off) | `BD_LIST_EXCLUDE_LABELS` | (none) | Labels hidden from `bd list`, `bd ready` and `bd blocked` (see [below](#hiding-labeled-beads-from-the-work-queue)) |
+| `list.exclude-labels` | `--include-hidden` (turns it off) | `BD_LIST_EXCLUDE_LABELS` | (none) | Labels hidden from `bd list`, `bd ready`, `bd blocked`, `bd stale` and `bd count` (see [below](#hiding-labeled-beads-from-the-work-queue)) |
 | `directory.labels` | — | — | `{}` | Map directory patterns → labels for monorepos |
 | `external_projects` | — | — | `{}` | Map project names → paths for cross-project deps |
 | `federation.remote` | — | `BD_FEDERATION_REMOTE` | (none) | Dolt remote URL (`dolthub://`, `gs://`, `s3://`, `az://`, `file://`) |
@@ -176,13 +176,13 @@ Routing note: `output.title-length` and `agents.file` are functionally tool-leve
 
 Some workspaces store records that are not work in the same graph as work — agent mail, for instance, is kept as an ordinary bead so it survives the sending session. Those records then fill the listings that are supposed to show a work queue, and its size stops meaning anything.
 
-`list.exclude-labels` names the labels `bd list`, `bd ready` and `bd blocked` leave out:
+`list.exclude-labels` names the labels the work-queue commands leave out — `bd list`, `bd ready`, `bd blocked`, `bd stale` and `bd count`:
 
 ```bash
 bd config set list.exclude-labels "gt:message"
 ```
 
-Unset — the default — nothing is hidden and the three commands behave exactly as before.
+Unset — the default — nothing is hidden and those commands behave exactly as before.
 
 ```console
 $ bd list --status open
@@ -195,12 +195,13 @@ Every affected command prints that line on stderr, so `--json` output stays pars
 ```bash
 bd list --include-hidden        # everything, including the hidden labels
 bd ready --include-hidden
+bd count --include-hidden
 ```
 
-The exclusion covers what those commands *do*, not only what they print: `bd ready --claim` will not claim a hidden bead. `--exclude-label` adds to the configured set rather than replacing it, so narrowing a listing by hand never brings the hidden rows back.
+The exclusion covers what those commands *do*, not only what they print: `bd ready --claim` will not claim a hidden bead, and `bd count` returns the size of the set `bd list` shows rows for rather than a larger number. `--exclude-label` adds to the configured set rather than replacing it, so narrowing a listing by hand never brings the hidden rows back.
 
 <Note>
-`bd count` is not affected — it has no `--exclude-label` of its own, so a store that sets this key will see `bd count` return a larger number than `bd list` shows rows.
+`bd reclaim` is deliberately *not* covered, even though it takes `--exclude-label`. It mutates: a configured default that silently changed which leases a sweep reverts is a different proposition from one that changes what a listing shows. Pass `--exclude-label` explicitly there.
 </Note>
 
 <Warning>

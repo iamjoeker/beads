@@ -194,6 +194,7 @@ var roleContractCases = []roleContract{
 		RunCounterTypeBucketsAreTheRawTypeNames,
 		RunCounterRefusesAnUnknownGroup,
 		RunCounterNormalizesLabelsAndLeavesTheRequestAlone,
+		RunCounterExcludeLabelsRemovesLabeledRows,
 		RunCounterWritesNothing,
 	),
 

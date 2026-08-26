@@ -195,6 +195,18 @@ func countFilters(q *query) issueops.CountRequest {
 
 		Labels:    q.list("label"),
 		LabelsAny: q.list("label_any"),
+		// Published for the reason TestEveryCountRequestFieldIsPublished
+		// states: a role filter the wire cannot ask for makes an HTTP-backed
+		// store narrower than the native one, and on THIS operation it is also
+		// how a count stops describing the set a listing shows.
+		//
+		// WHAT IS NOT FORWARDED IS THE CLI'S CONFIGURED DEFAULT. `bd count`
+		// layers list.exclude-labels under the caller's values before the
+		// request is built; this handler layers nothing. A server applying its
+		// own workspace's configuration would be a hidden filter no client
+		// asked for and none could see — the opt-out `bd count` gets from
+		// --include-hidden has no counterpart over the wire (bd-1v3).
+		ExcludeLabels: q.list("exclude_label"),
 
 		TitleSearch: q.str("title"),
 		// A COMMA-SEPARATED string, handed over as written: the role splits,

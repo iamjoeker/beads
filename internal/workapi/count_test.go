@@ -18,6 +18,14 @@ import (
 // ephemeral tier (Ephemeral).
 func TestBuildCountFilterIncludeInfraMirrorsListFilter(t *testing.T) {
 	cfg := ListConfig{}
+	// The exclusion travels on BOTH requests, because that is the shape in
+	// which the parity is at risk: `bd list` layers the workspace's
+	// list.exclude-labels default under the caller's values, and until bd-1v3
+	// `bd count` had no field to receive it. A count that dropped the exclusion
+	// would answer about a strictly larger set than the listing it is pinned to
+	// — and would do so only on a store that sets the key, which is why the
+	// contract held while conformance ran with it unset.
+	excluded := []string{"gt:message"}
 	for _, issueType := range []string{"", "task", "gate", "message"} {
 		name := issueType
 		if name == "" {
@@ -26,15 +34,21 @@ func TestBuildCountFilterIncludeInfraMirrorsListFilter(t *testing.T) {
 		t.Run("type_"+name, func(t *testing.T) {
 			want, err := BuildListFilter(issueops.ListRequest{
 				AllFlag: true, IncludeInfra: true, IssueType: issueType,
+				ExcludeLabels: excluded,
 			}, cfg)
 			if err != nil {
 				t.Fatalf("BuildListFilter(%q): %v", issueType, err)
 			}
 			got, err := BuildCountFilter(issueops.CountRequest{
 				IncludeInfra: true, IssueType: issueType,
+				ExcludeLabels: excluded,
 			}, cfg)
 			if err != nil {
 				t.Fatalf("BuildCountFilter(%q): %v", issueType, err)
+			}
+
+			if !reflect.DeepEqual(got.ExcludeLabels, want.ExcludeLabels) {
+				t.Errorf("ExcludeLabels = %v, list --include-infra --all uses %v", got.ExcludeLabels, want.ExcludeLabels)
 			}
 
 			if got.SkipWisps != want.SkipWisps {
@@ -134,12 +148,15 @@ func TestBuildCountFilterDefaultsToTheDurablePlane(t *testing.T) {
 func TestBuildCountFilterNormalizesLabelsAndIDs(t *testing.T) {
 	labels := []string{" alpha ", "alpha", "", "beta"}
 	labelsAny := []string{"  ", ""}
+	excludeLabels := []string{" gt:message ", "gt:message", ""}
 	snapshot := append([]string(nil), labels...)
+	excludeSnapshot := append([]string(nil), excludeLabels...)
 
 	got, err := BuildCountFilter(issueops.CountRequest{
-		Labels:    labels,
-		LabelsAny: labelsAny,
-		IDFilter:  " bd-1 , bd-2 ,, bd-1 ",
+		Labels:        labels,
+		LabelsAny:     labelsAny,
+		ExcludeLabels: excludeLabels,
+		IDFilter:      " bd-1 , bd-2 ,, bd-1 ",
 	}, ListConfig{})
 	if err != nil {
 		t.Fatalf("BuildCountFilter: %v", err)
@@ -149,6 +166,12 @@ func TestBuildCountFilterNormalizesLabelsAndIDs(t *testing.T) {
 	}
 	if got.LabelsAny != nil {
 		t.Errorf("LabelsAny = %v, want nil: a slice of blanks is the same as an unset one", got.LabelsAny)
+	}
+	if want := []string{"gt:message"}; !reflect.DeepEqual(got.ExcludeLabels, want) {
+		t.Errorf("ExcludeLabels = %v, want %v", got.ExcludeLabels, want)
+	}
+	if !reflect.DeepEqual(excludeLabels, excludeSnapshot) {
+		t.Errorf("the caller's ExcludeLabels became %v, want them left as %v", excludeLabels, excludeSnapshot)
 	}
 	if want := []string{"bd-1", "bd-2"}; !reflect.DeepEqual(got.IDs, want) {
 		t.Errorf("IDs = %v, want %v", got.IDs, want)

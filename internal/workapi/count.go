@@ -90,6 +90,14 @@ func BuildCountFilter(in issueops.CountRequest, cfg ListConfig) (types.IssueFilt
 	if labelsAny := utils.NormalizeLabels(in.LabelsAny); len(labelsAny) > 0 {
 		filter.LabelsAny = labelsAny
 	}
+	// The exclusion is what makes a count answerable about the set a listing
+	// shows (bd-1v3). BuildListFilter takes ExcludeLabels already normalized —
+	// its front doors normalize before calling — while everything else in this
+	// builder normalizes here, so this one is normalized on the way in and the
+	// two still put the same slice on the filter.
+	if excludeLabels := utils.NormalizeLabels(in.ExcludeLabels); len(excludeLabels) > 0 {
+		filter.ExcludeLabels = excludeLabels
+	}
 	if ids := utils.NormalizeLabels(strings.Split(in.IDFilter, ",")); len(ids) > 0 {
 		filter.IDs = ids
 	}

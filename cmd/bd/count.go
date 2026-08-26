@@ -30,6 +30,8 @@ Examples:
   bd count --by-assignee            # Group count by assignee
   bd count --by-label               # Group count by label
   bd count --assignee alice --by-status  # Count alice's issues by status
+  bd count --exclude-label gt:message    # Count everything except those labels
+  bd count --include-hidden         # Count without the list.exclude-labels default
   bd count --include-infra          # Count issues + wisps tier (matches 'bd list --include-infra --all' cardinality)
 `,
 	SilenceUsage:  true,
@@ -88,6 +90,13 @@ func parseCountRequest(cmd *cobra.Command) (issueops.CountRequest, issueops.Coun
 	noAssignee, _ := cmd.Flags().GetBool("no-assignee")
 	noLabels, _ := cmd.Flags().GetBool("no-labels")
 	includeInfra, _ := cmd.Flags().GetBool("include-infra")
+	rawExcludeLabels, _ := cmd.Flags().GetStringSlice("exclude-label")
+	// Layers the workspace's configured exclusions under whatever the caller
+	// typed (list_exclude_labels.go), which is the whole point of the flag
+	// above: `bd count` and `bd list` now answer about the same set on a store
+	// that sets list.exclude-labels, and --include-hidden turns both back off.
+	// It also emits the notice, to stderr, so `bd count --json` stays a number.
+	excludeLabels := resolveExcludeLabels(cmd, rawExcludeLabels)
 
 	request := issueops.CountRequest{
 		Status:        status,
@@ -95,6 +104,7 @@ func parseCountRequest(cmd *cobra.Command) (issueops.CountRequest, issueops.Coun
 		Assignee:      assignee,
 		Labels:        labels,
 		LabelsAny:     labelsAny,
+		ExcludeLabels: excludeLabels,
 		TitleSearch:   titleSearch,
 		IDFilter:      idFilter,
 		TitleContains: titleContains,
@@ -242,6 +252,13 @@ func registerCountFlags(cmd *cobra.Command) {
 	cmd.Flags().StringP("type", "t", "", "Filter by type (bug, feature, task, epic, chore, decision, merge-request, molecule, gate)")
 	cmd.Flags().StringSliceP("label", "l", []string{}, "Filter by labels (AND: must have ALL)")
 	cmd.Flags().StringSlice("label-any", []string{}, "Filter by labels (OR: must have AT LEAST ONE)")
+	// --exclude-label and its --include-hidden counterpart are what let this
+	// count answer about the set `bd list` shows. Registered as a PAIR, here
+	// rather than beside the grouping flags, because resolveExcludeLabels reads
+	// --include-hidden off the same command: registering one without the other
+	// is a flag the command accepts and ignores (bd-1v3).
+	cmd.Flags().StringSlice("exclude-label", []string{}, "Exclude issues that have ANY of these labels")
+	registerIncludeHiddenFlag(cmd)
 	cmd.Flags().String("title", "", "Filter by title text (case-insensitive substring match)")
 	cmd.Flags().String("id", "", "Filter by specific issue IDs (comma-separated)")
 

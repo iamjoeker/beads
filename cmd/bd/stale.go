@@ -41,7 +41,11 @@ This helps identify:
 		rawExcludeLabels, _ := cmd.Flags().GetStringSlice("exclude-label")
 		labels := utils.NormalizeLabels(rawLabels)
 		labelsAny := utils.NormalizeLabels(rawLabelsAny)
-		excludeLabels := utils.NormalizeLabels(rawExcludeLabels)
+		// resolveExcludeLabels normalizes as well, and layers the workspace's
+		// configured exclusions underneath: a stale sweep is a listing, and it
+		// takes the flag already, which is the whole test for whether the
+		// default applies here (list_exclude_labels.go, bd-1v3).
+		excludeLabels := resolveExcludeLabels(cmd, rawExcludeLabels)
 		if days < 1 {
 			return HandleErrorRespectJSON("--days must be at least 1")
 		}
@@ -104,6 +108,7 @@ func init() {
 	staleCmd.Flags().StringSliceP("label", "l", []string{}, "Filter by labels (AND: must have ALL). Can combine with --label-any")
 	staleCmd.Flags().StringSlice("label-any", []string{}, "Filter by labels (OR: must have AT LEAST ONE). Can combine with --label")
 	staleCmd.Flags().StringSlice("exclude-label", []string{}, "Exclude issues that have ANY of these labels")
+	registerIncludeHiddenFlag(staleCmd)
 	// Note: --json flag is defined as a persistent flag in main.go, not here
 	rootCmd.AddCommand(staleCmd)
 }

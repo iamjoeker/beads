@@ -73,11 +73,28 @@ type CountRequest struct {
 	PriorityMin *int
 	PriorityMax *int
 
-	// Labels must ALL be present; LabelsAny requires at least one. Both are
-	// raw: entries are trimmed and de-duplicated INSIDE, and a slice whose
-	// entries are all blank is the same as an unset one.
-	Labels    []string
-	LabelsAny []string
+	// Labels must ALL be present; LabelsAny requires at least one;
+	// ExcludeLabels must ALL be absent. All three are raw: entries are trimmed
+	// and de-duplicated INSIDE, and a slice whose entries are all blank is the
+	// same as an unset one.
+	//
+	// ExcludeLabels is the field that lets a count answer for the same set a
+	// listing shows. `bd list`, `bd ready` and `bd blocked` layer the
+	// workspace's list.exclude-labels configuration under whatever the caller
+	// typed, so on a store that keeps non-work records as ordinary labeled
+	// beads their default listing is a listing of work. A count with no way to
+	// express the exclusion returned a LARGER number than the listing showed
+	// rows — the queue size and the queue listing disagreeing about the same
+	// queue (bd-1v3).
+	//
+	// The configured default is applied by the FRONT DOOR, not here: this field
+	// carries the exclusions the caller resolved, and a request that sets none
+	// excludes none. The role must stay the same predicate for every caller,
+	// and the HTTP surface in particular must not acquire a hidden filter from
+	// the server's own workspace configuration.
+	Labels        []string
+	LabelsAny     []string
+	ExcludeLabels []string
 
 	// TitleSearch is a case-insensitive substring match on the title.
 	TitleSearch string
