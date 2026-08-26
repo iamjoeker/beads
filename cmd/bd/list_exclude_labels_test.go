@@ -230,9 +230,14 @@ func TestExcludeLabelsNoticeLine(t *testing.T) {
 // TestIncludeHiddenFlagRegisteredOnEveryApplyingCommand checks the pairing that
 // makes the default safe: every command that hides rows offers the flag that
 // shows them again. Both halves are asserted from the same list, so adding the
-// default to a fourth command without its opt-out fails here.
+// default to a further command without its opt-out fails here.
+//
+// countCmd and staleCmd joined the list in bd-1v3. countCmd is the one worth
+// naming: it did not carry --exclude-label at all, which is why the default
+// could not be applied to it, and why its number and `bd list`'s row count
+// disagreed on any store that set the key.
 func TestIncludeHiddenFlagRegisteredOnEveryApplyingCommand(t *testing.T) {
-	for _, cmd := range []*cobra.Command{listCmd, readyCmd, blockedCmd} {
+	for _, cmd := range []*cobra.Command{listCmd, readyCmd, blockedCmd, countCmd, staleCmd} {
 		t.Run(cmd.Name(), func(t *testing.T) {
 			if cmd.Flags().Lookup("exclude-label") == nil {
 				t.Fatalf("bd %s applies the configured exclusions but has no --exclude-label", cmd.Name())

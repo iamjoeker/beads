@@ -74,6 +74,29 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Changed
 
+- **`bd count` takes `--exclude-label`, and honors `list.exclude-labels`**
+  (bd-1v3). The configured exclusions made a default listing a listing of work
+  on a store that keeps non-work records as ordinary labeled beads, but the
+  count was left out because it had no flag to override them with — so the
+  queue's SIZE and the queue's LISTING disagreed about the same queue, the
+  count always reporting the larger number. `bd count` now takes
+  `--exclude-label` and `--include-hidden` like the listings do, which is what
+  made applying the default there safe.
+  **The parity this restores is a pinned contract**, not a nicety:
+  `bd count --include-infra <filters>` is required to equal the row count of
+  `bd list --include-infra --all <filters>`, and that held only while nobody
+  set the key. `bd stale` is covered too. `bd reclaim` is deliberately not: it
+  MUTATES, and a configured default that silently changed which leases a sweep
+  reverts is a different proposition from one that changes what a listing shows.
+  **Scripted callers on a store that sets the key will read a smaller number**
+  than they did before — the number the listing beside it has always shown.
+  `--include-hidden` restores the old answer.
+  `GET /v0/beads/issues:count` publishes the filter as `exclude_label`, so an
+  HTTP-backed store can ask the question the native one can. The server applies
+  no default of its own: it excludes exactly what the request names, because a
+  server layering its own workspace's configuration onto a client's count would
+  be a filter that client can neither see nor turn off.
+
 - **`CanonicalActor` no longer folds an interior `/` into the generic
   separator run** (bd-uzt). Merging upstream brought ga-2vy9p2, which decodes
   an exact two-byte `--` run to a literal `/` — gascity's session-name

@@ -99,6 +99,7 @@ func TestCountForwardsEveryDocumentedParameter(t *testing.T) {
 		"priority_max":      {"3"},
 		"label":             {"backend", "urgent"},
 		"label_any":         {"triage"},
+		"exclude_label":     {"gt:message"},
 		"title":             {"flake"},
 		"id":                {"bd-1,bd-2"},
 		"title_contains":    {"retry"},
@@ -142,6 +143,10 @@ func TestCountForwardsEveryDocumentedParameter(t *testing.T) {
 
 		Labels:    []string{"backend", "urgent"},
 		LabelsAny: []string{"triage"},
+		// Forwarded and nothing added to it: the handler layers no configured
+		// exclusion of its own, so what the role receives is what the query
+		// named (bd-1v3).
+		ExcludeLabels: []string{"gt:message"},
 
 		TitleSearch: "flake",
 		// AS WRITTEN, not pre-split: the role owns what an id set means.
@@ -569,7 +574,7 @@ func TestCountGroupEnumMatchesTheRolesVocabulary(t *testing.T) {
 // The other two are already mechanical: TestCountParametersMatchTheHandler ties
 // the parameter names to the DOCUMENT, and TestCountForwardsEveryDocumentedParameter
 // ties each parameter's VALUE to the field it lands in. Neither can see a role
-// field that no parameter reaches — a 24th filter added to CountRequest and left
+// field that no parameter reaches — a 25th filter added to CountRequest and left
 // unpublished turns nothing red, and the wire silently stops being able to ask
 // a question the role can answer. That is the failure this map closes, and it is
 // the one that matters for an HTTP-backed store: it is how the wire becomes
@@ -586,6 +591,7 @@ var countFieldForParameter = map[string]string{
 	"priority_max":      "PriorityMax",
 	"label":             "Labels",
 	"label_any":         "LabelsAny",
+	"exclude_label":     "ExcludeLabels",
 	"title":             "TitleSearch",
 	"id":                "IDFilter",
 	"title_contains":    "TitleContains",
@@ -603,8 +609,8 @@ var countFieldForParameter = map[string]string{
 	"include_infra":     "IncludeInfra",
 }
 
-// TestEveryCountRequestFieldIsPublished: the role publishes 23 filters and the
-// wire publishes all 23. A field added to issueops.CountRequest fails here and
+// TestEveryCountRequestFieldIsPublished: the role publishes 24 filters and the
+// wire publishes all 24. A field added to issueops.CountRequest fails here and
 // NAMES itself, so the choice is made deliberately — publish it, or record why
 // it is withheld — rather than by nobody noticing.
 //

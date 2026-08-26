@@ -490,6 +490,43 @@ func RunCounterNormalizesLabelsAndLeavesTheRequestAlone(t *testing.T, ctx contex
 	}
 }
 
+// RunCounterExcludeLabelsRemovesLabeledRows pins the EXECUTION half of
+// CountRequest.ExcludeLabels: every backend must actually drop the labeled rows
+// rather than build a filter that carries the exclusion and counts them anyway.
+//
+// Filter construction is shared and pinned above this layer
+// (internal/workapi/count_test.go), so what these three wirings can disagree
+// about is whether the label predicate is evaluated at all on the plane each of
+// them counts. That is not hypothetical for an exclusion: a label join written
+// as an inner join drops the UNLABELED rows too, and the failure looks like a
+// count that is merely smaller rather than one that is wrong. Both directions
+// are asserted here — the labeled row leaves and the unlabeled row stays.
+//
+// The A/B is on one flag over one seeded pair, like the plane cases above, so a
+// backend that ignored the field entirely reports 2 where the contract says 1.
+func RunCounterExcludeLabelsRemovesLabeledRows(t *testing.T, ctx context.Context, fixture CounterFixture) {
+	t.Helper()
+	plain := fixture.IssuePrefix + "-exclude-plain"
+	tagged := fixture.IssuePrefix + "-exclude-tagged"
+	label := fixture.IssuePrefix + "-hidden"
+	seedCounterIssue(t, ctx, fixture, counterSeed(plain))
+	taggedSeed := counterSeed(tagged)
+	taggedSeed.Labels = []string{label}
+	seedCounterIssue(t, ctx, fixture, taggedSeed)
+
+	scope := counterScope(plain, tagged)
+	assertCounterTotal(t, ctx, fixture, scope, 2)
+
+	scope.ExcludeLabels = []string{label}
+	assertCounterTotal(t, ctx, fixture, scope, 1)
+
+	// The unlabeled row is still counted, which is the half an inner-join
+	// mistake takes away: excluding a label a row does not carry must not
+	// exclude the row.
+	scope.ExcludeLabels = []string{fixture.IssuePrefix + "-no-such-label"}
+	assertCounterTotal(t, ctx, fixture, scope, 2)
+}
+
 // RunCounterWritesNothing pins counter.go:223-226: counting is a read. Nothing
 // records a history entry, and a refused count does not either.
 //

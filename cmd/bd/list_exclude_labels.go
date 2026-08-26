@@ -24,21 +24,24 @@ import (
 // the point of use: the labels are named in a notice on every affected
 // invocation, and --include-hidden turns it off for one command.
 //
-// WHY THESE THREE COMMANDS AND NO OTHERS. The default is applied exactly where
+// WHY THESE COMMANDS AND NOT `bd reclaim`. The default is applied exactly where
 // the flag it defaults already exists, so it can always be overridden by the
-// caller and never silently narrows a query that had no way to widen it back:
+// caller and never silently narrows a query that had no way to widen it back.
+// That rule now reaches five commands: the three listings above, `bd stale`,
+// and `bd count`.
 //
-//   - `bd count` has no --exclude-label at all. Honoring the key there would
-//     produce a hidden count with no opt-out; the flag has to come first
-//     (bd-1v3, which also records what the count/list parity contract in
-//     backend/conformance/counter_contract.go needs from that change).
-//   - `bd stale` and `bd reclaim` take the flag, but reclaim MUTATES — a
-//     configured default that silently changes which leases a sweep reverts is
-//     a different and worse proposition than one that changes what a listing
-//     shows.
+// `bd count` was the exception and is no longer one. It had no --exclude-label
+// at all, so honoring the key there would have produced a hidden count with no
+// opt-out — and until the flag existed, `bd count` and `bd list` answered about
+// DIFFERENT SETS on any store that set the key, the count returning the larger
+// number. bd-1v3 added the flag through the role (issueops.CountRequest carries
+// ExcludeLabels, and workapi.BuildCountFilter maps it for every backend) and
+// applied the default here, which is what keeps the count/list cardinality
+// parity of GH#4387 true rather than true-only-while-nobody-sets-the-key.
 //
-// So `bd count` and `bd list` can disagree on a store that sets the key. That
-// is a real asymmetry, stated here rather than discovered.
+// `bd reclaim` takes the flag and stays uncovered, because it MUTATES: a
+// configured default that silently changes which leases a sweep reverts is a
+// different and worse proposition than one that changes what a listing shows.
 
 // includeHiddenFlag is the counterpart flag: one flag away from the unfiltered
 // listing, on every command that applies the default.

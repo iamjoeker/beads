@@ -65,6 +65,9 @@ func TestCounterContract(t *testing.T) {
 	t.Run("NormalizesLabelsAndLeavesTheRequestAlone", func(t *testing.T) {
 		conformance.RunCounterNormalizesLabelsAndLeavesTheRequestAlone(t, ctx, fixture)
 	})
+	t.Run("ExcludeLabelsRemovesLabeledRows", func(t *testing.T) {
+		conformance.RunCounterExcludeLabelsRemovesLabeledRows(t, ctx, fixture)
+	})
 	t.Run("WritesNothing", func(t *testing.T) {
 		conformance.RunCounterWritesNothing(t, ctx, fixture)
 	})
