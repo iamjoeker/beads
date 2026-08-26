@@ -286,6 +286,44 @@ func TestProductionDoltPortMatchesProductionConstants(t *testing.T) {
 	}
 }
 
+// TestGuardedVarsCoverTheResolverVars pins the guard's list to
+// configfile.DoltPortEnvVars, the list the production resolver actually reads.
+//
+// The guard cannot import configfile — configfile's own TestMain calls the
+// guard, and an in-package test file importing a package that imports the
+// package under test is an import cycle. So the relationship is stated here
+// instead: every variable the resolver reads must be guarded, in the same
+// relative order, and the guard may hold extra entries (GT_DOLT_PORT) that no
+// beads code reads. A variable added to the resolver and not to the guard is a
+// new path to the production default with nothing in front of it.
+func TestGuardedVarsCoverTheResolverVars(t *testing.T) {
+	resolver := configfile.DoltPortEnvVars
+	if len(resolver) == 0 {
+		t.Fatal("configfile.DoltPortEnvVars is empty: the comparison would pass vacuously")
+	}
+	guard := testenv.DoltPortEnvVars()
+
+	positions := map[string]int{}
+	for i, name := range guard {
+		positions[name] = i
+	}
+
+	prev := -1
+	for _, name := range resolver {
+		at, ok := positions[name]
+		if !ok {
+			t.Errorf("%s is read by configfile.DoltPortEnvVars but not guarded: it is a path to the %d default with nothing in front of it",
+				name, testenv.ProductionDoltPort)
+			continue
+		}
+		if at <= prev {
+			t.Errorf("%s is guarded at position %d, out of resolution order relative to the previous resolver variable at %d: "+
+				"the guard's order documents the precedence and must match", name, at, prev)
+		}
+		prev = at
+	}
+}
+
 // TestGuardedDoltPortIsNotProduction is the one-line invariant that makes
 // every other test in this file meaningful.
 func TestGuardedDoltPortIsNotProduction(t *testing.T) {
@@ -303,6 +341,17 @@ func repoRoot(t *testing.T) string {
 	return filepath.Join(filepath.Dir(filename), "..", "..")
 }
 
+// gtDoltPortReads are the only ways Go code can read an environment variable.
+// The check is for READS specifically: internal/testutil legitimately WRITES
+// GT_DOLT_PORT when it publishes a container's port, and a bare substring
+// search counts that as a violation of a claim it does not contradict. Naming
+// the read forms is what makes the probe's predicate the same sentence as the
+// question.
+var gtDoltPortReads = []string{
+	`Getenv("GT_DOLT_PORT")`,
+	`LookupEnv("GT_DOLT_PORT")`,
+}
+
 // TestNoBeadsCodeReadsGTDoltPort backs the claim in doltPortEnvVars' comment
 // that GT_DOLT_PORT is guarded for subprocesses only. If beads production code
 // ever starts reading it, that comment becomes wrong and the variable has to
@@ -313,7 +362,7 @@ func repoRoot(t *testing.T) string {
 func TestNoBeadsCodeReadsGTDoltPort(t *testing.T) {
 	root := repoRoot(t)
 	var hits []string
-	scanned := 0
+	scanned, control := 0, 0
 
 	err := filepath.WalkDir(root, func(path string, d fs.DirEntry, err error) error {
 		if err != nil {
@@ -329,18 +378,22 @@ func TestNoBeadsCodeReadsGTDoltPort(t *testing.T) {
 		if !strings.HasSuffix(path, ".go") || strings.HasSuffix(path, "_test.go") {
 			return nil
 		}
-		// The guard's own list is the one deliberate mention.
-		if rel, relErr := filepath.Rel(root, path); relErr == nil && rel == filepath.Join("internal", "testenv", "doltguard.go") {
-			return nil
-		}
 		scanned++
 		content, readErr := os.ReadFile(path)
 		if readErr != nil {
 			return readErr
 		}
-		if strings.Contains(string(content), "GT_DOLT_PORT") {
-			rel, _ := filepath.Rel(root, path)
-			hits = append(hits, rel)
+		for _, form := range gtDoltPortReads {
+			if strings.Contains(string(content), form) {
+				rel, _ := filepath.Rel(root, path)
+				hits = append(hits, rel+" ("+form+")")
+			}
+		}
+		// Known positive. A zero from this probe is a claim about the probe
+		// until something it must find proves it can see: the same read form,
+		// spelled for a variable production code demonstrably does read.
+		if strings.Contains(string(content), `Getenv("BEADS_DOLT_SERVER_PORT")`) {
+			control++
 		}
 		return nil
 	})
@@ -350,9 +403,13 @@ func TestNoBeadsCodeReadsGTDoltPort(t *testing.T) {
 	if scanned == 0 {
 		t.Fatalf("scanned 0 non-test .go files under %s: the walk found nothing, which is not the same as finding no matches", root)
 	}
+	if control == 0 {
+		t.Fatalf(`found 0 reads of BEADS_DOLT_SERVER_PORT across %d non-test .go files: `+
+			`production code demonstrably reads it, so this probe is blind and its zero for GT_DOLT_PORT means nothing`, scanned)
+	}
 	sort.Strings(hits)
 	if len(hits) > 0 {
 		t.Errorf("GT_DOLT_PORT is read by beads production code in %v (scanned %d files); doltPortEnvVars' comment says it is guarded for subprocesses only", hits, scanned)
 	}
-	t.Logf("scanned %d non-test .go files under %s", scanned, root)
+	t.Logf("scanned %d non-test .go files under %s; control (reads of BEADS_DOLT_SERVER_PORT) matched %d", scanned, root, control)
 }

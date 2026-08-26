@@ -11,10 +11,12 @@
 package testenv
 
 import (
+	"net"
 	"os"
 	"strconv"
 	"strings"
 	"testing"
+	"time"
 )
 
 // ProductionDoltPort is the port the live Dolt server listens on — the value
@@ -179,6 +181,42 @@ func WithoutDoltPortGuard(t testing.TB) {
 		})
 	}
 }
+
+// SkipUnlessDoltServer skips t unless something is listening on port.
+//
+// It exists because the guard changes what a test's own availability check
+// means. The usual shape was
+//
+//	port, err := strconv.Atoi(os.Getenv("BEADS_DOLT_PORT"))
+//	if err != nil || port <= 0 { t.Skip("shared Dolt test server is unavailable") }
+//
+// which reads a variable as a stand-in for a server. Unguarded, that variable
+// is unset when no server was arranged, so the proxy happened to agree with
+// the thing — and it agreed for the wrong reason, since an ambient
+// BEADS_DOLT_SERVER_PORT=3307 from an agent shell would have satisfied it by
+// naming the production server. Guarded, the variable is always set, so the
+// proxy always says "available" and the test dials a dead port instead of
+// skipping.
+//
+// Dialing answers the question the test is actually asking. It is also the
+// only form that stays correct if the guard's sentinel value ever changes.
+func SkipUnlessDoltServer(t testing.TB, port int) {
+	t.Helper()
+	if port <= 0 {
+		t.Skipf("no Dolt server port resolved (port=%d)", port)
+	}
+	conn, err := net.DialTimeout("tcp", net.JoinHostPort("127.0.0.1", strconv.Itoa(port)), doltDialTimeout)
+	if err != nil {
+		t.Skipf("no Dolt server listening on 127.0.0.1:%d: %v", port, err)
+	}
+	_ = conn.Close()
+}
+
+// doltDialTimeout bounds SkipUnlessDoltServer's probe. The server it looks for
+// is always on loopback — either a container this suite started or the guarded
+// port, which refuses immediately — so this is a backstop against a filtered
+// port that blackholes rather than refuses, not a budget for a slow handshake.
+const doltDialTimeout = 500 * time.Millisecond
 
 // needsGuarding reports whether an environment value leaves a path back to the
 // production server.
