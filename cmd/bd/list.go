@@ -496,6 +496,11 @@ func init() {
 	// Infra type filtering: exclude agent/role/message by default
 	listCmd.Flags().Bool("include-infra", false, "Include infrastructure beads (agent/role/message) in output")
 
+	// Configured label exclusions. NOT covered by --include-infra above: that
+	// one keys on issue TYPE, and the records this hides are ordinary beads
+	// carrying a label (list_exclude_labels.go).
+	registerIncludeHiddenFlag(listCmd)
+
 	// Explicit type exclusion
 	listCmd.Flags().StringSlice("exclude-type", nil, "Exclude issue types from results (comma-separated or repeatable, e.g., --exclude-type=convoy,epic)")
 

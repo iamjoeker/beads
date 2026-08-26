@@ -304,7 +304,11 @@ func blockedFilterFromFlags(cmd *cobra.Command) types.WorkFilter {
 	excludeLabels, _ := cmd.Flags().GetStringSlice("exclude-label")
 	filter.Labels = utils.NormalizeLabels(labels)
 	filter.LabelsAny = utils.NormalizeLabels(labelsAny)
-	filter.ExcludeLabels = utils.NormalizeLabels(excludeLabels)
+	// Normalizes as the two above do, and layers the workspace's configured
+	// exclusions under it (list_exclude_labels.go). `bd blocked` answers the
+	// same question as the two listings beside it — what is in the queue — so
+	// it hides the same rows.
+	filter.ExcludeLabels = resolveExcludeLabels(cmd, excludeLabels)
 	return filter
 }
 
@@ -724,6 +728,7 @@ func init() {
 	readyCmd.Flags().StringSliceP("label", "l", []string{}, "Filter by labels (AND: must have ALL). Can combine with --label-any")
 	readyCmd.Flags().StringSlice("label-any", []string{}, "Filter by labels (OR: must have AT LEAST ONE). Can combine with --label")
 	readyCmd.Flags().StringSlice("exclude-label", []string{}, "Exclude issues that have ANY of these labels")
+	registerIncludeHiddenFlag(readyCmd)
 	readyCmd.Flags().String("label-pattern", "", "Filter by label glob pattern (e.g., 'tech-*' matches tech-debt, tech-legacy)")
 	readyCmd.Flags().String("label-regex", "", "Filter by label regex pattern (e.g., 'tech-(debt|legacy)')")
 	readyCmd.Flags().StringP("type", "t", "", "Filter by issue type (task, bug, feature, epic, decision, merge-request). Aliases: mr→merge-request, feat→feature, mol→molecule, dec/adr→decision")
@@ -756,5 +761,6 @@ func init() {
 	blockedCmd.Flags().StringSliceP("label", "l", []string{}, "Filter by labels (AND: must have ALL). Can combine with --label-any")
 	blockedCmd.Flags().StringSlice("label-any", []string{}, "Filter by labels (OR: must have AT LEAST ONE). Can combine with --label")
 	blockedCmd.Flags().StringSlice("exclude-label", []string{}, "Exclude issues that have ANY of these labels")
+	registerIncludeHiddenFlag(blockedCmd)
 	rootCmd.AddCommand(blockedCmd)
 }

@@ -299,7 +299,13 @@ func gatherListInput(cmd *cobra.Command) (listInput, error) {
 
 	in.Labels = utils.NormalizeLabels(in.Labels)
 	in.LabelsAny = utils.NormalizeLabels(in.LabelsAny)
-	in.ExcludeLabels = utils.NormalizeLabels(in.ExcludeLabels)
+	// Normalizes, and layers the configured exclusions under whatever the
+	// caller typed (list_exclude_labels.go). It runs BELOW the --skip-labels
+	// conflict check above deliberately: that check refuses a combination the
+	// CALLER asked for, and a workspace default is not something they asked
+	// for. --skip-labels drops label HYDRATION from the output rows; the
+	// exclusion is a predicate on the query, and the two do not collide.
+	in.ExcludeLabels = resolveExcludeLabels(cmd, in.ExcludeLabels)
 
 	if !in.SkipLabels && len(in.Labels) == 0 && len(in.LabelsAny) == 0 {
 		if dirLabels := config.GetDirectoryLabels(); len(dirLabels) > 0 {

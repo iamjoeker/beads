@@ -80,6 +80,13 @@ func gatherReadyInput(cmd *cobra.Command, resolveCap func(*cobra.Command) (int, 
 	in.Labels, _ = cmd.Flags().GetStringSlice("label")
 	in.LabelsAny, _ = cmd.Flags().GetStringSlice("label-any")
 	in.ExcludeLabels, _ = cmd.Flags().GetStringSlice("exclude-label")
+	// The configured exclusions go on the REQUEST, not on the built filter
+	// below, so the listing, `--claim` and the `--json` total all ask the same
+	// question. readyRoleRequest reads this field for the claim and the count;
+	// a default written onto in.filter alone would hide mail from the listing
+	// and hand it straight to the next claimant — the divergence
+	// readyRoleRequest's own comment records for directory labels.
+	in.ExcludeLabels = resolveExcludeLabels(cmd, in.ExcludeLabels)
 	in.LabelPattern, _ = cmd.Flags().GetString("label-pattern")
 	in.LabelRegex, _ = cmd.Flags().GetString("label-regex")
 	in.IssueType, _ = cmd.Flags().GetString("type")

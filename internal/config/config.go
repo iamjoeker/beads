@@ -344,6 +344,10 @@ func Initialize() error {
 
 	// List command defaults
 	v.SetDefault("list.limit", 50)
+	// Labels the work-queue listings hide unless asked for. Empty by default:
+	// a workspace that has not set it sees no change at all. See
+	// GetListExcludeLabels for what reads it and why it exists.
+	v.SetDefault(ListExcludeLabelsKey, []string{})
 
 	// Output configuration (GH#1384)
 	// Controls title display in command feedback messages.
@@ -1101,6 +1105,47 @@ func GetInfraTypesFromYAML() []string {
 // (workapi.ResolveGCProtectedLabels).
 func GetGCProtectedLabelsFromYAML() []string {
 	return getConfigList("gc.protected_labels")
+}
+
+// ListExcludeLabelsKey names the labels the work-queue listings (`bd list`,
+// `bd ready`, `bd blocked`) exclude unless the caller asks for them back.
+//
+// IT EXISTS BECAUSE THE CAPABILITY DID AND THE DEFAULT DID NOT. --exclude-label
+// has always worked on those three commands; nothing set it, so every consumer
+// that had not been told to pass the flag — human or agent — read a number that
+// was mostly not work. Measured on the Gas Town hq store (2026-08-25), where
+// agent mail is stored as an ordinary labeled bead so it survives the
+// recipient's session death: `bd list --status open` returned 608 rows and
+// `--exclude-label gt:message` returned 250 of them. 59% of the default listing
+// was inbox.
+//
+// The existing infra filter does not cover that case and cannot be made to
+// without data loss: it keys on issue TYPE, and retyping mail to `message`
+// would route it to the ephemeral wisps table (see
+// internal/storage/dolt/ephemeral_routing.go), where the wisp GC deletes it —
+// destroying exactly the durability those records are stored as beads to get.
+// This key hides rows from a listing and says nothing about where they are
+// stored.
+const ListExcludeLabelsKey = "list.exclude-labels"
+
+// listExcludeLabelsUnderscoreKey is accepted alongside the canonical hyphenated
+// key. Both spellings appear in this file's own defaults (`hierarchy.max-depth`
+// beside `ai.base_url`), so the one a workspace guesses is a coin flip — and a
+// config key that is silently never read is indistinguishable from one that is
+// read and matches nothing. Both map to the same environment variable
+// (BD_LIST_EXCLUDE_LABELS) through the env key replacer.
+const listExcludeLabelsUnderscoreKey = "list.exclude_labels"
+
+// GetListExcludeLabels returns the configured label exclusions for the
+// work-queue listings, nil when none are set. Values may be a YAML sequence or
+// a comma-separated string; entries are trimmed and blanks dropped
+// (getConfigList). Callers normalize for matching — see
+// cmd/bd/list_exclude_labels.go, which is the only consumer.
+func GetListExcludeLabels() []string {
+	if labels := getConfigList(ListExcludeLabelsKey); len(labels) > 0 {
+		return labels
+	}
+	return getConfigList(listExcludeLabelsUnderscoreKey)
 }
 
 // GetCustomStatusesFromYAML retrieves custom statuses from config.yaml.
