@@ -82,6 +82,9 @@ TEST_VERBOSE=1 ./scripts/test.sh
 
 # Run pattern
 TEST_RUN=TestSomething ./scripts/test.sh
+
+# Fail the run if any package reports ok having run no tests at all
+BEADS_TEST_CENSUS=strict ./scripts/test.sh
 ```
 
 ## Quick Reference
@@ -94,6 +97,7 @@ TEST_RUN=TestSomething ./scripts/test.sh
 | Verbose output | `./scripts/test.sh -v` |
 | Custom timeout | `./scripts/test.sh -timeout 10m` |
 | Skip additional test | `./scripts/test.sh -skip TestFoo` |
+| See what a green run skipped | printed automatically; `BEADS_TEST_CENSUS=off` to suppress |
 
 ## Remember
 

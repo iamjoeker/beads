@@ -42,6 +42,28 @@ case "${1:-}" in
         printf '%s\n' "$BEADS_TEST_SCRIPT_NATIVE_SUFFIX"
         ;;
     build)
+        # The skip-census filter (bd-5er) is the second thing test.sh builds.
+        # It is not the prebuilt-bd contract under test here, but it lands in a
+        # directory chosen by the same live-root rule, so the run must still
+        # cover it: a passthrough keeps the pipeline honest without pretending
+        # the driver binary can parse test2json.
+        if [[ "$*" == *tools/testcensus* ]]; then
+            record build-census
+            shift
+            output=""
+            while [[ $# -gt 0 ]]; do
+                if [[ "$1" == "-o" ]]; then
+                    output="$2"
+                    shift 2
+                else
+                    shift
+                fi
+            done
+            printf '%s\n' "$output" >>"$BEADS_TEST_SCRIPT_BUILD_OUTPUT"
+            printf '#!/usr/bin/env bash\nexec cat\n' >"$output"
+            chmod +x "$output"
+            exit 0
+        fi
         record build
         shift
         output=""
@@ -88,7 +110,7 @@ esac
 func TestTestScriptPrebuiltBinaryContract(t *testing.T) {
 	t.Run("generated path uses the native executable suffix and launches", func(t *testing.T) {
 		commands := runTestScriptWithFakeGo(t, "")
-		assertFakeGoCommands(t, commands, "env", "build", "test")
+		assertFakeGoCommands(t, commands, "env", "build", "env", "build-census", "test")
 	})
 
 	t.Run("caller supplied binary wins without a build", func(t *testing.T) {
@@ -100,7 +122,7 @@ func TestTestScriptPrebuiltBinaryContract(t *testing.T) {
 		copyCurrentTestExecutable(t, callerBinary)
 
 		commands := runTestScriptWithFakeGo(t, callerBinary)
-		assertFakeGoCommands(t, commands, "test")
+		assertFakeGoCommands(t, commands, "env", "build-census", "test")
 	})
 }
 
@@ -115,17 +137,23 @@ func TestTestScriptPrebuiltBinaryContract(t *testing.T) {
 func TestTestScriptDoesNotResurrectACleanedRoot(t *testing.T) {
 	result := runTestScript(t, testScriptRun{cleanedRoot: true, disableTestEnv: true})
 
-	assertFakeGoCommands(t, result.commands, "env", "build", "test")
+	assertFakeGoCommands(t, result.commands, "env", "build", "env", "build-census", "test")
 
 	if _, err := os.Stat(result.testEnvRoot); !os.IsNotExist(err) {
 		t.Fatalf("cleaned root %s was re-created (stat error %v)", result.testEnvRoot, err)
 	}
-	if len(result.buildOutputs) != 1 {
-		t.Fatalf("fake-go build outputs = %q, want exactly one", result.buildOutputs)
+	// Both binaries test.sh builds — the prebuilt bd and the skip-census
+	// filter (bd-5er) — choose their directory by the same live-root rule, so
+	// both have to be checked. Asserting on the first alone would have passed
+	// a census build that wrote straight into the grave.
+	if len(result.buildOutputs) != 2 {
+		t.Fatalf("fake-go build outputs = %q, want the prebuilt bd and the census filter", result.buildOutputs)
 	}
-	built := filepath.FromSlash(result.buildOutputs[0])
-	if strings.HasPrefix(built, filepath.Clean(result.testEnvRoot)+string(filepath.Separator)) {
-		t.Fatalf("prebuild wrote into the cleaned root: %s", built)
+	for _, output := range result.buildOutputs {
+		built := filepath.FromSlash(output)
+		if strings.HasPrefix(built, filepath.Clean(result.testEnvRoot)+string(filepath.Separator)) {
+			t.Fatalf("build wrote into the cleaned root: %s", built)
+		}
 	}
 	// The fallback directory is test.sh's own, so test.sh must remove it too:
 	// trading one stranded root for another would not be a fix.
@@ -139,6 +167,60 @@ func TestTestScriptDoesNotResurrectACleanedRoot(t *testing.T) {
 			names = append(names, entry.Name())
 		}
 		t.Fatalf("test.sh left %v behind in %s", names, result.tempRoot)
+	}
+}
+
+// TestTestScriptRejectsAnUnknownCensusMode pins that a misspelt
+// BEADS_TEST_CENSUS is an error rather than a silent fall-through to the
+// default: whoever typed it believed they had turned the census on or off, and
+// would read whatever came next as the result of that decision.
+//
+// The run shadows `go` with a shim that records every call. That the shim is
+// never invoked is the discriminator: a validation that fired late — after the
+// ~200 MB bd prebuild, where this one originally sat — would reach the same
+// message having already paid for it.
+func TestTestScriptRejectsAnUnknownCensusMode(t *testing.T) {
+	bash, err := exec.LookPath("bash")
+	if err != nil {
+		t.Fatalf("bash is required to exercise scripts/test.sh: %v", err)
+	}
+	repoRoot := sourceRepoRoot(t)
+	fixture := t.TempDir()
+
+	shimDir := filepath.Join(fixture, "shim bin")
+	if err := os.MkdirAll(shimDir, 0o755); err != nil {
+		t.Fatalf("create shim directory: %v", err)
+	}
+	callLog := filepath.Join(fixture, "go calls")
+	shim := "#!/usr/bin/env bash\nprintf '%s\\n' \"$*\" >>\"$BEADS_TEST_SCRIPT_FAKE_GO_LOG\"\nexit 90\n"
+	if err := os.WriteFile(filepath.Join(shimDir, "go"), []byte(shim), 0o755); err != nil {
+		t.Fatalf("write go shim: %v", err)
+	}
+	if err := os.WriteFile(callLog, nil, 0o600); err != nil {
+		t.Fatalf("initialize shim log: %v", err)
+	}
+
+	cmd := exec.Command(bash, "--noprofile", "--norc",
+		filepath.Join(repoRoot, "scripts", "test.sh"), "./tools/...")
+	cmd.Dir = repoRoot
+	cmd.Env = append(os.Environ(),
+		"PATH="+shimDir+string(os.PathListSeparator)+os.Getenv("PATH"),
+		"BEADS_TEST_CENSUS=bogus",
+		testScriptFakeGoLogEnv+"="+callLog,
+	)
+	output, err := cmd.CombinedOutput()
+
+	if err == nil {
+		t.Fatalf("test.sh accepted BEADS_TEST_CENSUS=bogus\n%s", output)
+	}
+	if !strings.Contains(string(output), "BEADS_TEST_CENSUS=bogus") {
+		t.Errorf("test.sh did not name the bad value:\n%s", output)
+	}
+	if !strings.Contains(string(output), "'on' (default), 'strict' and 'off'") {
+		t.Errorf("test.sh did not name the valid values:\n%s", output)
+	}
+	if calls := readTestScriptLog(t, callLog); len(calls) != 0 {
+		t.Errorf("a rejected mode still invoked go: %q", calls)
 	}
 }
 
