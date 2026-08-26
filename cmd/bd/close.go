@@ -505,6 +505,14 @@ func (v *closeReasonFlagValue) Type() string {
 	return "string"
 }
 
+// ResetForTesting returns the flag to its registered default. Set appends, so
+// nothing an in-process test runner can pass to Set clears the accumulated
+// reasons — Set("") adds an empty one. Implements flagValueResetter; see
+// cmd/bd/flag_reset_test.go.
+func (v *closeReasonFlagValue) ResetForTesting() {
+	v.values = nil
+}
+
 func (v *closeReasonFlagValue) Values() []string {
 	out := make([]string, len(v.values))
 	copy(out, v.values)

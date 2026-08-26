@@ -20,36 +20,9 @@ func writeTestConfigYAML(t *testing.T, beadsDir, contents string) {
 	}
 }
 
-type flagSnapshot struct {
-	value   string
-	changed bool
-}
-
-func snapshotRootFlagState() map[string]flagSnapshot {
-	state := map[string]flagSnapshot{}
-	for _, name := range []string{"db", "json", "format", "readonly", "actor", "dolt-auto-commit"} {
-		flag := rootCmd.PersistentFlags().Lookup(name)
-		if flag == nil {
-			continue
-		}
-		state[name] = flagSnapshot{value: flag.Value.String(), changed: flag.Changed}
-	}
-	return state
-}
-
-func restoreRootFlagState(t *testing.T, state map[string]flagSnapshot) {
-	t.Helper()
-	for name, snapshot := range state {
-		flag := rootCmd.PersistentFlags().Lookup(name)
-		if flag == nil {
-			continue
-		}
-		if err := flag.Value.Set(snapshot.value); err != nil {
-			t.Fatalf("restore %s flag: %v", name, err)
-		}
-		flag.Changed = snapshot.changed
-	}
-}
+// snapshotRootFlagState / restoreRootFlagState used to enumerate six root
+// persistent flags by name here. They now cover the whole command tree — see
+// snapshotCommandTreeFlagState in flag_reset_test.go and bd-hcl.
 
 func TestPrepareSelectedCommandContext_RebindsTargetConfig(t *testing.T) {
 	t.Setenv("BEADS_DOLT_SERVER_DATABASE", "")
@@ -81,14 +54,14 @@ func TestPrepareSelectedCommandContext_RebindsTargetConfig(t *testing.T) {
 	oldReadonlyMode := readonlyMode
 	oldActor := actor
 	oldDoltAutoCommit := doltAutoCommit
-	flagState := snapshotRootFlagState()
+	flagState := snapshotCommandTreeFlagState(rootCmd)
 	t.Cleanup(func() {
 		serverMode = oldServerMode
 		jsonOutput = oldJSONOutput
 		readonlyMode = oldReadonlyMode
 		actor = oldActor
 		doltAutoCommit = oldDoltAutoCommit
-		restoreRootFlagState(t, flagState)
+		restoreCommandTreeFlagState(t, flagState)
 	})
 
 	serverMode = false
@@ -96,11 +69,7 @@ func TestPrepareSelectedCommandContext_RebindsTargetConfig(t *testing.T) {
 	readonlyMode = false
 	actor = ""
 	doltAutoCommit = ""
-	for _, name := range []string{"json", "format", "readonly", "actor", "dolt-auto-commit"} {
-		if flag := rootCmd.PersistentFlags().Lookup(name); flag != nil {
-			flag.Changed = false
-		}
-	}
+	resetCommandTreeFlagState(t, rootCmd)
 
 	prepareSelectedCommandContext(targetBeadsDir, false)
 	refreshBoundCommandConfig(rootCmd)
@@ -155,22 +124,18 @@ func TestPrepareSelectedCommandContext_DoesNotMergeCallerConfigForUnsetKeys(t *t
 	oldJSONOutput := jsonOutput
 	oldReadonlyMode := readonlyMode
 	oldActor := actor
-	flagState := snapshotRootFlagState()
+	flagState := snapshotCommandTreeFlagState(rootCmd)
 	t.Cleanup(func() {
 		jsonOutput = oldJSONOutput
 		readonlyMode = oldReadonlyMode
 		actor = oldActor
-		restoreRootFlagState(t, flagState)
+		restoreCommandTreeFlagState(t, flagState)
 	})
 
 	jsonOutput = false
 	readonlyMode = false
 	actor = ""
-	for _, name := range []string{"json", "format", "readonly", "actor"} {
-		if flag := rootCmd.PersistentFlags().Lookup(name); flag != nil {
-			flag.Changed = false
-		}
-	}
+	resetCommandTreeFlagState(t, rootCmd)
 
 	prepareSelectedCommandContext(targetBeadsDir, false)
 	refreshBoundCommandConfig(rootCmd)

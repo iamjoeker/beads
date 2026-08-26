@@ -32,6 +32,15 @@ func (flag *singleWorktreeStringFlag) String() string { return flag.value }
 
 func (flag *singleWorktreeStringFlag) Type() string { return "string" }
 
+// ResetForTesting returns the flag to its registered default. worktreeRemoveCmd
+// is a package-level command, so without this the second in-process parse of
+// --merged-into in a test binary fails the once-only guard above. Implements
+// flagValueResetter; see cmd/bd/flag_reset_test.go.
+func (flag *singleWorktreeStringFlag) ResetForTesting() {
+	flag.value = ""
+	flag.set = false
+}
+
 type singleWorktreeBoolFlag struct {
 	name  string
 	value bool
@@ -56,6 +65,13 @@ func (flag *singleWorktreeBoolFlag) String() string { return strconv.FormatBool(
 func (flag *singleWorktreeBoolFlag) Type() string { return "bool" }
 
 func (flag *singleWorktreeBoolFlag) IsBoolFlag() bool { return true }
+
+// ResetForTesting returns the flag to its registered default. See the
+// singleWorktreeStringFlag counterpart above.
+func (flag *singleWorktreeBoolFlag) ResetForTesting() {
+	flag.value = false
+	flag.set = false
+}
 
 type worktreeRemoveOptions struct {
 	force      singleWorktreeBoolFlag
