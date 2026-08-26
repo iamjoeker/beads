@@ -105,6 +105,7 @@ build_docs_binary() {
 ci_time "check build-tag policy" -- ./scripts/check-build-tags.sh
 ci_time "check go install guidance" -- ./scripts/check-go-install-guidance.sh
 ci_time "check version consistency" -- ./scripts/check-versions.sh
+ci_time "check golangci-lint pin consistency" -- ./scripts/check-golangci-version.sh
 ci_time "build bd for docs checks" -- build_docs_binary
 ci_time "check doc flags" -- ./scripts/check-doc-flags.sh "$tmpdir/bd"
 ci_time "check doc freshness" -- ./scripts/check-doc-freshness.sh

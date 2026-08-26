@@ -89,8 +89,24 @@ for f in "${candidates[@]}"; do
         #   `go install some/tool@version`
         #   `go run some/tool@version`
         # These build their own module, not beads, so our tags don't apply.
+        #
+        # The version may also be held in a VARIABLE rather than written out,
+        # which is what a tool pinned in a file looks like: scripts/ci/lib/
+        # golangci-lint.sh installs `...@$pinned` read from .golangci-version,
+        # so `make ci-pr-lint` and CI cannot end up on different linters
+        # (bd-824). That spelling is accepted only for a third-party module
+        # path — a first-party install with a computed version stays caught, so
+        # this widening cannot become a route around the policy. The literal
+        # spellings keep their existing behaviour untouched, first-party
+        # included: scripts/install.sh has passed on `beads/cmd/bd@latest`
+        # since this check was written, and narrowing that is a separate
+        # question from letting a pinned tool name its version once.
         if [[ "$verb" == "install" || "$verb" == "run" ]]; then
             if [[ "$stripped" =~ @(latest|main|v[0-9]) ]]; then
+                continue
+            fi
+            if [[ "$stripped" =~ @[\$\{] ]] \
+                && [[ ! "$stripped" =~ (steveyegge|gastownhall)/beads ]]; then
                 continue
             fi
         fi

@@ -93,6 +93,36 @@ echo 'Updated text' | bd update <id> --description=-
 Use [engdocs/TESTING.md](engdocs/TESTING.md) for the canonical commands,
 test-design guidance, and PR-readiness gates.
 
+## Reporting the lint gate
+
+`make ci-pr-lint` now resolves its own `golangci-lint` at the version pinned in
+`.golangci-version`, and prints that version and the binary's path as its first
+line of output. Quote that line in any report of this gate.
+
+This is not ceremony. Two things about the older `golangci-lint` releases and
+the newer ones are worth knowing before you trust a result:
+
+- **They are different instruments.** CI installs the pin; `go install
+  .../golangci-lint@latest` gets something newer, and the two disagree about the
+  finding **set**, not just the count. Findings that a newer build reports in
+  `backend/conformance` do not exist at the pin on any tree — which is how a
+  local run goes red on a commit whose CI Lint job is green.
+- **The newer gosec taint rules are not deterministic here.** G702/G703/G704/G705
+  flip run to run on the `GOOS=windows CGO_ENABLED=0` cross-lint pass, with the
+  report caps off and the cache cleared, on unmodified `main` included. Measured
+  at v2.11.4: the same unwaived dial in `internal/doltserver/probe.go` was
+  reported on 6 of 10 cold-cache runs and not on the other 4.
+
+So: a red from one of those rules is not a regression you introduced until you
+have reproduced it at the pin, and a green from them is not evidence until it
+repeats after `golangci-lint cache clean`. Running the wrapper is what keeps you
+on the pin; use `$(make -s golangci-lint)` if you want to invoke the linter by
+hand on the same binary.
+
+Bumping the version means editing `.golangci-version` and the workflow literals
+together — `scripts/check-golangci-version.sh` (wired into `make ci-pr-policy`)
+fails the PR if they drift apart. See bd-824.
+
 ## Non-Interactive Shell Commands
 
 **ALWAYS use non-interactive flags** with file operations to avoid hanging on confirmation prompts.
@@ -127,7 +157,8 @@ plane"), you MUST complete ALL steps below. Work is NOT complete until
 
 1. **File issues for remaining work** - Create issues for anything that needs follow-up
 2. **Run quality gates** (if code changed):
-   - `make ci-pr-lint` (required zero-finding formatting and lint wrapper)
+   - `make ci-pr-lint` (required zero-finding formatting and lint wrapper —
+     see "Reporting the lint gate" below before calling it red or green)
    - `make test` (and `make test-icu-path` only if you intentionally need the ICU regex path)
    - File a P0 issue if quality gates are broken
 3. **Update issue status** - Close finished work, update in-progress items
