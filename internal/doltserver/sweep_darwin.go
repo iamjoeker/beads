@@ -3,14 +3,9 @@
 package doltserver
 
 import (
-	"fmt"
-	"os"
 	"os/exec"
-	"path/filepath"
 	"strconv"
 	"strings"
-	"syscall"
-	"time"
 )
 
 // SweepOrphanedTestServers reaps `dolt sql-server` processes that are
@@ -25,60 +20,7 @@ import (
 // Returns the PIDs it sent a kill signal to.
 func SweepOrphanedTestServers(suiteTempRoots ...string) []int {
 	candidates := gatherDoltServerCandidates()
-	pids := selectOrphanTestServerPIDs(candidates, canonicalDarwinRoots(suiteTempRoots))
-
-	self := os.Getpid()
-	var killed []int
-	for _, pid := range pids {
-		if pid == self {
-			continue
-		}
-		// Re-read the process command immediately before signaling so a PID
-		// recycled since candidate collection cannot target an unrelated
-		// process.
-		if !isDoltServerProcess(pid) {
-			continue
-		}
-		if err := syscall.Kill(pid, syscall.SIGTERM); err == nil {
-			killed = append(killed, pid)
-		}
-	}
-
-	if len(killed) == 0 {
-		return killed
-	}
-
-	fmt.Fprintf(os.Stderr, "Info: swept %d orphaned test dolt sql-server process(es): %v\n", len(killed), killed)
-
-	time.Sleep(300 * time.Millisecond)
-	for _, pid := range killed {
-		// Revalidate again before escalation for the same PID-reuse reason.
-		if !isDoltServerProcess(pid) {
-			continue
-		}
-		_ = syscall.Kill(pid, syscall.SIGKILL)
-	}
-
-	return killed
-}
-
-// canonicalDarwinRoots makes caller roots comparable with lsof output. macOS
-// commonly reports a cwd below /private/var while os.MkdirTemp returned the
-// equivalent /var path.
-func canonicalDarwinRoots(roots []string) []string {
-	canonical := make([]string, 0, len(roots))
-	for _, root := range roots {
-		if root == "" {
-			continue
-		}
-		resolved, err := filepath.EvalSymlinks(root)
-		if err != nil {
-			canonical = append(canonical, root)
-			continue
-		}
-		canonical = append(canonical, resolved)
-	}
-	return canonical
+	return terminateDoltServerPIDs(selectOrphanTestServerPIDs(candidates, canonicalRoots(suiteTempRoots)))
 }
 
 func gatherDoltServerCandidates() []serverCandidate {

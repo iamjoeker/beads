@@ -102,6 +102,18 @@ func TestMain(m *testing.M) {
 func testMainInner(m *testing.M) int {
 	origWD, _ := os.Getwd()
 
+	// Clear the corpses of previous runs BEFORE creating this run's root.
+	// runTestsAndSweep below only executes on the normal return path, so a
+	// run that is SIGKILLed (^C, a CI timeout, the OOM killer) reaps nothing
+	// and leaves its dolt sql-server running — one such server survived 15h
+	// holding port 3308 and, because it still carried a database, ANSWERED
+	// this package's shared-server tests instead of merely blocking them
+	// (bd-sxh). A dead run's debris can only be cleaned by a live one, and
+	// the next run is the first opportunity. SweepAbandonedTestRoots proves
+	// a root abandoned via its released flock before touching it, so a
+	// concurrent run's root is left alone; see its doc for both gates.
+	doltserver.SweepAbandonedTestRoots(filepath.Join(os.TempDir(), "beads-bd-tests-*"))
+
 	// Isolate config discovery from the repo's tracked `.beads/config.yaml`.
 	// Many tests expect default config values; running from within this repo would
 	// cause config.Initialize() to walk up from CWD and load `.beads/config.yaml`,
@@ -112,6 +124,17 @@ func testMainInner(m *testing.M) int {
 		return 1
 	}
 	defer func() { _ = forceRemoveAll(tmp) }()
+
+	// Claim the root so a future run's startup sweep can tell this one apart
+	// from a corpse while it is still live. Registered after the removal
+	// defer above, so it releases first. A failure here is not fatal: the
+	// suite runs fine unclaimed, it just leaves a root no sweeper will reap
+	// (which is the pre-existing behavior, and the safe direction).
+	if releaseRoot, err := doltserver.ClaimTestRoot(tmp); err != nil {
+		fmt.Fprintf(os.Stderr, "Warning: could not claim test temp root: %v\n", err)
+	} else {
+		defer releaseRoot()
+	}
 
 	// Anchor package-level sync.Once builders (test binaries, isolated
 	// HOMEs) under this directory so the defer above sweeps them up too.
