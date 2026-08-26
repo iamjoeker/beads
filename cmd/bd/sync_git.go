@@ -115,6 +115,11 @@ func gitOriginHasDoltDataRefStatus() (bool, error) {
 func gitRemoteHasDoltDataRefStatus(remote string) (bool, error) {
 	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
 	defer cancel()
+	//nolint:gosec // G702: no shell is involved. exec.CommandContext takes
+	// argv directly and the program is the literal "git", so the remote — a
+	// name or URL from the user's own git config or their own `bd init
+	// --sync-url` — cannot introduce a second command. It reaches git as one
+	// argument whatever it contains.
 	cmd := exec.CommandContext(ctx, "git", "ls-remote", gitRemoteURLForLsRemote(remote), "refs/dolt/data")
 	cmd.Env = append(os.Environ(), "GIT_TERMINAL_PROMPT=0")
 	output, err := cmd.Output()

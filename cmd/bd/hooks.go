@@ -1598,6 +1598,10 @@ func exportJSONLForCommit() {
 // here would make git fall back to the on-disk index and miss the
 // deletion. Reimplements gastownhall/beads#3838 (ckumar1).
 func isExportFileStagedForDeletion(fullPath string) bool {
+	//nolint:gosec // G702: no shell is involved. exec.Command takes argv
+	// directly, the program is the literal "git", and the one tainted element
+	// is filepath.Base(fullPath) — passed after the "--" separator, so git
+	// parses it as a pathspec and never as an option however it is spelled.
 	checkCmd := exec.Command("git", "diff", "--cached", "--diff-filter=D", "--name-only", "--", filepath.Base(fullPath))
 	checkCmd.Dir = filepath.Dir(fullPath)
 	out, _ := checkCmd.Output()
