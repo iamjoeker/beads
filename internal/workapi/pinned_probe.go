@@ -66,6 +66,14 @@ func PinnedExclusionArmed(filter types.IssueFilter) bool {
 // answers within the caller's scope. Note that `--pinned` lifts the default
 // wholesale, so it can reveal MORE than this count — a floor, never a bound.
 //
+// WHAT THIS PROBE CANNOT REACH is a row whose STATUS the caller did not select:
+// the status term is inherited, so under `--status open` a pinned HOOKED row
+// fails it. That row is hidden twice over, and until StatusPinnedProbeFilter
+// existed no probe on the listing counted it at all (bd-6xa). The intersection
+// is taken there rather than by widening this one, because a probe that lifted
+// the caller's status term here would tell a reader to type `--pinned` when
+// `--pinned` alone still would not show the row.
+//
 // The pagination and cap knobs are dropped too, because they belong to the
 // caller's page rather than to their question: an offset would skip part of the
 // count, and MaxRows would fail the probe on a store where the caller's own

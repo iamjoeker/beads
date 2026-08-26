@@ -102,6 +102,15 @@ type StatusNoticeContext struct {
 	// rather than honoring the selector, so the narrowing is not the caller's
 	// to be warned about.
 	ready bool
+
+	// doublyHidden marks the listing where a live row can be dropped TWICE
+	// OVER — once by the caller's status selector and once by the pinned
+	// default — which is the case neither this notice nor the pinned one could
+	// see while each inherited the other's term (bd-6xa). It is armed when the
+	// pinned exclusion is on and the caller did not ask for it, the same two
+	// conditions PinnedNoticeContext.Applies tests, read from the same request
+	// so the two cannot come to disagree about who owes a pinned disclosure.
+	doublyHidden bool
 }
 
 // StatusNoticeFor describes a listing that just ran, from the request it came
@@ -111,7 +120,11 @@ type StatusNoticeContext struct {
 // Both routes build it here rather than reading the flags at their own call
 // sites, so they cannot come to differ on what counts as a narrowed listing.
 func StatusNoticeFor(in issueops.ListRequest, filter types.IssueFilter, cfg ListConfig) StatusNoticeContext {
-	c := StatusNoticeContext{filter: filter, ready: in.ReadyFlag}
+	c := StatusNoticeContext{
+		filter:       filter,
+		ready:        in.ReadyFlag,
+		doublyHidden: PinnedExclusionArmed(filter) && !in.NoPinnedFlag,
+	}
 	if c.ready {
 		return c
 	}
@@ -142,6 +155,21 @@ func StatusNoticeFor(in issueops.ListRequest, filter types.IssueFilter, cfg List
 // probe can speak about.
 func (c StatusNoticeContext) Applies() bool {
 	return !c.ready && len(c.selected) > 0 && len(c.dropped) > 0
+}
+
+// AppliesToPinned reports whether this listing could have hidden a row TWICE
+// OVER: it owes a status disclosure at all, and the pinned default was armed
+// underneath it.
+//
+// This is the gap between the two notices rather than a third population added
+// beside them. The pinned probe keeps the caller's status term, so it never
+// reaches a row whose status the caller did not select; the status probe keeps
+// the pinned default, so it never reaches a pinned one. `bd list --status open`
+// over a pinned, hooked bead therefore matched the table that was read and was
+// counted by neither disclosure — the exact shape both notices exist to end,
+// reproduced in the seam between them (bd-6xa).
+func (c StatusNoticeContext) AppliesToPinned() bool {
+	return c.Applies() && c.doublyHidden
 }
 
 // Dropped returns the live statuses this listing's selector left out, for the
@@ -176,6 +204,32 @@ func (c StatusNoticeContext) CountHidden(ctx context.Context, s StatusSearcher, 
 	return len(issues), nil
 }
 
+// CountHiddenPinned counts the live issues the listing dropped for their status
+// AND for being pinned — the rows in the seam AppliesToPinned describes, which
+// no other probe on this listing can reach.
+//
+// It is counted SEPARATELY from CountHidden rather than folded into it, because
+// the two have different remedies: `--status live` alone reveals the first set
+// and not this one, and a single number under that one remedy line would send
+// the reader away believing they had seen everything. Separate counts also keep
+// the three notices' populations disjoint, so no row is reported twice.
+//
+// The error is returned rather than folded into a zero for the reason CountHidden
+// returns one.
+func (c StatusNoticeContext) CountHiddenPinned(ctx context.Context, s StatusSearcher, limit int) (int, error) {
+	if !c.AppliesToPinned() {
+		return 0, nil
+	}
+	if s == nil {
+		return 0, ErrNoStatusSearcher
+	}
+	issues, err := s.SearchIssues(ctx, "", StatusPinnedProbeFilter(c.filter, c.dropped, limit))
+	if err != nil {
+		return 0, err
+	}
+	return len(issues), nil
+}
+
 // ErrNoStatusSearcher marks a probe that had no store to ask. It is an error,
 // not a zero, for the reason above.
 var ErrNoStatusSearcher = errNoStatusSearcher{}
@@ -202,6 +256,13 @@ func (errNoStatusSearcher) Error() string {
 // their --status was not the reason. The dropped set is used as a positive
 // selection rather than as an inversion of the exclusion for the same reason —
 // it names only the live statuses, so closed rows can never enter the count.
+//
+// Disjoint is not the same as exhaustive, and for a while it was not: the
+// pinned probe inherits the caller's STATUS term while this one inherits the
+// PINNED term, so a row carrying both properties fell between them and was
+// counted by neither (bd-6xa). StatusPinnedProbeFilter is that intersection,
+// taken here rather than by widening either probe, so the three counts still
+// partition the rows a listing hid instead of overlapping.
 //
 // The pagination and cap knobs are dropped because they belong to the caller's
 // page rather than to their question: an offset would skip part of the count,
@@ -236,5 +297,30 @@ func StatusProbeFilter(filter types.IssueFilter, dropped []types.Status, limit i
 	probe.SkipCounts = true
 	probe.IncludeDependencies = false
 	probe.Lite = true
+	return probe
+}
+
+// StatusPinnedProbeFilter is StatusProbeFilter with the pinned default turned
+// the other way up, so the rows it selects are the live rows the listing hid
+// for their status AND for being pinned.
+//
+// It is built by amending the status probe's own filter rather than by writing
+// a third one from the caller's, so the two counts cannot come to be taken over
+// different scopes and add up to something that is not the whole. The only
+// difference between them is the pinned term; every other predicate is
+// inherited for the reasons given there.
+//
+// THE PINNED STATUS EXCLUSION IS LEFT IN PLACE, unlike in PinnedProbeFilter,
+// which drops it. That probe has to: it inherits the caller's status term, so
+// the default exclusion of the `pinned` STATUS would hide the very rows it
+// reports on. Here the status term is a POSITIVE selection of live statuses,
+// and `pinned` is not one of them (LiveStatusExclusions removes it), so a row
+// with that status cannot enter this count from either direction. Dropping the
+// exclusion would change nothing and would imply the two terms mean the same
+// thing.
+func StatusPinnedProbeFilter(filter types.IssueFilter, dropped []types.Status, limit int) types.IssueFilter {
+	probe := StatusProbeFilter(filter, dropped, limit)
+	pinned := true
+	probe.Pinned = &pinned
 	return probe
 }
