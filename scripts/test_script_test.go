@@ -179,6 +179,15 @@ func TestTestScriptDoesNotResurrectACleanedRoot(t *testing.T) {
 // never invoked is the discriminator: a validation that fired late — after the
 // ~200 MB bd prebuild, where this one originally sat — would reach the same
 // message having already paid for it.
+//
+// GOCACHE and GOMODCACHE are stripped from the child environment rather than
+// inherited, because the discriminator is only armed while they are unset:
+// beads_test_env_enter probes `go env` for each one it does not already have.
+// Inheriting os.Environ made this test's verdict depend on how the package was
+// launched — green under ./scripts/test.sh, whose outer run had already
+// exported both, and red under a bare `go test ./scripts/`, which had not. A
+// contract about what a rejected mode costs cannot be paid for by the caller
+// (bd-di5).
 func TestTestScriptRejectsAnUnknownCensusMode(t *testing.T) {
 	bash, err := exec.LookPath("bash")
 	if err != nil {
@@ -203,7 +212,7 @@ func TestTestScriptRejectsAnUnknownCensusMode(t *testing.T) {
 	cmd := exec.Command(bash, "--noprofile", "--norc",
 		filepath.Join(repoRoot, "scripts", "test.sh"), "./tools/...")
 	cmd.Dir = repoRoot
-	cmd.Env = append(os.Environ(),
+	cmd.Env = append(environWithoutGoCaches(),
 		"PATH="+shimDir+string(os.PathListSeparator)+os.Getenv("PATH"),
 		"BEADS_TEST_CENSUS=bogus",
 		testScriptFakeGoLogEnv+"="+callLog,
@@ -222,6 +231,21 @@ func TestTestScriptRejectsAnUnknownCensusMode(t *testing.T) {
 	if calls := readTestScriptLog(t, callLog); len(calls) != 0 {
 		t.Errorf("a rejected mode still invoked go: %q", calls)
 	}
+}
+
+// environWithoutGoCaches is os.Environ with GOCACHE and GOMODCACHE removed, so
+// a child scripts/test.sh sees them unset however this package was launched.
+func environWithoutGoCaches() []string {
+	environ := os.Environ()
+	pruned := make([]string, 0, len(environ))
+	for _, entry := range environ {
+		name, _, ok := strings.Cut(entry, "=")
+		if ok && (name == "GOCACHE" || name == "GOMODCACHE") {
+			continue
+		}
+		pruned = append(pruned, entry)
+	}
+	return pruned
 }
 
 // TestTestScriptPrebuiltBinaryLaunchProbe is selected only by the fake go test

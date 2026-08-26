@@ -7,6 +7,35 @@ SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 REPO_ROOT="$(cd "$SCRIPT_DIR/.." && pwd)"
 SKIP_FILE="$REPO_ROOT/.test-skip"
 
+# Both run-mode strings are validated first, before this script does anything
+# at all: a typo should cost nothing. A misspelt value is an error rather than
+# a silent fall-through to the default — whoever typed it believed they had
+# chosen something, and would read whatever came next as the result of that
+# choice.
+#
+# "Before any work" has to mean before beads_test_env_enter, not merely before
+# the ~200 MB bd prebuild the census check was originally hoisted above. That
+# call creates a hermetic root and probes `go env GOCACHE` / `go env
+# GOMODCACHE` whenever those are unset, so validating after it charged a typo
+# two go invocations and a temp directory. It also charged them conditionally:
+# under an outer ./scripts/test.sh the caches are already exported and the
+# probes are skipped, so the cost — and the test that pins its absence —
+# depended on how the suite was launched (bd-di5).
+CENSUS_MODE="${BEADS_TEST_CENSUS:-on}"
+case "$CENSUS_MODE" in
+    on | strict | off) ;;
+    *)
+        echo "FATAL: BEADS_TEST_CENSUS=$CENSUS_MODE; valid values are 'on' (default), 'strict' and 'off'" >&2
+        exit 1
+        ;;
+esac
+
+DOLT_COVERAGE_MODE="${BEADS_TEST_DOLT_COVERAGE:-auto}"
+if [[ "$DOLT_COVERAGE_MODE" != "auto" && "$DOLT_COVERAGE_MODE" != "off" ]]; then
+    echo "FATAL: BEADS_TEST_DOLT_COVERAGE=$DOLT_COVERAGE_MODE; valid values are 'auto' (default) and 'off'" >&2
+    exit 1
+fi
+
 # Canonical build flags (GOFLAGS=-tags=gms_pure_go, CGO_ENABLED=1).
 # Opt-in ICU-path coverage remains available via scripts/test-icu-path.sh.
 # shellcheck source=../.buildflags
@@ -119,20 +148,6 @@ if [[ ${#PACKAGES[@]} -eq 0 ]]; then
     PACKAGES=("./...")
 fi
 
-# Both run-mode strings are validated here, before any work: a typo should cost
-# nothing, and the census one would otherwise sit behind a ~200 MB bd prebuild.
-# A misspelt value is an error rather than a silent fall-through to the default
-# — whoever typed it believed they had chosen something, and would read whatever
-# came next as the result of that choice.
-CENSUS_MODE="${BEADS_TEST_CENSUS:-on}"
-case "$CENSUS_MODE" in
-    on | strict | off) ;;
-    *)
-        echo "FATAL: BEADS_TEST_CENSUS=$CENSUS_MODE; valid values are 'on' (default), 'strict' and 'off'" >&2
-        exit 1
-        ;;
-esac
-
 # ---------------------------------------------------------------------------
 # Dolt coverage tier (bd-dln)
 #
@@ -151,17 +166,10 @@ esac
 # the result is not evidence for. That is a decision a human makes and the log
 # records, rather than one a 0.348s runtime hides.
 # ---------------------------------------------------------------------------
-DOLT_COVERAGE_MODE="${BEADS_TEST_DOLT_COVERAGE:-auto}"
+# DOLT_COVERAGE_MODE itself is read and validated at the top of this script,
+# with the other run-mode string.
 DOLT_COVERAGE_PKGS=()
 DOLT_COVERAGE_ON_HOOK=""
-
-# A misspelt waiver is worth an error rather than a silent fall-through to
-# auto: the user who typed it believed they had waived the tier, and would
-# read whatever came next as the result of that decision.
-if [[ "$DOLT_COVERAGE_MODE" != "auto" && "$DOLT_COVERAGE_MODE" != "off" ]]; then
-    echo "FATAL: BEADS_TEST_DOLT_COVERAGE=$DOLT_COVERAGE_MODE; valid values are 'auto' (default) and 'off'" >&2
-    exit 1
-fi
 
 if [[ "$NARROWED_BY_CALLER" != "1" ]]; then
     if _changed="$(beads_dolt_coverage_changed_files "$REPO_ROOT")"; then
