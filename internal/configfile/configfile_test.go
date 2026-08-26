@@ -8,6 +8,7 @@ import (
 	"time"
 
 	"github.com/steveyegge/beads/internal/config"
+	"github.com/steveyegge/beads/internal/testenv"
 )
 
 func TestDefaultConfig(t *testing.T) {
@@ -1055,8 +1056,17 @@ func TestDoltServerModeRoundtrip(t *testing.T) {
 	}
 }
 
-// TestEnvVarOverrides tests env var overrides for getter methods
+// TestEnvVarOverrides tests env var overrides for getter methods.
+//
+// Its subject is the precedence between the port variables and the config, so
+// each subtest has to start from an environment it fully controls. The
+// production-Dolt guard sets both port variables at TestMain time; without
+// clearing them, "invalid value falls through to config" falls through to the
+// guarded port instead, and "BEADS_DOLT_PORT when SERVER_PORT is not set" has
+// SERVER_PORT set (bd-4xn).
 func TestEnvVarOverrides(t *testing.T) {
+	testenv.WithoutDoltPortGuard(t)
+
 	t.Run("host env var overrides config", func(t *testing.T) {
 		t.Setenv("BEADS_DOLT_SERVER_HOST", "192.168.1.1")
 		cfg := &Config{DoltServerHost: "10.0.0.1"}

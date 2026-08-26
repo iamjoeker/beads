@@ -80,6 +80,58 @@ To skip an optional service explicitly, use the existing skip mechanism:
 BEADS_TEST_SKIP=dolt ./scripts/test.sh ./...
 ```
 
+### The Production-Dolt Guard
+
+Every Dolt port resolver in the tree ends in the same fallback: port 3307, the
+live server. A test that builds a fixture `.beads` dir under `t.TempDir()` and
+then calls production code inherits that fallback, so a test run from a
+developer or agent sandbox can create real databases on the live server.
+
+`internal/testenv.GuardProductionDolt` removes the fallback. It points
+`BEADS_DOLT_SERVER_PORT`, `BEADS_DOLT_PORT` and `GT_DOLT_PORT` at port 1 —
+dead, unbindable, and already this repo's sentinel for "resolution landed
+somewhere deliberately dead" — so resolution stops there instead of reaching
+the default. It acts on each variable independently and can only ever resolve
+*away* from production: a variable already naming a deliberate non-production
+port is left alone.
+
+Call it as the first statement of `TestMain`:
+
+```go
+func TestMain(m *testing.M) {
+    testenv.GuardProductionDolt()
+    os.Exit(testMainInner(m))
+}
+```
+
+First matters. A helper that starts a server for the whole run —
+`testutil.EnsureDoltContainerForTestMain` — publishes its own port over these
+variables, so it has to run after the guard, not before.
+
+`test/doltguardpolicy` enforces both halves in CI: every `TestMain` opens with
+the guard, and every test package that can reach Dolt has a `TestMain` in the
+**default build**. A guard behind `//go:build integration` is not a guard for
+the run anyone actually does.
+
+Three things follow for test authors:
+
+- **Never gate a test on whether a port variable is set.** It is always set
+  now. `os.Getenv("BEADS_DOLT_PORT") != ""` was a stand-in for "a test
+  container is running" and it never meant that — an agent shell satisfied it
+  by exporting the production port. Use
+  `testenv.SkipUnlessDoltServer(t, port)`, which dials.
+- **A test whose subject is the unconfigured fallback** — "with no env, no port
+  file and no config.yaml, which port does this resolve to?" — calls
+  `testenv.WithoutDoltPortGuard(t)`, or it asserts the guard's output instead
+  of the real default. An env port is authoritative in beads, so it also
+  shadows the port-file and metadata chain.
+- **Talking to the live server** needs `BEADS_ALLOW_TEST_DOLT=3307`. The value
+  has to name the port; a bare `1` authorizes nothing. It is never set in CI.
+
+This is separate from `BEADS_TEST_MODE=1`, which switches a good deal of
+unrelated test behaviour and which nothing sets for a bare `go test`. The
+guard does not set it and does not depend on it.
+
 ### The Dolt Coverage Tier
 
 That default is right for a contributor without Docker and wrong for the run a

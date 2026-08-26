@@ -17,6 +17,7 @@ import (
 	"github.com/steveyegge/beads/internal/config"
 	"github.com/steveyegge/beads/internal/configfile"
 	"github.com/steveyegge/beads/internal/githooksenv"
+	"github.com/steveyegge/beads/internal/testenv"
 )
 
 // The sql-server outlives the shell that started it: an inherited GIT_TRACE=1
@@ -1595,6 +1596,12 @@ func TestResolveServerMode_ExplicitPort(t *testing.T) {
 }
 
 func TestResolveServerMode_HostInferredExternal(t *testing.T) {
+	// The subject here is the unconfigured default: with no port env, no
+	// port file and a host-only external config, resolution must land on
+	// the documented 3307. The production-Dolt guard sets the port
+	// variables at TestMain time, which is exactly the fallback this test
+	// is checking, so it clears them for its own duration (bd-4xn).
+	testenv.WithoutDoltPortGuard(t)
 	// GH#3545: a non-localhost host with no explicit mode or port means
 	// the server lives on another machine — bd cannot own its lifecycle,
 	// so "bd dolt start" must not launch a repo-local server against it.
@@ -1654,6 +1661,12 @@ func TestResolveServerMode_HostInferredExternal(t *testing.T) {
 }
 
 func TestResolveServerMode_EnvHostBeatsEmbeddedMetadata(t *testing.T) {
+	// The subject here is the unconfigured default: with no port env, no
+	// port file and a host-only external config, resolution must land on
+	// the documented 3307. The production-Dolt guard sets the port
+	// variables at TestMain time, which is exactly the fallback this test
+	// is checking, so it clears them for its own duration (bd-4xn).
+	testenv.WithoutDoltPortGuard(t)
 	// GH#2949 precedent applied to the host env var: a runtime remote
 	// host must beat stale dolt_mode=embedded metadata, and the two mode
 	// resolvers (IsDoltServerMode, ResolveServerMode) must agree — or
