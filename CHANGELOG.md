@@ -9,6 +9,27 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- **`bd` bounds how many copies of itself run at once.** Sixteen may run
+  concurrently; the seventeenth waits for a slot rather than starting. Every
+  invocation costs about 93MB before it does anything, so the cost that matters
+  scales with the number of processes and not with what any of them is doing —
+  and nothing bounded that number, which is how thirty concurrent `bd` processes
+  took a host down and cost seven OOM kills. `bd` already counted itself and
+  warned; now it also queues.
+
+  **The cap is advisory by default.** A waiting `bd` gives up after 30s and runs
+  anyway, so the worst case is a slower `bd`, never a `bd` that refuses. Set
+  `BD_PROC_CAP_MODE=closed` to make it a hard ceiling instead: a `bd` that
+  cannot get a slot then exits 75 (`EX_TEMPFAIL`, the retry-me code) with a
+  message naming the override. `BD_PROC_CAP` sets the number of slots (`0`
+  disables the cap), `BD_PROC_CAP_WAIT` the deadline (`0` does not wait), and
+  `BD_PROC_PRESSURE_DISABLE` still turns off counting and the cap together.
+
+  `bd doctor` reports the cap alongside the live count, including how many
+  processes are waiting for a slot. Diagnostics and long-lived commands are
+  never gated — `bd doctor` and `bd dolt` are what you run *because* calls are
+  piling up, and `bd serve` would hold its slot for as long as it ran.
+
 - **The events journal records WHO performed each mutation.** `bd_events_journal`
   gains an `actor` column (migration 0066 plus its ignored-series twin 0025, so
   upgraded workspaces and fresh clones converge on the same shape), stamped

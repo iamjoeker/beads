@@ -47,7 +47,7 @@ func TestCommandNameFromArgs(t *testing.T) {
 }
 
 func TestIsRootSubcommandSeesRealCommands(t *testing.T) {
-	// Guards the ordering contract in main(): registerProcPressure runs after
+	// Guards the ordering contract in main(): acquireProcPressure runs after
 	// init() has attached every subcommand, so the lookup is not empty.
 	if !isRootSubcommand("list") {
 		t.Error(`isRootSubcommand("list") = false; the registry label would be "bd" for every invocation`)
@@ -172,5 +172,103 @@ func TestCheckProcPressureUnmeasuredIsNotAFailure(t *testing.T) {
 	}
 	if !strings.Contains(check.Message, "not instrumented") {
 		t.Errorf("Message = %q, want it to say concurrency is unmeasured rather than healthy", check.Message)
+	}
+}
+
+func TestCapExemptCommandsAreRealSubcommands(t *testing.T) {
+	// A typo in the exempt list fails in the worst direction: the misspelled
+	// entry exempts nothing, and the command it was meant to protect — `bd
+	// doctor` during a pile-up, `bd dolt start` against a dead database — quietly
+	// starts queueing behind the very backlog it exists to clear. Nothing else
+	// would ever surface that, so check the names against the real command tree.
+	//
+	// Three are excluded by construction: "bd" is the sentinel commandNameFromArgs
+	// returns for a bare or unrecognized argv, and cobra attaches "help" and
+	// "completion" during Execute, after this test's view of the tree is taken.
+	byConstruction := map[string]bool{"bd": true, "help": true, "completion": true}
+	for name := range capExemptCommands {
+		if byConstruction[name] {
+			continue
+		}
+		if !isRootSubcommand(name) {
+			t.Errorf("capExemptCommands lists %q, which is not a bd subcommand: it exempts nothing", name)
+		}
+	}
+}
+
+func TestCapPolicyExemptsTheCommandsThatMustNotQueue(t *testing.T) {
+	t.Setenv(procpressure.DisableEnv, "")
+	t.Setenv(procpressure.CapEnv, "")
+	t.Setenv(procpressure.WaitEnv, "")
+	t.Setenv(procpressure.ModeEnv, "")
+
+	for _, name := range []string{"doctor", "dolt", "serve", "db-proxy-child", "events", "send-metrics", "version", "bd"} {
+		if capPolicyFor(name).Enabled() {
+			t.Errorf("capPolicyFor(%q) is capped; gating it is the wedge this exemption exists to avoid", name)
+		}
+	}
+	for _, name := range []string{"list", "create", "ready", "show", "update", "close"} {
+		p := capPolicyFor(name)
+		if !p.Enabled() {
+			t.Errorf("capPolicyFor(%q) is uncapped; the cap would bound nothing that matters", name)
+		}
+		if p.Cap != procpressure.DefaultCap {
+			t.Errorf("capPolicyFor(%q).Cap = %d, want DefaultCap %d", name, p.Cap, procpressure.DefaultCap)
+		}
+	}
+}
+
+func TestReportProcPressureEmitsCapNotice(t *testing.T) {
+	savedReport, savedAdmission := procPressureReport, procPressureAdmission
+	t.Cleanup(func() {
+		procPressureReport, procPressureAdmission = savedReport, savedAdmission
+		debug.SetQuiet(false)
+	})
+
+	procPressureReport = procpressure.Report{}
+	procPressureAdmission = procpressure.Admission{Cap: 8, Waited: 30 * time.Second, Expired: true}
+
+	debug.SetQuiet(true)
+	if got := captureStderr(t, reportProcPressure); got != "" {
+		t.Errorf("stderr = %q under --quiet, want nothing", got)
+	}
+
+	debug.SetQuiet(false)
+	loud := captureStderr(t, reportProcPressure)
+	if !strings.Contains(loud, "proceeded anyway") {
+		t.Errorf("stderr = %q, want the fail-open expiry reported", loud)
+	}
+
+	// A start that never parked has nothing to say, on either stream.
+	procPressureAdmission = procpressure.Admission{Cap: 8}
+	if got := captureStderr(t, reportProcPressure); got != "" {
+		t.Errorf("stderr = %q for an uncontended start, want nothing", got)
+	}
+}
+
+func TestCheckProcPressureNamesTheCap(t *testing.T) {
+	t.Setenv("XDG_RUNTIME_DIR", t.TempDir())
+	t.Setenv(procpressure.DisableEnv, "")
+	t.Setenv(procpressure.ThresholdEnv, "")
+	t.Setenv(procpressure.WaitEnv, "")
+	t.Setenv(procpressure.ModeEnv, "")
+
+	// Register so the registry directory exists. In production main() has
+	// already done this by the time doctor runs — doctor is exempt from the
+	// cap, not from being counted.
+	_, release := procpressure.Register("doctor")
+	defer release()
+
+	t.Setenv(procpressure.CapEnv, "9")
+	if got := checkProcPressure().Detail; !strings.Contains(got, "cap 9") {
+		t.Errorf("Detail = %q, want the cap in force; a bare count cannot tell a bound that is holding from no bound", got)
+	}
+
+	// An operator who has turned the cap off must be able to see that from
+	// doctor, or a high count reads as "the cap is failing" instead of
+	// "there is no cap".
+	t.Setenv(procpressure.CapEnv, "0")
+	if got := checkProcPressure().Detail; !strings.Contains(got, "disabled") {
+		t.Errorf("Detail = %q with the cap off, want it to say so", got)
 	}
 }

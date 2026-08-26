@@ -83,7 +83,28 @@ type Peer struct {
 	Token   procid.Token `json:"token"`
 	Command string       `json:"command"`
 	Started time.Time    `json:"started"`
+	// State distinguishes a process doing work from one parked in Acquire
+	// waiting for a slot. Empty means running: entries written by a bd that
+	// predates the cap carry no state, and counting an unknown entry against
+	// the cap is the conservative reading. See cap.go.
+	State State `json:"state,omitempty"`
 }
+
+// State is what a registered process is doing. Only Waiting is written
+// explicitly; a running process leaves the field empty so its entry stays
+// byte-identical to one written before the cap existed.
+type State string
+
+const (
+	// StateRunning is a process holding a slot and doing work.
+	StateRunning State = ""
+	// StateWaiting is a process parked in Acquire, holding no slot.
+	StateWaiting State = "waiting"
+)
+
+// Waiting reports whether this peer is parked waiting for a slot rather than
+// holding one.
+func (p Peer) Waiting() bool { return p.State == StateWaiting }
 
 // Age returns how long the peer has been registered, as of now.
 func (p Peer) Age(now time.Time) time.Duration {
@@ -109,8 +130,35 @@ type Report struct {
 	Now time.Time
 }
 
-// Count returns the number of live bd processes, including this one.
+// Count returns the number of live bd processes, including this one. It counts
+// processes parked in Acquire too: a waiting bd is a started bd, and the
+// per-process floor this package exists to measure was paid before it parked.
 func (r Report) Count() int { return len(r.Peers) }
+
+// Running returns the number of live bd processes holding a slot — the count
+// the cap in cap.go bounds. It excludes peers parked waiting for a slot.
+func (r Report) Running() int {
+	n := 0
+	for _, p := range r.Peers {
+		if !p.Waiting() {
+			n++
+		}
+	}
+	return n
+}
+
+// WaitingPeers returns the peers parked waiting for a slot, oldest first. The
+// order is the admission order Acquire uses, so the first entry is the next
+// process due to run.
+func (r Report) WaitingPeers() []Peer {
+	var out []Peer
+	for _, p := range r.Peers {
+		if p.Waiting() {
+			out = append(out, p)
+		}
+	}
+	return out
+}
 
 // Oldest returns the age of the longest-running live bd process. It is the
 // half of the signal that says whether a high count is a healthy burst
@@ -141,11 +189,19 @@ func (r Report) Warning() string {
 	if len(r.Peers) == 1 {
 		noun = "process"
 	}
+	// "running" would be a lie about a process parked in Acquire, and the
+	// distinction is the first thing an operator wants: peers stacked up
+	// waiting means the cap is doing its job, peers stacked up running means
+	// nothing is bounding them.
+	verb := "running"
+	if oldest.Waiting() {
+		verb = "waiting"
+	}
 	return fmt.Sprintf(
-		"Warning: %d bd %s running concurrently (threshold %d); oldest is %q, running %s. "+
+		"Warning: %d bd %s running concurrently (threshold %d); oldest is %q, %s %s. "+
 			"Each bd process costs ~93MB regardless of what it does, so a count that keeps climbing "+
 			"means calls are arriving faster than they finish — check database health.",
-		len(r.Peers), noun, r.Threshold, oldest.Command, oldest.Age(r.Now).Round(time.Millisecond),
+		len(r.Peers), noun, r.Threshold, oldest.Command, verb, oldest.Age(r.Now).Round(time.Millisecond),
 	)
 }
 
@@ -240,24 +296,45 @@ func (r *Registry) Register(command string) (Report, func()) {
 		return Report{}, noop
 	}
 
+	self, ok := r.enroll(command, StateRunning)
+	if !ok {
+		return Report{}, noop
+	}
+
+	return r.scan(), r.releaser(self.PID)
+}
+
+// enroll writes this process's entry in the given state. It reports false when
+// the entry could not be written, which is the caller's signal to degrade to no
+// instrumentation rather than to fail.
+func (r *Registry) enroll(command string, state State) (Peer, bool) {
 	pid := os.Getpid()
 	// A missing token is not fatal: the entry is still written, and peers fall
 	// back to a PID-only liveness check for it. Losing reuse-safety for one
 	// entry is better than losing the count entirely.
 	token, _ := procid.Capture(pid)
 
-	self := Peer{PID: pid, Token: token, Command: command, Started: r.now()}
-	path := r.entryPath(pid)
-	if data, err := json.Marshal(self); err == nil {
-		if err := os.WriteFile(path, data, 0o600); err != nil {
-			return Report{}, noop
-		}
-	} else {
-		return Report{}, noop
+	self := Peer{PID: pid, Token: token, Command: command, Started: r.now(), State: state}
+	if !r.writeEntry(self) {
+		return Peer{}, false
 	}
+	return self, true
+}
 
-	release := func() { _ = os.Remove(path) }
-	return r.scan(), release
+// writeEntry persists one peer, replacing any entry this process already has.
+// Acquire rewrites its own entry to change state, and rewriting in place keeps
+// Started — and so the process's place in the admission order — unchanged.
+func (r *Registry) writeEntry(p Peer) bool {
+	data, err := json.Marshal(p)
+	if err != nil {
+		return false
+	}
+	return os.WriteFile(r.entryPath(p.PID), data, 0o600) == nil
+}
+
+func (r *Registry) releaser(pid int) func() {
+	path := r.entryPath(pid)
+	return func() { _ = os.Remove(path) }
 }
 
 // Scan reports the live peers without registering this process. Useful for
