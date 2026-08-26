@@ -974,6 +974,12 @@ var recognizedConfigPrefixes = []string{
 	"directory.", "repos.", "external_projects.", "validation.",
 	"lint.", "hierarchy.", "ai.", "backup.", "federation.", "metrics.",
 	"agent.", "claim.", "storage-class.",
+	// list.* has been a live namespace since list.limit and was never
+	// recognized here: the warning above this check does not stop the write, so
+	// `bd config set list.limit 100` set the value AND said the key was
+	// unknown — a did-you-mean printed over a setting that works.
+	// list.exclude-labels arrives through the same door.
+	"list.",
 }
 
 // validateStorageClassConfig validates a storage-class.<type> per-type

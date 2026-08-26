@@ -5,7 +5,7 @@ description: Complete reference for bd configuration across config.yaml and data
 
 Complete configuration reference for beads.
 
-Last reviewed: 2026-07-10
+Last reviewed: 2026-08-25
 
 Freshness source: `cmd/bd/main.go`, `cmd/bd/config.go`, and `internal/configfile/`.
 
@@ -86,6 +86,8 @@ The full namespaces routed to YAML are:
 
 `lint.*` holds lint settings: `lint.sections.<type>` is a comma-separated, additive list of sections that `bd lint` additionally requires for issues of that type (built-in required sections still apply; unset means no behavior change).
 
+`list.*` holds listing defaults: `list.limit` and `list.exclude-labels` (see [below](#hiding-labeled-beads-from-the-work-queue)).
+
 Plus these individual keys:
 
 `no-db`, `json`, `db`, `actor`, `identity`, `no-push`, `no-git-ops`, `agent.profile`, `create.require-description`, `import.auto`, `import.path`, `prime.max-memories`, `prime.max-memory-chars`, and the secret keys `github.token`, `gitlab.token`, `jira.api_token`, `ado.pat`, `linear.api_key`, `linear.oauth_client_id`, `linear.oauth_client_secret`.
@@ -135,6 +137,7 @@ Any key whose name contains `api_key`, `api-key`, `secret`, `token`, or `passwor
 | `routing.maintainer` | — | — | `.` | Maintainer-routed path |
 | `routing.contributor` | — | — | `~/.beads-planning` | Contributor-routed path |
 | `list.limit` | `--limit` / `-n` | `BD_LIST_LIMIT` | `50` | Default limit for `bd list` results |
+| `list.exclude-labels` | `--include-hidden` (turns it off) | `BD_LIST_EXCLUDE_LABELS` | (none) | Labels hidden from `bd list`, `bd ready` and `bd blocked` (see [below](#hiding-labeled-beads-from-the-work-queue)) |
 | `directory.labels` | — | — | `{}` | Map directory patterns → labels for monorepos |
 | `external_projects` | — | — | `{}` | Map project names → paths for cross-project deps |
 | `federation.remote` | — | `BD_FEDERATION_REMOTE` | (none) | Dolt remote URL (`dolthub://`, `gs://`, `s3://`, `az://`, `file://`) |
@@ -168,6 +171,44 @@ database backups.
 Routing note: `output.title-length` and `agents.file` are functionally tool-level settings, but `bd config set` writes them to the Dolt database. They are typically read from `config.yaml` when set there directly.
 
 `bd config show` is the source of truth for what's currently effective on your machine, including provenance.
+
+### Hiding Labeled Beads from the Work Queue
+
+Some workspaces store records that are not work in the same graph as work — agent mail, for instance, is kept as an ordinary bead so it survives the sending session. Those records then fill the listings that are supposed to show a work queue, and its size stops meaning anything.
+
+`list.exclude-labels` names the labels `bd list`, `bd ready` and `bd blocked` leave out:
+
+```bash
+bd config set list.exclude-labels "gt:message"
+```
+
+Unset — the default — nothing is hidden and the three commands behave exactly as before.
+
+```console
+$ bd list --status open
+note: excluding rows labeled "gt:message" (list.exclude-labels); --include-hidden to include them
+...
+```
+
+Every affected command prints that line on stderr, so `--json` output stays parseable, and every one of them takes `--include-hidden` to list the full set once:
+
+```bash
+bd list --include-hidden        # everything, including the hidden labels
+bd ready --include-hidden
+```
+
+The exclusion covers what those commands *do*, not only what they print: `bd ready --claim` will not claim a hidden bead. `--exclude-label` adds to the configured set rather than replacing it, so narrowing a listing by hand never brings the hidden rows back.
+
+<Note>
+`bd count` is not affected — it has no `--exclude-label` of its own, so a store that sets this key will see `bd count` return a larger number than `bd list` shows rows.
+</Note>
+
+<Warning>
+**Check what else carries the label.** A label chosen for one kind of record often sits alongside others: alert and escalation notifications are usually delivered as messages, so hiding a message label hides those notices too. List the label's beads first (`bd list --label <label> --all`) and read the titles before you set the key.
+</Warning>
+
+This is a listing filter and nothing more. Hidden beads are stored, synced, and returned by `bd show` exactly as before; the related `types.infra` setting is a different mechanism that keys on issue *type* and routes those beads to ephemeral storage.
+
 
 ## Dolt History, Backup, and Push
 
