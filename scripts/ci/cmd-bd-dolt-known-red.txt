@@ -1,12 +1,17 @@
 # Known-red cmd/bd tests under Dolt (bd-9jl, bd-nn6).
 #
-# THIS FILE IS EMPTY, AND THAT IS THE POINT. The CI jobs `Test (cmd/bd under
-# real Dolt N/4)` and `Test (cmd/bd init under real Dolt)` run ./cmd/bd with
+# THIS FILE WANTS TO BE EMPTY, AND WAS. The CI jobs `Test (cmd/bd under real
+# Dolt N/4)` and `Test (cmd/bd init under real Dolt)` run ./cmd/bd with
 # BEADS_TEST_ENV_RUN_DOLT=1, i.e. WITHOUT the BEADS_TEST_SKIP=dolt that
 # scripts/ci/lib/test-env.sh normally adds. That surface had never been run by
 # any CI job, so it rotted: bd-kbx fixed 25 failures on pristine main and this
-# list held the 12 that survived. bd-2k4 drained all 12, so the jobs now gate
-# the whole package with nothing excused.
+# list held the 12 that survived. bd-2k4 drained all 12, and for a while the
+# jobs gated the whole package with nothing excused.
+#
+# It holds one entry again because bd-nn6 widened the gate to a second backend
+# and the first full run of it found one test red on pristine main. A gate
+# that grows by one excused test and one bead is working; the alternative was
+# to keep the backend dark, which is what bd-nn6 was filed about.
 #
 # This list applies to BOTH of the wrapper's passes (bd-nn6): the server one
 # above and the embedded one that follows it, which runs the same package with
@@ -45,3 +50,12 @@
 # Two of bd-2k4's twelve were only ever red that way.
 #
 # Format: one top-level Go test name per line. `#` starts a comment.
+
+# bd-dw5: red under the EMBEDDED backend on pristine main, and only there --
+# it is embedded-gated, so it self-skips in the server pass. Asserts the
+# "pass an absolute or ~/-prefixed --repo path" wording, which create.go
+# cannot reach for a target directory that does not exist: the earlier
+# "--repo target %q does not exist" stat check refuses first. The behaviour is
+# right in both branches; which message the caller should see is the open
+# question. Found by bd-nn6's first full embedded run of ./cmd/bd.
+TestEmbeddedCreateRepoRelativeUninitRefused

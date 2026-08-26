@@ -962,13 +962,19 @@ jobs:
       # Non-gating: the point of the allowlist is to shrink. Shard 1 re-runs
       # the known-red tests and prints the verdicts so a line that has quietly
       # started passing is visible in the log instead of sitting there forever.
+      #
+      # Both backends, because since bd-nn6 the allowlist excuses tests in
+      # both and an entry red in only one is the normal case. Under the server
+      # env an embedded-gated test SELF-SKIPS -- it would be reported as
+      # neither passing nor failing, i.e. as nothing, and would sit here
+      # forever on a list whose whole purpose is to drain. The env vars are
+      # set per-step rather than on the job so the second invocation does not
+      # inherit the first's: they abort each other.
       - name: Report known-red tests that now pass (non-gating)
         if: always() && matrix.shard == 1
         continue-on-error: true
         env:
           BEADS_TEST_BD_BINARY: ${{ github.workspace }}/ci-build-artifacts/bd-linux-gms-pure
-          BEADS_TEST_ENV_RUN_DOLT: "1"
-          BEADS_CMD_BD_REQUIRE_DOLT: "1"
         run: |
           set -uo pipefail
           known_red="$(./scripts/ci/cmd-bd-dolt-known-red.sh regex)"
@@ -976,11 +982,25 @@ jobs:
             echo "Allowlist is empty — nothing left to drain."
             exit 0
           fi
-          ./scripts/test.sh -v -run "$known_red" ./cmd/bd 2>&1 \
+
+          echo "=== known-red under a real Dolt server ==="
+          env BEADS_TEST_ENV_RUN_DOLT=1 BEADS_CMD_BD_REQUIRE_DOLT=1 \
+            ./scripts/test.sh -v -run "$known_red" ./cmd/bd 2>&1 \
             | grep -E '^(--- |    --- |ok|FAIL)' || true
+
           echo
-          echo "Any known-red test reported PASS above can be deleted from"
-          echo "scripts/ci/cmd-bd-dolt-known-red.txt."
+          echo "=== known-red under embedded Dolt ==="
+          # No BEADS_TEST_BD_BINARY: the embedded tests shell out to it, and
+          # scripts/test.sh only prebuilds one from this tree when the value
+          # is empty. Same reason scripts/ci/test-cmd-bd-dolt.sh clears it.
+          env BEADS_TEST_EMBEDDED_DOLT=1 BEADS_TEST_BD_BINARY= \
+            ./scripts/test.sh -v -run "$known_red" ./cmd/bd 2>&1 \
+            | grep -E '^(--- |    --- |ok|FAIL)' || true
+
+          echo
+          echo "A known-red test reported PASS above can be deleted from"
+          echo "scripts/ci/cmd-bd-dolt-known-red.txt — but only if the OTHER"
+          echo "backend reported PASS or SKIP for it, never FAIL."
 
   # End-to-end coverage for proxied-server CLI subcommands, sharded across the
   # CI matrix. Each sub-test drives the bd CLI subprocess against a real dolt
