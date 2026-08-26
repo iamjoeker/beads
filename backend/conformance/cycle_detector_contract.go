@@ -491,6 +491,9 @@ func assertCycleDetectorPath(t *testing.T, cycle publicops.Cycle, edgeOrder ...s
 	t.Helper()
 	lowest := 0
 	for i, id := range edgeOrder {
+		//nolint:gosec // G602: lowest starts at 0 and is only ever assigned i,
+		// an index of edgeOrder itself, so it indexes edgeOrder in bounds. The
+		// empty-slice case never evaluates this — the loop body does not run.
 		if id < edgeOrder[lowest] {
 			lowest = i
 		}

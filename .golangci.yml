@@ -616,3 +616,15 @@ linters:
 
 issues:
   uniq-by-line: true
+  # Report EVERY finding, not golangci-lint's default first 50 per linter and
+  # first 3 per message text. This gate is required to be zero (AGENTS.md,
+  # "Landing the Plane"), so there is no flood to guard against — and the
+  # truncation actively misleads at exactly the moment the gate is used.
+  #
+  # bd-8ob was filed against a run that showed 7 findings. There were 8: a
+  # fourth "G602: slice index out of range" was suppressed by max-same-issues,
+  # so fixing every finding on the report left the gate still red, and the
+  # newly-revealed 8th looked like a regression the fix had introduced. A
+  # capped report cannot be used to decide a zero-finding gate is satisfied.
+  max-same-issues: 0
+  max-issues-per-linter: 0

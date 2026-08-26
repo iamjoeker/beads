@@ -2284,6 +2284,11 @@ func extractSSHHost(url string) string {
 // Bare dial+close (no doltserver.ProbeSQLServer): SSH, not MySQL — there is
 // no handshake greeting to drain here.
 func testSSHConnectivity(host string) bool {
+	//nolint:gosec // G704: not SSRF. host is parsed from a remote the user
+	// configured in their own database (st.ListRemotes), dialed by their own
+	// CLI on their own machine — there is no server relaying a caller-supplied
+	// URL across a privilege boundary. The dial is also bare TCP: it connects,
+	// closes, and never sends a request or reads a response.
 	conn, err := net.DialTimeout("tcp", net.JoinHostPort(host, "22"), 5*time.Second)
 	if err != nil {
 		return false
@@ -2322,6 +2327,9 @@ func httpURLToTCPAddr(url string) string {
 // is no handshake greeting to drain here.
 func testHTTPConnectivity(url string) bool {
 	addr := httpURLToTCPAddr(url)
+	//nolint:gosec // G704: not SSRF, for the reason given on
+	// testSSHConnectivity — a user-configured remote, dialed locally, bare TCP
+	// with no request sent and no response read.
 	conn, err := net.DialTimeout("tcp", addr, 5*time.Second)
 	if err != nil {
 		return false

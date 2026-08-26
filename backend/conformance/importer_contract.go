@@ -378,6 +378,11 @@ func assertImporterSkipped(t *testing.T, result publicops.ImportBatchResult, wan
 			result.SkippedDependencies, len(want), want)
 	}
 	for i, got := range result.SkippedDependencies {
+		//nolint:gosec // G602: i indexes want[] within its bounds. The lengths
+		// are equal by the time the loop runs, because the t.Fatalf above ends
+		// the test when they differ. gosec's bounds analysis does not know
+		// Fatalf never returns, so it reads the loop as reachable with
+		// len(want) < len(SkippedDependencies).
 		if got.IssueID != want[i].IssueID || got.DependsOnID != want[i].DependsOnID {
 			t.Errorf("SkippedDependencies[%d] names %s -> %s, want %s -> %s",
 				i, got.IssueID, got.DependsOnID, want[i].IssueID, want[i].DependsOnID)

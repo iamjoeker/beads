@@ -669,6 +669,9 @@ func assertRelationsPage(t *testing.T, items []*publicops.RelatedIssue, want []s
 		return
 	}
 	for i := range got {
+		//nolint:gosec // G602: i ranges over got, and the length check above
+		// returns when len(got) != len(want), so want[i] is in bounds. gosec
+		// cannot relate the two slices' lengths through that guard.
 		if got[i] != want[i] {
 			t.Errorf("%s = %v, want %v", describe, got, want)
 			return
