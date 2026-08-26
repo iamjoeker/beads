@@ -1127,9 +1127,60 @@ func TestEmbeddedCreateCrossRepoUninit(t *testing.T) {
 // concept of an external rig/alias registry), so it must be refused instead
 // of auto-creating a disconnected database that the caller never intended
 // and nothing else will ever route to. Contrast with
-// TestEmbeddedCreateCrossRepoUninit, which uses an absolute --repo path and
+// TestEmbeddedCreateCrossRepoUninit, which uses the SAME target shape — an
+// existing directory holding no .beads — via an absolute --repo path, and
 // must still succeed.
+//
+// The target directory therefore has to exist (bd-dw5). A relative --repo
+// value naming nothing on disk is refused one check earlier, by
+// resolveRepoTargetBeadsDir, with a different message and for a different
+// reason; that refusal is pinned by
+// TestEmbeddedCreateRepoMissingRelativeTargetRefused. Only an existing,
+// uninitialized directory reaches ensureBeadsDirForPath's allowCreate gate,
+// which is the bd-8d3f behaviour under test here. Keeping the two apart is
+// the point: the message tells the caller which mistake they made.
 func TestEmbeddedCreateRepoRelativeUninitRefused(t *testing.T) {
+	if os.Getenv("BEADS_TEST_EMBEDDED_DOLT") != "1" {
+		t.Skip("set BEADS_TEST_EMBEDDED_DOLT=1 to run embedded dolt create tests")
+	}
+	t.Parallel()
+
+	bd := buildEmbeddedBD(t)
+	dir, _, _ := bdInit(t, bd, "--prefix", "src")
+
+	// An existing repository that simply has not been `bd init`ed — the shape
+	// TestEmbeddedCreateCrossRepoUninit initializes in place when named by an
+	// absolute path.
+	relTarget := "some-other-rig"
+	absTarget := filepath.Join(dir, relTarget)
+	if err := os.MkdirAll(absTarget, 0750); err != nil {
+		t.Fatal(err)
+	}
+	initGitRepoAt(t, absTarget)
+
+	out, err := bdRunWithFlockRetry(t, bd, dir, "create", "--json", "Should not land anywhere", "--repo", relTarget)
+	if err == nil {
+		t.Fatalf("expected bd create --repo %q to fail for an uninitialized relative target, got success: %s", relTarget, out)
+	}
+	if !strings.Contains(string(out), "absolute") {
+		t.Errorf("expected error to explain the absolute/~-prefixed path requirement, got: %s", out)
+	}
+	if strings.Contains(string(out), "does not exist") {
+		t.Errorf("target exists; this must be the ambiguous-path refusal, not the missing-target one: %s", out)
+	}
+
+	if _, statErr := os.Stat(filepath.Join(absTarget, ".beads")); !os.IsNotExist(statErr) {
+		t.Errorf("expected no .beads directory to be fabricated at %s, stat err = %v", absTarget, statErr)
+	}
+}
+
+// TestEmbeddedCreateRepoMissingRelativeTargetRefused pins the other half of
+// the bd-dw5 distinction: a bare --repo value naming nothing on disk is the
+// rig-name-mistaken-for-a-path case, and resolveRepoTargetBeadsDir refuses it
+// before the ambiguous-path gate is ever consulted. The caller is told the
+// target does not exist and that --repo takes a path, which is the mistake
+// they actually made — not that the path should have been absolute.
+func TestEmbeddedCreateRepoMissingRelativeTargetRefused(t *testing.T) {
 	if os.Getenv("BEADS_TEST_EMBEDDED_DOLT") != "1" {
 		t.Skip("set BEADS_TEST_EMBEDDED_DOLT=1 to run embedded dolt create tests")
 	}
@@ -1141,14 +1192,17 @@ func TestEmbeddedCreateRepoRelativeUninitRefused(t *testing.T) {
 	relTarget := "some-other-rig"
 	out, err := bdRunWithFlockRetry(t, bd, dir, "create", "--json", "Should not land anywhere", "--repo", relTarget)
 	if err == nil {
-		t.Fatalf("expected bd create --repo %q to fail for an uninitialized relative target, got success: %s", relTarget, out)
+		t.Fatalf("expected bd create --repo %q to fail for a target that does not exist, got success: %s", relTarget, out)
 	}
-	if !strings.Contains(string(out), "absolute") {
-		t.Errorf("expected error to explain the absolute/~-prefixed path requirement, got: %s", out)
+	if !strings.Contains(string(out), "does not exist") {
+		t.Errorf("expected error to say the --repo target does not exist, got: %s", out)
+	}
+	if !strings.Contains(string(out), "not a repository name") {
+		t.Errorf("expected error to explain that --repo takes a path, got: %s", out)
 	}
 
-	if _, statErr := os.Stat(filepath.Join(dir, relTarget, ".beads")); !os.IsNotExist(statErr) {
-		t.Errorf("expected no .beads directory to be fabricated at %s, stat err = %v", filepath.Join(dir, relTarget), statErr)
+	if _, statErr := os.Stat(filepath.Join(dir, relTarget)); !os.IsNotExist(statErr) {
+		t.Errorf("expected no directory to be fabricated at %s, stat err = %v", filepath.Join(dir, relTarget), statErr)
 	}
 }
 
