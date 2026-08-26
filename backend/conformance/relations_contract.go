@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"reflect"
+	"slices"
 	"strings"
 	"testing"
 
@@ -664,15 +665,12 @@ func relationsPageKeys(items []*publicops.RelatedIssue) []string {
 func assertRelationsPage(t *testing.T, items []*publicops.RelatedIssue, want []string, describe string) {
 	t.Helper()
 	got := relationsPageKeys(items)
-	if len(got) != len(want) {
+	// slices.Equal, not a hand-rolled length check plus an index loop: both
+	// arms reported the same message and returned, so the loop only restated
+	// the equality — and indexing want by got's loop variable is what gosec
+	// reported as G602, an index it cannot bound to the other slice.
+	if !slices.Equal(got, want) {
 		t.Errorf("%s = %v, want %v", describe, got, want)
-		return
-	}
-	for i := range got {
-		if got[i] != want[i] {
-			t.Errorf("%s = %v, want %v", describe, got, want)
-			return
-		}
 	}
 }
 

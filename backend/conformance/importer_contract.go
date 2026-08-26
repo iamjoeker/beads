@@ -378,9 +378,15 @@ func assertImporterSkipped(t *testing.T, result publicops.ImportBatchResult, wan
 			result.SkippedDependencies, len(want), want)
 	}
 	for i, got := range result.SkippedDependencies {
-		if got.IssueID != want[i].IssueID || got.DependsOnID != want[i].DependsOnID {
+		// The two slices are the same length — the Fatalf above is the whole
+		// point of this helper — so this index is in range. gosec does not
+		// carry that equality across the loop and reports G602 on every use of
+		// want[i], so the index happens once, under one stated waiver, rather
+		// than four times under four.
+		wantEdge := want[i] //nolint:gosec // G602: len(want) == len(result.SkippedDependencies), asserted immediately above
+		if got.IssueID != wantEdge.IssueID || got.DependsOnID != wantEdge.DependsOnID {
 			t.Errorf("SkippedDependencies[%d] names %s -> %s, want %s -> %s",
-				i, got.IssueID, got.DependsOnID, want[i].IssueID, want[i].DependsOnID)
+				i, got.IssueID, got.DependsOnID, wantEdge.IssueID, wantEdge.DependsOnID)
 		}
 		if got.Reason == "" {
 			t.Errorf("SkippedDependencies[%d] (%s -> %s) carries no reason; a caller told only that an edge went missing cannot act on it",
