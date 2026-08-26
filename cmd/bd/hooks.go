@@ -1598,6 +1598,12 @@ func exportJSONLForCommit() {
 // here would make git fall back to the on-disk index and miss the
 // deletion. Reimplements gastownhall/beads#3838 (ckumar1).
 func isExportFileStagedForDeletion(fullPath string) bool {
+	// G702 reads the derived basename as a command-injection sink. The program
+	// is the literal "git", the arguments are passed as an argv slice with no
+	// shell in between, and the one derived argument sits after `--`, where git
+	// treats it as a pathspec and not an option. The same reasoning the global
+	// G204 waiver in .golangci.yml states for every other `git` call here.
+	//nolint:gosec // G702: literal "git" argv, derived basename is a post-`--` pathspec
 	checkCmd := exec.Command("git", "diff", "--cached", "--diff-filter=D", "--name-only", "--", filepath.Base(fullPath))
 	checkCmd.Dir = filepath.Dir(fullPath)
 	out, _ := checkCmd.Output()

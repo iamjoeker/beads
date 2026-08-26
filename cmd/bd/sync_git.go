@@ -115,6 +115,7 @@ func gitOriginHasDoltDataRefStatus() (bool, error) {
 func gitRemoteHasDoltDataRefStatus(remote string) (bool, error) {
 	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
 	defer cancel()
+	//nolint:gosec // G702: literal "git" argv, no shell; remote is the caller's own configured remote name or URL
 	cmd := exec.CommandContext(ctx, "git", "ls-remote", gitRemoteURLForLsRemote(remote), "refs/dolt/data")
 	cmd.Env = append(os.Environ(), "GIT_TERMINAL_PROMPT=0")
 	output, err := cmd.Output()

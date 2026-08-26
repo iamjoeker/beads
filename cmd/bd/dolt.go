@@ -2283,7 +2283,14 @@ func extractSSHHost(url string) string {
 // testSSHConnectivity tests if an SSH host is reachable on port 22.
 // Bare dial+close (no doltserver.ProbeSQLServer): SSH, not MySQL — there is
 // no handshake greeting to drain here.
+//
+// The host reaches here from the operator's own `dolt remote` list and the
+// only thing that leaves the process is a TCP SYN whose success or failure is
+// printed straight back to that same operator. There is no confused deputy to
+// be: the caller of `bd dolt test` and the party who configured the remote are
+// the same person, and nothing is read from the connection.
 func testSSHConnectivity(host string) bool {
+	//nolint:gosec // G704: not SSRF — the address is the caller's own configured remote, dialed on their behalf
 	conn, err := net.DialTimeout("tcp", net.JoinHostPort(host, "22"), 5*time.Second)
 	if err != nil {
 		return false
@@ -2322,6 +2329,7 @@ func httpURLToTCPAddr(url string) string {
 // is no handshake greeting to drain here.
 func testHTTPConnectivity(url string) bool {
 	addr := httpURLToTCPAddr(url)
+	//nolint:gosec // G704: not SSRF — same trust boundary as testSSHConnectivity above; the URL is the caller's own configured remote
 	conn, err := net.DialTimeout("tcp", addr, 5*time.Second)
 	if err != nil {
 		return false
