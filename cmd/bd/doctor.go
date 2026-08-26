@@ -496,6 +496,10 @@ func runDiagnostics(path string) doctorResult {
 	// workspace, and the moment an operator most wants the number is when
 	// everything else is failing.
 	result.Checks = append(result.Checks, checkProcPressure())
+	// Where bd sits in the kernel's kill order (bd-kih). Same placement and the
+	// same reason as the check above: it is a property of the host, and it is
+	// the half of a pile-up that cannot report itself once it fires.
+	result.Checks = append(result.Checks, checkOOMScore())
 	// Warning-class: a high count means the database is slow, not that beads
 	// is misinstalled, so it must not fail OverallOK.
 	// Warning-class check — don't fail overall check, matching the neighboring hooks checks.

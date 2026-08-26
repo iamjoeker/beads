@@ -10,11 +10,17 @@
 //
 // Nothing bounds that number. Agents poll on a fixed cadence, so when the
 // database slows down, each call's lifetime stretches while the arrival rate
-// stays put and the pile grows without bound. bd also runs at oom_score_adj
-// 200 in the town, which makes the kernel pick it first: the processes are
+// stays put and the pile grows without bound. Some bd processes also run at a
+// positive oom_score_adj, which makes the kernel pick them first: they are
 // killed quietly, no error reaches anyone, and the collapse is invisible until
 // a human reboots the host. That is exactly what happened on 2026-08-16 —
 // ~30 concurrent bd processes and seven OOM kills.
+//
+// "Some", not all: the bias is inherited from whatever spawned bd, so it varies
+// by launch path on one host. Measured 2026-08-25, bd under tmux read 0 while
+// bd started from a desktop terminal read 200, unchanged down
+// systemd(100) -> konsole(200) -> shell -> gt -> bd. That is why OOMScoreAdj
+// reports what THIS process inherited rather than asserting a town-wide value.
 //
 // This package does not bound concurrency. It makes concurrency observable:
 // each invocation registers itself, counts its live peers, and warns once when

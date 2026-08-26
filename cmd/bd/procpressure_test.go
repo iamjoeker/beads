@@ -74,6 +74,11 @@ func TestReportProcPressureRespectsQuiet(t *testing.T) {
 		debug.SetQuiet(false)
 	})
 	procPressureReport = over
+	// This case asserts on the exact stderr, so the OOM note must not appear or
+	// not appear depending on the host. Under the town bd runs at oom_score_adj
+	// 200 and the note would fire; pin the reading to unmeasured and let
+	// TestReportProcPressureNotesSacrificialOOMScore cover the other branch.
+	stubOOMScoreAdj(t, 0, false)
 
 	debug.SetQuiet(true)
 	quiet := captureStderr(t, reportProcPressure)
