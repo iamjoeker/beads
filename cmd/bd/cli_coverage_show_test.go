@@ -26,7 +26,7 @@ import (
 	"testing"
 	"time"
 
-	"github.com/steveyegge/beads/internal/storage/dolt"
+	"github.com/steveyegge/beads/internal/storage"
 	"github.com/steveyegge/beads/internal/types"
 )
 
@@ -182,6 +182,47 @@ func runBDForCoverageAllowError(t *testing.T, dir string, args ...string) (stdou
 	return stdout, stderr, err
 }
 
+// openCoverageStore opens the same store the CLI in runBDForCoverage is using,
+// so a test can seed rows the CLI has no flag for and then read back what the
+// CLI wrote.
+//
+// It goes through newDoltStoreFromConfig — the factory initDirectMode itself
+// calls — rather than reaching for a backend directly. Which backend that
+// resolves to is not a detail this test gets to assume: `bd init` writes
+// metadata.json, and unless it recorded server mode the CLI runs on EMBEDDED
+// Dolt out of .beads/embeddeddolt, with the test container playing no part at
+// all. Two earlier spellings both failed here, and the second is the more
+// instructive (bd-39t):
+//
+//	dolt.New(ctx, &dolt.Config{Path: dbFile})     database "testdb_<hash>" not found
+//	dolt.NewFromConfig(ctx, beadsDir)             database "test" not found
+//
+// The first invents a database name by hashing Path under BEADS_TEST_MODE=1
+// and looks for a name nothing ever created. The second reads the right name
+// out of metadata.json — and still fails, because it asks a SQL server for a
+// database that only ever existed in-process. Resolving the name correctly is
+// not enough; the backend has to be resolved too, and only the factory does
+// both.
+//
+// Fatal, never Skip. Reaching this line means every preceding runBDForCoverage
+// call succeeded, and those fatal on error — so the CLI has already opened
+// this workspace and written to it. A skip here cannot mean "no Dolt"; it can
+// only mean the test failed to address data it just wrote, which is a defect
+// and must be red. It was a t.Skipf until bd-39t, and so the template half of
+// TestCoverage_TemplateAndPinnedProtections and the whole of
+// TestCoverage_ShowThread reported green in every environment without ever
+// reaching an assertion.
+func openCoverageStore(t *testing.T, dir string) storage.DoltStorage {
+	t.Helper()
+
+	beadsDir := filepath.Join(dir, ".beads")
+	s, err := newDoltStoreFromConfig(context.Background(), beadsDir)
+	if err != nil {
+		t.Fatalf("open the workspace the CLI just built (%s): %v", beadsDir, err)
+	}
+	return s
+}
+
 func extractJSONPayload(s string) string {
 	if i := strings.IndexAny(s, "[{"); i >= 0 {
 		return s[i:]
@@ -306,11 +347,7 @@ func TestCoverage_TemplateAndPinnedProtections(t *testing.T) {
 	}
 
 	// Insert a template issue directly and verify update/close protect it.
-	dbFile := filepath.Join(dir, ".beads", "beads.db")
-	s, err := dolt.New(context.Background(), &dolt.Config{Path: dbFile})
-	if err != nil {
-		t.Skipf("skipping: Dolt server not available: %v", err)
-	}
+	s := openCoverageStore(t, dir)
 	ctx := context.Background()
 	template := &types.Issue{
 		Title:      "Template issue",
@@ -344,10 +381,7 @@ func TestCoverage_TemplateAndPinnedProtections(t *testing.T) {
 		t.Fatalf("expected 1 issue from show, got %d", len(showDetails))
 	}
 	// Re-open the DB after running the CLI to confirm is_template persisted.
-	s2, err := dolt.New(context.Background(), &dolt.Config{Path: dbFile})
-	if err != nil {
-		t.Skipf("skipping: Dolt server not available: %v", err)
-	}
+	s2 := openCoverageStore(t, dir)
 	postShow, err := s2.GetIssue(context.Background(), template.ID)
 	_ = s2.Close()
 	if err != nil {
@@ -385,11 +419,7 @@ func TestCoverage_ShowThread(t *testing.T) {
 	dir := t.TempDir()
 	runBDForCoverage(t, dir, "init", "--prefix", "test", "--quiet")
 
-	dbFile := filepath.Join(dir, ".beads", "beads.db")
-	s, err := dolt.New(context.Background(), &dolt.Config{Path: dbFile})
-	if err != nil {
-		t.Skipf("skipping: Dolt server not available: %v", err)
-	}
+	s := openCoverageStore(t, dir)
 	ctx := context.Background()
 
 	root := &types.Issue{Title: "Root message", IssueType: "message", Status: types.StatusOpen, Sender: "alice", Assignee: "bob"}
