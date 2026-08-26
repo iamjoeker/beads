@@ -480,9 +480,6 @@ func TestCapChildHelper(t *testing.T) {
 // children never overlapped would report a peak of one and pass while measuring
 // nothing.
 func TestCapBoundsRealProcesses(t *testing.T) {
-	if testing.Short() {
-		t.Skip("spawns 12 processes")
-	}
 	dir := t.TempDir()
 
 	type result struct {
