@@ -276,14 +276,15 @@ func runListCore(cmd *cobra.Command, _ []string) error {
 			return HandleError("%v", err)
 		}
 		// An empty [] is the same ambiguous answer in JSON as on screen, and a
-		// short one hides the same pinned rows, so both notices go to stderr and
-		// the document stays parseable (bd-nc4, bd-f76).
-		printLabelledListNotices(ctx, activeStore, listLabelPredicates{
+		// short one hides the same pinned rows and the same live-but-otherwise-
+		// statused rows, so the notices go to stderr and the document stays
+		// parseable (bd-nc4, bd-f76, bd-j3z).
+		printListNotices(ctx, activeStore, listLabelPredicates{
 			Labels:    in.Labels,
 			LabelsAny: in.LabelsAny,
 			Pattern:   in.LabelPattern,
 			Regex:     in.LabelRegex,
-		}, workapi.PinnedNoticeFor(in.ListRequest, filter), len(page.Items), searchedStore)
+		}, workapi.StatusNoticeFor(in.ListRequest, filter, cfg), workapi.PinnedNoticeFor(in.ListRequest, filter), len(page.Items), searchedStore)
 		if in.SkipLabels {
 			if err := outputJSON(newSkipLabelsListJSONResponse(page.Items)); err != nil {
 				return err
@@ -312,19 +313,20 @@ func runListCore(cmd *cobra.Command, _ []string) error {
 	}
 	issues, truncated := listPageIssues(page)
 
-	// A label filter gets its notices before any rendering path prints a screen
-	// that would not mention what it hid: the wisp-table notice when it returned
-	// nothing, the pinned notice whenever this query dropped pinned matches.
+	// The notices come before any rendering path prints a screen that would not
+	// mention what it hid: the status notice whenever --status alone dropped
+	// live work, the pinned notice whenever this query dropped pinned matches,
+	// the wisp-table notice when a labeled listing returned nothing.
 	// --parent is excluded because that branch answers from its own hierarchical
 	// query below, so this page being empty would not be the answer the user
 	// sees.
 	if in.ParentID == "" {
-		printLabelledListNotices(ctx, activeStore, listLabelPredicates{
+		printListNotices(ctx, activeStore, listLabelPredicates{
 			Labels:    in.Labels,
 			LabelsAny: in.LabelsAny,
 			Pattern:   in.LabelPattern,
 			Regex:     in.LabelRegex,
-		}, workapi.PinnedNoticeFor(in.ListRequest, filter), len(issues), searchedStore)
+		}, workapi.StatusNoticeFor(in.ListRequest, filter, cfg), workapi.PinnedNoticeFor(in.ListRequest, filter), len(issues), searchedStore)
 	}
 
 	if in.prettyFormat && !jsonOutput {
@@ -424,7 +426,7 @@ func runListCore(cmd *cobra.Command, _ []string) error {
 }
 
 func init() {
-	listCmd.Flags().StringP("status", "s", "", "Filter by stored status (open, in_progress, blocked, deferred, closed). Comma-separated for multiple: --status open,in_progress. Note: repeating -s/--status silently overwrites the previous value — always use the comma-separated form for multi-status filters.")
+	listCmd.Flags().StringP("status", "s", "", "Filter by stored status, matched EXACTLY. --status open means status=open literally, NOT \"not closed\": it drops in_progress, blocked, hooked and deferred beads — roughly a third of live work on a busy repo, and the hidden third grows as more work is in flight. For \"everything not closed\" use --status live, which is what a bare `bd list` shows; for every status including closed use --status all. Statuses: open, in_progress, blocked, deferred, hooked, pinned, closed (plus any custom). Comma-separated for an OR set: --status open,in_progress. Note: repeating -s/--status silently overwrites the previous value — always use the comma-separated form for multi-status filters.")
 	listCmd.Flags().String("state", "", "Alias for --status")
 	_ = listCmd.Flags().MarkHidden("state")
 	registerPriorityFlag(listCmd, "")
