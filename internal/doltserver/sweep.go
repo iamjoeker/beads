@@ -62,6 +62,33 @@ func selectOrphanTestServerPIDs(candidates []serverCandidate, suiteRoots []strin
 	return pids
 }
 
+// selectServersUnderRoots returns the PIDs of candidates whose data directory
+// is nested under one of roots. Unlike selectOrphanTestServerPIDs it has no
+// deleted-cwd branch: a caller of this function is asserting something about
+// the roots it passed, not about servers in general, and must not reap
+// anything outside them.
+//
+// This is what SweepAbandonedTestRoots uses. It runs at suite STARTUP, when
+// other suites in a parallel run (scripts/test.sh -p N) are mid-flight, so it
+// deliberately declines the deleted-cwd signal that the exit-path sweep
+// accepts — every PID it reaps is one whose data directory sits inside a root
+// the caller has already proved abandoned via its released flock.
+func selectServersUnderRoots(candidates []serverCandidate, roots []string) []int {
+	var pids []int
+	for _, c := range candidates {
+		if !isDoltServerCmdline(c.cmdline) {
+			continue
+		}
+		if c.cwd == "" {
+			continue
+		}
+		if underAnyRoot(c.cwd, roots) {
+			pids = append(pids, c.pid)
+		}
+	}
+	return pids
+}
+
 // isDoltServerCmdline reports whether cmdline looks like a dolt sql-server
 // invocation. Mirrors the substring check in listDoltProcessPIDs (both
 // "dolt" and "sql-server" must appear) rather than an exact match, since
