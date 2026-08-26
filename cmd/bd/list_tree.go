@@ -159,6 +159,68 @@ func displayPrettyListWithDeps(issues []*types.Issue, showHeader bool, allDeps m
 	displayPrettyListWithDepsMode(issues, showHeader, allDeps, "", truncated, readyFiltered)
 }
 
+// statusCount is one bucket of the footer's status breakdown: a status that is
+// actually present among the rendered rows, and how many of those rows carry it.
+// Buckets are derived from the rows rather than named ahead of time so that the
+// parts always sum to the total — see countIssuesByStatus.
+type statusCount struct {
+	Status string
+	Count  int
+}
+
+// unsetStatusLabel names the bucket for a row whose status is empty. Such a row
+// still exists and still counts toward the total, so it needs a bucket rather
+// than a blank one ("3 " reads as a rendering fault, not as a finding).
+const unsetStatusLabel = "no status"
+
+// countIssuesByStatus buckets the rendered rows by status, in a stable order.
+//
+// It is driven off the rows, not off a hardcoded list of statuses, which is the
+// whole point: a status nobody thought of when this was written — hooked and
+// blocked were already live, custom statuses (bd config set status.custom) are
+// user-defined and unknowable here — gets its own bucket instead of falling out
+// of the sum. Built-in statuses print in types.AllStatuses order so the line
+// reads the same way every time; anything else follows, sorted, because map
+// iteration order would otherwise reshuffle the footer between identical runs.
+func countIssuesByStatus(issues []*types.Issue) []statusCount {
+	counts := make(map[string]int, len(types.AllStatuses))
+	for _, issue := range issues {
+		status := string(issue.Status)
+		if status == "" {
+			status = unsetStatusLabel
+		}
+		counts[status]++
+	}
+
+	out := make([]statusCount, 0, len(counts))
+	for _, s := range types.AllStatuses {
+		if n, ok := counts[string(s)]; ok {
+			out = append(out, statusCount{Status: string(s), Count: n})
+			delete(counts, string(s))
+		}
+	}
+	rest := make([]string, 0, len(counts))
+	for s := range counts {
+		rest = append(rest, s)
+	}
+	slices.Sort(rest)
+	for _, s := range rest {
+		out = append(out, statusCount{Status: s, Count: counts[s]})
+	}
+	return out
+}
+
+// formatStatusBreakdown renders the buckets as "6 open, 3 in progress, 1 hooked".
+// Underscores become spaces so in_progress reads as prose, matching how the
+// summary has always spelled it.
+func formatStatusBreakdown(byStatus []statusCount) string {
+	parts := make([]string, 0, len(byStatus))
+	for _, sc := range byStatus {
+		parts = append(parts, fmt.Sprintf("%d %s", sc.Count, strings.ReplaceAll(sc.Status, "_", " ")))
+	}
+	return strings.Join(parts, ", ")
+}
+
 // listFooterLine renders the one-line summary under a text listing.
 //
 // The status breakdown is only meaningful when the query could have returned
@@ -175,7 +237,17 @@ func displayPrettyListWithDeps(issues []*types.Issue, showHeader bool, allDeps m
 // construction, say what was excluded instead of asserting a count for it. This
 // is the same principle as the truncation arm below, which refuses to label a
 // cut-off page "Total" (GH#5362): a count is only honest alongside its scope.
-func listFooterLine(total, open, inProgress int, truncated, readyFiltered bool) string {
+//
+// The breakdown itself used to fail the same test from the other direction. It
+// named exactly two buckets, open and in_progress, against five live statuses —
+// so a blocked, deferred or hooked row landed in neither and the parenthetical
+// silently disclaimed it: "Total: 13 issues (8 open, 0 in progress)" over five
+// hooked rows printed directly above. Both numbers were individually true, which
+// is what made it unreadable; nothing in the line said the parts were not the
+// whole. byStatus is therefore derived from the rendered rows (countIssuesByStatus)
+// and its counts sum to total by construction — no status can drop out of the
+// sum again, including one added after this was written.
+func listFooterLine(total int, byStatus []statusCount, truncated, readyFiltered bool) string {
 	if readyFiltered {
 		// No status breakdown: --ready makes it vacuous. Name the scope instead.
 		if truncated {
@@ -183,11 +255,15 @@ func listFooterLine(total, open, inProgress int, truncated, readyFiltered bool) 
 		}
 		return fmt.Sprintf("Ready: %d issues with no active blockers (open only — --ready excludes in_progress)", total)
 	}
-	if truncated {
-		return fmt.Sprintf("Showing %d issues (%d open, %d in progress); more match (truncated by --limit). Use --limit 0 for all.",
-			total, open, inProgress)
+	breakdown := formatStatusBreakdown(byStatus)
+	if breakdown != "" {
+		breakdown = " (" + breakdown + ")"
 	}
-	return fmt.Sprintf("Total: %d issues (%d open, %d in progress)", total, open, inProgress)
+	if truncated {
+		return fmt.Sprintf("Showing %d issues%s; more match (truncated by --limit). Use --limit 0 for all.",
+			total, breakdown)
+	}
+	return fmt.Sprintf("Total: %d issues%s", total, breakdown)
 }
 
 // displayPrettyListWithDepsMode displays issues in tree format. When depsMode is
@@ -233,17 +309,7 @@ func displayPrettyListWithDepsMode(issues []*types.Issue, showHeader bool, allDe
 	// Summary — counts describe the shown page; never label a truncated page "Total".
 	fmt.Println()
 	fmt.Println(strings.Repeat("-", 80))
-	openCount := 0
-	inProgressCount := 0
-	for _, issue := range issues {
-		switch issue.Status {
-		case "open":
-			openCount++
-		case "in_progress":
-			inProgressCount++
-		}
-	}
-	fmt.Println(listFooterLine(len(issues), openCount, inProgressCount, truncated, readyFiltered))
+	fmt.Println(listFooterLine(len(issues), countIssuesByStatus(issues), truncated, readyFiltered))
 	fmt.Println()
 	fmt.Println("Status: ○ open  ◐ in_progress  ● blocked  ✓ closed  ❄ deferred")
 	fmt.Println("Priority: P0–P4 (label only; not a status icon)")
