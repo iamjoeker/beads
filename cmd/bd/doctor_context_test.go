@@ -28,7 +28,7 @@ func savePersistentPreRunState(t *testing.T) {
 	oldJSONOutput := jsonOutput
 	oldReadonlyMode := readonlyMode
 	oldDoltAutoCommit := doltAutoCommit
-	flagState := snapshotRootFlagState()
+	flagState := snapshotCommandTreeFlagState(rootCmd)
 	t.Cleanup(func() {
 		serverMode = oldServerMode
 		cmdCtx = oldCmdCtx
@@ -37,7 +37,7 @@ func savePersistentPreRunState(t *testing.T) {
 		jsonOutput = oldJSONOutput
 		readonlyMode = oldReadonlyMode
 		doltAutoCommit = oldDoltAutoCommit
-		restoreRootFlagState(t, flagState)
+		restoreCommandTreeFlagState(t, flagState)
 	})
 
 	serverMode = false

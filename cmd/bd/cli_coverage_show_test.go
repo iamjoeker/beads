@@ -124,6 +124,10 @@ func runBDForCoverage(t *testing.T, dir string, args ...string) (stdout string, 
 	sandboxMode = false
 	rootCtx = nil
 	rootCancel = nil
+	// Cobra keeps Flag.Changed and the parsed value on the shared rootCmd
+	// across Execute() calls, so without this the next in-process command
+	// inherits this one's --format/--readonly/--actor/... (bd-hcl).
+	resetCommandTreeFlagState(t, rootCmd)
 
 	// Give SQLite time to release file locks.
 	time.Sleep(10 * time.Millisecond)
