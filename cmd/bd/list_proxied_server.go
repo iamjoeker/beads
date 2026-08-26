@@ -84,7 +84,7 @@ func runListProxiedPage(ctx context.Context, out io.Writer, in listInput) error 
 		if err != nil {
 			return err
 		}
-		noticeEmptyLabelledProxiedList(ctx, in, len(page.Items))
+		noticeLabelledProxiedList(ctx, in, len(page.Items))
 		return emitProxiedListJSONResult(page.Items, in, page.HasMore)
 	}
 
@@ -98,20 +98,28 @@ func runListProxiedPage(ctx context.Context, out io.Writer, in listInput) error 
 		return err
 	}
 	issues, hasMore := listPageIssues(page)
-	noticeEmptyLabelledProxiedList(ctx, in, len(issues))
+	noticeLabelledProxiedList(ctx, in, len(issues))
 	return renderProxiedListText(ctx, out, issues, in, hasMore)
 }
 
-// noticeEmptyLabelledProxiedList is the proxied twin of the direct route's
-// wisp-table notice: a labeled listing that came back empty gets the same
-// disclosure here, because the route a command took is not something the reader
-// of a false zero knows or should have to know (bd-nc4).
+// noticeLabelledProxiedList is the proxied twin of the direct route's notices:
+// a labeled listing gets the same disclosures here, because the route a command
+// took is not something the reader of a false zero knows or should have to know
+// (bd-nc4, bd-f76).
 //
-// Only the LABEL predicates are carried over. This probe asks one question —
-// "do wisps carry these labels?" — and inheriting the status scope would
-// reproduce the closed-wisp filter that manufactures the zero.
-func noticeEmptyLabelledProxiedList(ctx context.Context, in listInput, resultCount int) {
-	if resultCount > 0 || isQuiet() {
+// Only the LABEL predicates are carried over to the WISP probe. That probe asks
+// one question — "do wisps carry these labels?" — and inheriting the status
+// scope would reproduce the closed-wisp filter that manufactures the zero. The
+// PINNED probe is the opposite and needs the whole filter, so this route builds
+// the one the role ran, by the same BuildListFilter, rather than reconstructing
+// the pinned default from the request.
+//
+// It runs on a non-empty listing too, so the unit of work is opened for every
+// labeled listing here rather than only for the empty ones. That is the cost of
+// the pinned disclosure being about rows a SHORT listing hid as much as an
+// empty one, on a route whose role already opens a unit of work per call.
+func noticeLabelledProxiedList(ctx context.Context, in listInput, resultCount int) {
+	if isQuiet() {
 		return
 	}
 	predicates := listLabelPredicates{
@@ -123,16 +131,16 @@ func noticeEmptyLabelledProxiedList(ctx context.Context, in listInput, resultCou
 	if _, ok := predicates.terms(); !ok {
 		return
 	}
-	uw, err := openProxiedListUOW(ctx)
+	uw, filter, err := openAndPrepare(ctx, in)
 	if err != nil {
-		// The probe could not run; the structural half of the notice is still
-		// true and printEmptyLabelledListNotice says only that much when it has
-		// no store to ask.
-		printEmptyLabelledListNotice(ctx, nil, predicates, resultCount, "")
+		// The probes could not run. An empty filter arms no pinned exclusion,
+		// so nothing claims a count here; the wisp notice's structural half is
+		// still true and it says only that much when it has no store to ask.
+		printLabelledListNotices(ctx, nil, predicates, workapi.PinnedNoticeContext{}, resultCount, "")
 		return
 	}
 	defer uw.Close(ctx)
-	printEmptyLabelledListNotice(ctx, uowMolReader{uw: uw}, predicates, resultCount, "")
+	printLabelledListNotices(ctx, uowMolReader{uw: uw}, predicates, workapi.PinnedNoticeFor(in.ListRequest, filter), resultCount, "")
 }
 
 func runListProxiedWatch(_ *cobra.Command, ctx context.Context, in listInput) error {

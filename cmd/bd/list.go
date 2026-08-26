@@ -275,14 +275,15 @@ func runListCore(cmd *cobra.Command, _ []string) error {
 			}
 			return HandleError("%v", err)
 		}
-		// An empty [] is the same ambiguous answer in JSON as on screen, and the
-		// notice goes to stderr, so the document stays parseable (bd-nc4).
-		printEmptyLabelledListNotice(ctx, activeStore, listLabelPredicates{
+		// An empty [] is the same ambiguous answer in JSON as on screen, and a
+		// short one hides the same pinned rows, so both notices go to stderr and
+		// the document stays parseable (bd-nc4, bd-f76).
+		printLabelledListNotices(ctx, activeStore, listLabelPredicates{
 			Labels:    in.Labels,
 			LabelsAny: in.LabelsAny,
 			Pattern:   in.LabelPattern,
 			Regex:     in.LabelRegex,
-		}, len(page.Items), searchedStore)
+		}, workapi.PinnedNoticeFor(in.ListRequest, filter), len(page.Items), searchedStore)
 		if in.SkipLabels {
 			if err := outputJSON(newSkipLabelsListJSONResponse(page.Items)); err != nil {
 				return err
@@ -311,17 +312,19 @@ func runListCore(cmd *cobra.Command, _ []string) error {
 	}
 	issues, truncated := listPageIssues(page)
 
-	// A label filter that returned nothing gets the wisp-table notice before any
-	// rendering path prints its empty screen. --parent is excluded because that
-	// branch answers from its own hierarchical query below, so this page being
-	// empty would not be the answer the user sees.
+	// A label filter gets its notices before any rendering path prints a screen
+	// that would not mention what it hid: the wisp-table notice when it returned
+	// nothing, the pinned notice whenever this query dropped pinned matches.
+	// --parent is excluded because that branch answers from its own hierarchical
+	// query below, so this page being empty would not be the answer the user
+	// sees.
 	if in.ParentID == "" {
-		printEmptyLabelledListNotice(ctx, activeStore, listLabelPredicates{
+		printLabelledListNotices(ctx, activeStore, listLabelPredicates{
 			Labels:    in.Labels,
 			LabelsAny: in.LabelsAny,
 			Pattern:   in.LabelPattern,
 			Regex:     in.LabelRegex,
-		}, len(issues), searchedStore)
+		}, workapi.PinnedNoticeFor(in.ListRequest, filter), len(issues), searchedStore)
 	}
 
 	if in.prettyFormat && !jsonOutput {
