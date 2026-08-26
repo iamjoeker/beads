@@ -295,15 +295,23 @@ func readonlyCanaryEnv(home, beadsDir, circuitDir string, port int) []string {
 }
 
 func TestConfigValidateReadOnlyIsHermetic(t *testing.T) {
-	// A positive port is a PROXY for "a shared Dolt server is available", and
-	// the two came apart when the process-wide Dolt guard landed: it publishes
-	// testenv.GuardedDoltPort, which is positive and definitionally dead, so
-	// this predicate stopped firing and the test dialed a port nothing can bind
-	// (bd-4xn). Ask about the guard rather than about the sign of the number.
+	// Ask the server, not the variable. A positive port is a PROXY for "a
+	// shared Dolt server is available", and the two came apart when the
+	// process-wide Dolt guard landed: it publishes testenv.GuardedDoltPort,
+	// which is positive and definitionally dead, so the predicate stopped
+	// firing and this test dialed a port nothing can bind (bd-4xn).
+	//
+	// Excluding the guard's sentinel by value fixes that instance and leaves
+	// the shape: the check still asks about a number rather than about a
+	// server, so it would run against a stale container port with nothing
+	// behind it, and it went wrong originally because an agent shell exported
+	// the production port and satisfied it. Dialing answers the question the
+	// test is actually asking, and stays correct if the sentinel changes.
 	port, err := strconv.Atoi(os.Getenv("BEADS_DOLT_PORT"))
-	if err != nil || port <= 0 || port == testenv.GuardedDoltPort {
-		t.Skip("shared Dolt test server is unavailable")
+	if err != nil {
+		t.Skipf("shared Dolt test server is unavailable: BEADS_DOLT_PORT=%q", os.Getenv("BEADS_DOLT_PORT"))
 	}
+	testenv.SkipUnlessDoltServer(t, port)
 	circuitDir := os.Getenv("BEADS_TEST_CIRCUIT_DIR")
 	if !filepath.IsAbs(circuitDir) {
 		t.Fatalf("suite circuit directory is not isolated: %q", circuitDir)

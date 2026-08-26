@@ -6,12 +6,15 @@ package beads_test
 import (
 	"encoding/json"
 	"fmt"
+	"net"
 	"os"
 	"os/exec"
 	"path/filepath"
 	"runtime"
+	"strconv"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/steveyegge/beads/internal/testutil"
 )
@@ -37,14 +40,31 @@ func getBDCommand() string {
 	return "./bd"
 }
 
+// hasDoltTestPort reports whether a Dolt server these tests can use is
+// actually listening.
+//
+// It used to be `os.Getenv("BEADS_DOLT_PORT") != ""`, which reads a variable as
+// a stand-in for a server. That proxy is wrong in both directions: the
+// production-Dolt guard sets the variable on every run, and an agent shell set
+// it to the production port, so "set" never meant "a test container is here"
+// (bd-4xn). Dialing answers the question the callers are asking.
 func hasDoltTestPort() bool {
-	return os.Getenv("BEADS_DOLT_PORT") != ""
+	port, err := strconv.Atoi(strings.TrimSpace(os.Getenv("BEADS_DOLT_PORT")))
+	if err != nil || port <= 0 {
+		return false
+	}
+	conn, err := net.DialTimeout("tcp", net.JoinHostPort("127.0.0.1", strconv.Itoa(port)), 500*time.Millisecond)
+	if err != nil {
+		return false
+	}
+	_ = conn.Close()
+	return true
 }
 
 func requireHashIDIntegration(t *testing.T) string {
 	t.Helper()
 	if !hasDoltTestPort() {
-		t.Skip("skipping: Dolt test container not available")
+		t.Skip("skipping: no Dolt test container listening on BEADS_DOLT_PORT")
 	}
 	bdPath := getBDPath()
 	if _, err := os.Stat(bdPath); err != nil {

@@ -7,6 +7,8 @@ import (
 	"runtime"
 	"sync/atomic"
 	"testing"
+
+	"github.com/steveyegge/beads/internal/testenv"
 )
 
 var (
@@ -24,6 +26,10 @@ var (
 )
 
 func TestMain(m *testing.M) {
+	// First statement in TestMain: point every Dolt port variable at a dead
+	// port before anything in this package can resolve one. Helpers that
+	// start a server publish their own port and must run after this.
+	testenv.GuardProductionDolt()
 	if !flag.Parsed() {
 		flag.Parse()
 	}

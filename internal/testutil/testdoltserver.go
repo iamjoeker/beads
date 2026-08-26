@@ -16,10 +16,11 @@ import (
 	"time"
 
 	_ "github.com/go-sql-driver/mysql" // required by testcontainers Dolt module
-	"github.com/steveyegge/beads/internal/configfile"
 	"github.com/testcontainers/testcontainers-go"
 	tcexec "github.com/testcontainers/testcontainers-go/exec"
 	"github.com/testcontainers/testcontainers-go/modules/dolt"
+
+	"github.com/steveyegge/beads/internal/testenv"
 )
 
 // doltServer represents a running test Dolt container instance.
@@ -248,10 +249,15 @@ func terminateSharedContainer() {
 // store-backed test in the package failing with "Dolt server unreachable at
 // 127.0.0.1:1" rather than as anything naming the environment (bd-799).
 //
-// Taken from the resolver rather than re-spelled here: a list of vars to
-// publish that can drift from the list of vars that are read reintroduces the
-// shadow the moment a third spelling is added (bd-4xn).
-var doltPortEnvVars = configfile.DoltPortEnvVars
+// The list is taken from the production-Dolt guard rather than re-spelled
+// here: a list of vars to PUBLISH that can drift from the list of vars that
+// are READ reintroduces the shadow the moment a third spelling is added
+// (bd-4xn). testenv's list is configfile.DoltPortEnvVars plus GT_DOLT_PORT,
+// which no beads code reads but a subprocess resolving through Gas Town's own
+// resolver would — publishing over it costs one Setenv and closes that route.
+// TestDoltPortEnvVarsAreTheGuardedSet names the members literally, so dropping
+// one from either side fails a test rather than silently shrinking both.
+var doltPortEnvVars = testenv.DoltPortEnvVars()
 
 // publishDoltPortEnv points every port env var bd reads at the test container,
 // overwriting any ambient value.
@@ -264,11 +270,19 @@ func publishDoltPortEnv(port string) error {
 	return nil
 }
 
-// clearDoltPortEnv removes the port vars published by publishDoltPortEnv, so a
-// terminated container's port is not left behind for later code to dial.
+// clearDoltPortEnv retracts the terminated container's port so nothing dials a
+// dead endpoint.
+//
+// It restores the guarded sentinel rather than unsetting the variables. Unset
+// is how resolution reaches the 3307 production default, so a plain Unsetenv
+// here would hand every test that ran after the container was torn down the
+// live server — the guard would have held for the whole run and then let go at
+// the end of it. Both outcomes are "no container", but only one of them is
+// dead rather than production.
 func clearDoltPortEnv() {
+	guarded := strconv.Itoa(testenv.GuardedDoltPort)
 	for _, key := range doltPortEnvVars {
-		_ = os.Unsetenv(key)
+		_ = os.Setenv(key, guarded)
 	}
 }
 

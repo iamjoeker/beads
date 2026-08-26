@@ -378,8 +378,11 @@ census_run() {
 # BEADS_DOLT_SERVER_PORT before the legacy BEADS_DOLT_PORT, so naming only the
 # legacy one leaves whichever value the other holds in charge — the shape that
 # made a poisoned test-isolation guard inert (bd-4xn) and, before that, hid a
-# test container behind an ambient production port (bd-799). Either var being
-# set already means someone else has chosen the server for this run.
+# test container behind an ambient production port (bd-799). Since the
+# production-Dolt guard pins an unset BEADS_DOLT_SERVER_PORT to its dead port
+# at TestMain time, a half publish here now points the whole lane at that dead
+# port while a healthy shared server sits unused. Either var being set already
+# means someone else has chosen the server for this run.
 if [[ "${BEADS_TEST_SHARED_SERVER:-}" == "1" && -z "${BEADS_DOLT_PORT:-}" && -z "${BEADS_DOLT_SERVER_PORT:-}" ]]; then
     if command -v dolt &>/dev/null; then
         SHARED_DOLT_DIR=$(mktemp -d /tmp/beads-shared-test-dolt-XXXXXX)
