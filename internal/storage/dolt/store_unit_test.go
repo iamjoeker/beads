@@ -492,22 +492,43 @@ func TestApplyConfigDefaults_ExplicitPortPreservedWhenEnvUnset(t *testing.T) {
 // the test-mode production check runs last and unconditionally, whatever the
 // port's source, so the two shapes that could reach production still resolve
 // to the sentinel. Both are pinned below; measured, not assumed.
+//
+// RECONCILED again with bd-4xn: under BEADS_TEST_MODE=1 the resolver no longer
+// discards a non-production legacy value in favour of an ambient PRODUCTION
+// primary — it honours the legacy one. The first subtest's outcome therefore
+// changed from the dead sentinel to the container, which is the outcome bd-799
+// wanted in the first place; what has NOT changed is the invariant bd-799
+// exists to protect, that no shape here resolves to production. That half is
+// asserted alongside the port in every subtest below, so a future change that
+// re-broke it would fail here rather than pass on a coincidence.
 func TestApplyConfigDefaults_ServerPortEnvShadowsLegacyPort(t *testing.T) {
 	const containerPort = 54321
 
-	t.Run("partial publish with no caller port still sentinels", func(t *testing.T) {
+	// neverProduction is the bd-799 invariant, asserted independently of
+	// whichever port a given shape resolves to.
+	neverProduction := func(t *testing.T, cfg *Config) {
+		t.Helper()
+		if reasons := productionPortReasons(cfg); len(reasons) > 0 {
+			t.Errorf("resolved port %d is production: %v", cfg.ServerPort, reasons)
+		}
+	}
+
+	t.Run("partial publish with no caller port reaches the container", func(t *testing.T) {
 		t.Setenv("BEADS_TEST_MODE", "1")
 		t.Setenv("BEADS_DOLT_SERVER_PORT", fmt.Sprintf("%d", DefaultSQLPort)) // ambient
 		t.Setenv("BEADS_DOLT_PORT", fmt.Sprintf("%d", containerPort))         // partial publish
 
-		// bd-799's actual shape: nothing told the caller about the container,
-		// so the ambient production port is what the resolver finds.
+		// bd-799's actual shape: nothing told the caller about the container.
+		// The two vars disagree, the winner is production and the loser is
+		// not, so the bd-4xn guard honours the loser instead of resolving to
+		// production and then sentinelling it.
 		cfg := &Config{}
 		applyConfigDefaults(cfg)
 
-		if cfg.ServerPort != 1 {
-			t.Errorf("expected sentinel port 1 (ambient production port shadows the legacy var), got %d", cfg.ServerPort)
+		if cfg.ServerPort != containerPort {
+			t.Errorf("expected the legacy var's container port %d to survive the ambient production primary, got %d", containerPort, cfg.ServerPort)
 		}
+		neverProduction(t, cfg)
 	})
 
 	t.Run("caller-explicit container port outranks the ambient production var", func(t *testing.T) {
@@ -524,6 +545,7 @@ func TestApplyConfigDefaults_ServerPortEnvShadowsLegacyPort(t *testing.T) {
 		if cfg.ServerPortSource != doltserver.PortSourceCallerExplicit {
 			t.Errorf("expected ServerPortSource=%q, got %q", doltserver.PortSourceCallerExplicit, cfg.ServerPortSource)
 		}
+		neverProduction(t, cfg)
 	})
 
 	t.Run("a caller-explicit PRODUCTION port is still sentinelled", func(t *testing.T) {
@@ -540,6 +562,7 @@ func TestApplyConfigDefaults_ServerPortEnvShadowsLegacyPort(t *testing.T) {
 			if cfg.ServerPort != 1 {
 				t.Errorf("ambient=%q: expected sentinel port 1 for an explicit production port, got %d", ambient, cfg.ServerPort)
 			}
+			neverProduction(t, cfg)
 		}
 	})
 
@@ -554,6 +577,7 @@ func TestApplyConfigDefaults_ServerPortEnvShadowsLegacyPort(t *testing.T) {
 		if cfg.ServerPort != containerPort {
 			t.Errorf("expected container port %d, got %d", containerPort, cfg.ServerPort)
 		}
+		neverProduction(t, cfg)
 	})
 }
 

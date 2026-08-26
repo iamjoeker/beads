@@ -110,6 +110,12 @@ func isTestDatabaseName(name string) bool {
 //  2. BEADS_PRODUCTION_PORT env var, parsed to int, matches cfg.ServerPort.
 //  3. cfg.BeadsDir/dolt-server.port file present and contains cfg.ServerPort.
 //
+// Rules 1 and 2 need nothing but the port, so they live in
+// configfile.ProductionDoltPortReasons — configfile sits below this package
+// and needs the same predicate for the BEADS_TEST_MODE port-env guard
+// (bd-4xn). One definition, two callers: a port this function calls
+// production is one configfile's guard also refuses to resolve to.
+//
 // Rules 2 and 3 are suppressed when BEADS_TEST_SERVER=1: they are
 // heuristics (an env var or an on-disk port file, either of which can be
 // stale or misconfigured) rather than the fixed default port, so an
@@ -131,21 +137,15 @@ func productionPortReasons(cfg *Config) []string {
 	if cfg == nil || cfg.ServerPort <= 0 {
 		return nil
 	}
-	var reasons []string
-	if cfg.ServerPort == DefaultSQLPort {
-		reasons = append(reasons, fmt.Sprintf("port %d == DefaultSQLPort", cfg.ServerPort))
-	}
-	// Rules 2 and 3 are the suppressible heuristics: honor the operator's
-	// BEADS_TEST_SERVER=1 opt-in for a dedicated test server by skipping
-	// them. Rule 1 above is intentionally evaluated before this check and
-	// is never suppressed.
+	// Rules 1 and 2 are port-only and shared with configfile, which needs the
+	// same predicate for the BEADS_TEST_MODE port-env guard (bd-4xn) and sits
+	// below this package. Rule 2's BEADS_TEST_SERVER=1 suppression lives there
+	// too; rule 1 is never suppressed.
+	reasons := configfile.ProductionDoltPortReasons(cfg.ServerPort)
+	// Rule 3 is the suppressible heuristic that needs a resolved beads dir:
+	// honor the operator's BEADS_TEST_SERVER=1 opt-in by skipping it.
 	if os.Getenv("BEADS_TEST_SERVER") == "1" {
 		return reasons
-	}
-	if env := os.Getenv("BEADS_PRODUCTION_PORT"); env != "" {
-		if p, err := strconv.Atoi(env); err == nil && p > 0 && p == cfg.ServerPort {
-			reasons = append(reasons, fmt.Sprintf("BEADS_PRODUCTION_PORT=%d matches", p))
-		}
 	}
 	if cfg.BeadsDir != "" {
 		if p := doltserver.ReadPortFile(cfg.BeadsDir); p > 0 && p == cfg.ServerPort {
@@ -1475,10 +1475,12 @@ func applyConfigDefaults(cfg *Config) {
 		// ran. That assertion outranks the ambient env vars below (be-wf9a.1).
 		cfg.ServerPortSource = doltserver.PortSourceCallerExplicit
 	}
-	envPort := os.Getenv("BEADS_DOLT_SERVER_PORT")
-	if envPort == "" {
-		envPort = os.Getenv("BEADS_DOLT_PORT") // legacy fallback
-	}
+	// Env resolution is delegated to configfile.ResolveDoltPortEnv so this
+	// site, configfile.GetDoltServerPort and cmd/bd's serverClonePort share
+	// one precedence — including the BEADS_TEST_MODE guard that keeps a
+	// poisoned legacy var from being silently discarded in favor of an
+	// ambient production port (bd-4xn).
+	envPort := configfile.ResolveDoltPortEnv()
 	// Also fires when ServerPort is already nonzero but its source isn't
 	// authoritative (e.g. PortSourcePortFile from applyResolvedConfig's own
 	// doltserver.DefaultConfig fallback above) — bd's own port-file
@@ -1486,15 +1488,13 @@ func applyConfigDefaults(cfg *Config) {
 	// (be-9tju; regression of the hq-27t bug class). A genuinely
 	// caller-explicit ServerPort (PortSourceCallerExplicit, stamped above)
 	// still wins: IsAuthoritative() is true for it.
-	if envPort != "" && (cfg.ServerPort == 0 || !cfg.ServerPortSource.IsAuthoritative()) {
-		if p, err := strconv.Atoi(envPort); err == nil && p > 0 {
-			cfg.ServerPort = p
-			// This env read happens before doltserver.DefaultConfig is
-			// consulted below, but it is the same authoritative source
-			// (BEADS_DOLT_SERVER_PORT / legacy BEADS_DOLT_PORT) — record it
-			// so the auto-start fail-closed check in newServerMode sees it.
-			cfg.ServerPortSource = doltserver.PortSourceEnv
-		}
+	if envPort.Found && (cfg.ServerPort == 0 || !cfg.ServerPortSource.IsAuthoritative()) {
+		cfg.ServerPort = envPort.Port
+		// This env read happens before doltserver.DefaultConfig is
+		// consulted below, but it is the same authoritative source
+		// (BEADS_DOLT_SERVER_PORT / legacy BEADS_DOLT_PORT) — record it
+		// so the auto-start fail-closed check in newServerMode sees it.
+		cfg.ServerPortSource = doltserver.PortSourceEnv
 	}
 	// If env var didn't provide a port, consult the full resolution chain:
 	// port file > config.yaml > metadata.json (GH#2590).
