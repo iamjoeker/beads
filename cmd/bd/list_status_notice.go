@@ -51,6 +51,24 @@ func countHiddenByStatus(ctx context.Context, s workapi.StatusSearcher, listing 
 	return count
 }
 
+// countHiddenPinnedByStatus counts the live rows the listing dropped for their
+// status AND for being pinned — the rows in the seam between this notice and
+// the pinned one, which the two probes could not see while each inherited the
+// other's term (bd-6xa).
+//
+// It fails to unknownIssueCount separately from countHiddenByStatus rather than
+// sharing its verdict: one probe failing is not evidence about the other, and a
+// zero substituted for "could not ask" here would hide exactly the rows this
+// count was added to disclose.
+func countHiddenPinnedByStatus(ctx context.Context, s workapi.StatusSearcher, listing workapi.StatusNoticeContext) int {
+	count, err := listing.CountHiddenPinned(ctx, s, statusProbeRowCap)
+	if err != nil {
+		debug.Logf("[list] could not probe for pinned live rows hidden from a status-filtered listing: %v\n", err)
+		return unknownIssueCount
+	}
+	return count
+}
+
 // hiddenByStatusNoticeLines renders the notice for a listing whose status
 // selector hid live work. It returns nil when there is nothing measured to say:
 // a listing that was not narrowed, a probe that could not run, or a probe that
@@ -62,10 +80,18 @@ func countHiddenByStatus(ctx context.Context, s workapi.StatusSearcher, listing 
 // remedy differs depending on whether they wanted one more status or all of
 // them.
 //
+// pinnedHidden is counted and reported apart from hidden because the two have
+// different remedies, not to make the message longer. The rows it counts were
+// dropped TWICE — by the status selector and by the pinned default — so
+// `--status live`, the fix the base notice offers, still does not show them
+// (bd-6xa). Folding them into one number under one remedy would send the reader
+// away believing they had now seen everything, which is the failure this whole
+// notice exists to end.
+//
 // store names the database that was searched, so the count is about a place and
 // not about the tracker in general.
-func hiddenByStatusNoticeLines(dropped []string, hidden, resultCount int, store string) []string {
-	if len(dropped) == 0 || hidden <= 0 {
+func hiddenByStatusNoticeLines(dropped []string, hidden, pinnedHidden, resultCount int, store string) []string {
+	if len(dropped) == 0 || (hidden <= 0 && pinnedHidden <= 0) {
 		return nil
 	}
 
@@ -77,24 +103,58 @@ func hiddenByStatusNoticeLines(dropped []string, hidden, resultCount int, store 
 		where = " in " + store
 	}
 
-	// At the cap the scan stopped counting, so the number is a floor. Saying it
-	// flat would be the probe overstating what it measured.
-	count := fmt.Sprintf("%d", hidden)
-	if hidden >= statusProbeRowCap {
-		count = fmt.Sprintf("at least %d", hidden)
+	explain := fmt.Sprintf("  --status matches the status column exactly; it is not \"not closed\". Not shown: %s.", strings.Join(dropped, ", "))
+	const liveFix = "  Fix: re-run with --status live for all work that is not closed, or name the statuses you want."
+
+	// The pinned-only case is a listing whose status selector hid nothing on its
+	// own: every row it dropped was pinned as well, so the base remedy would be
+	// wrong on its own terms and the whole notice speaks about the doubly
+	// hidden rows instead.
+	if hidden <= 0 {
+		count := statusProbeCount(pinnedHidden)
+		headline := fmt.Sprintf("note: %d issue(s) listed, and %s further LIVE issue(s)%s were hidden by --status and the pinned default together.", resultCount, count, where)
+		if resultCount == 0 {
+			headline = fmt.Sprintf("note: nothing matched your --status, but %s PINNED LIVE issue(s)%s match this same query with another status.", count, where)
+		}
+		return []string{
+			headline,
+			explain,
+			"  Those rows are pinned as well, and --status live alone will not reveal them.",
+			"  Fix: re-run with --status live --pinned.",
+		}
 	}
 
+	count := statusProbeCount(hidden)
 	var headline string
 	if resultCount == 0 {
 		headline = fmt.Sprintf("note: nothing matched your --status, but %s LIVE issue(s)%s match this same query with another status.", count, where)
 	} else {
 		headline = fmt.Sprintf("note: %d issue(s) listed, and %s further LIVE issue(s)%s were hidden by --status alone.", resultCount, count, where)
 	}
+	if pinnedHidden <= 0 {
+		return []string{headline, explain, liveFix}
+	}
+	// "further" because the counts are disjoint: these rows are not among the
+	// number in the headline, and a reader who added the two would otherwise be
+	// double-counting. The remedy line stays LAST, as it does in the other two
+	// notices, and names the selector that reveals BOTH sets rather than
+	// leaving the reader to combine two fixes.
 	return []string{
 		headline,
-		fmt.Sprintf("  --status matches the status column exactly; it is not \"not closed\". Not shown: %s.", strings.Join(dropped, ", ")),
-		"  Fix: re-run with --status live for all work that is not closed, or name the statuses you want.",
+		explain,
+		fmt.Sprintf("  %s further LIVE issue(s) were hidden by --status AND the pinned default, which --status live alone will not reveal.", statusProbeCount(pinnedHidden)),
+		"  Fix: re-run with --status live --pinned for both sets, or --status live for the first alone.",
 	}
+}
+
+// statusProbeCount renders a probe's count. At the cap the scan stopped
+// counting, so the number is a floor; saying it flat would be the probe
+// overstating what it measured.
+func statusProbeCount(n int) string {
+	if n >= statusProbeRowCap {
+		return fmt.Sprintf("at least %d", n)
+	}
+	return fmt.Sprintf("%d", n)
 }
 
 // printHiddenByStatusNotice emits the status disclosure and reports whether it
@@ -107,11 +167,20 @@ func hiddenByStatusNoticeLines(dropped []string, hidden, resultCount int, store 
 // stderr and --quiet for the reasons the other two notices use them: --json
 // output must stay parseable, and every other non-error advisory in this
 // package goes to stderr and respects --quiet the same way.
+//
+// This notice is NOT gated on a label predicate, and printHiddenPinnedNotice
+// is — so the doubly-hidden count reaches a plain `bd list --status open` while
+// the pinned notice, on the same listing, stays silent about the pinned rows
+// that DID match the caller's status. That asymmetry is deliberate here and not
+// worth reproducing: gating this count on a label would leave the gap bd-6xa is
+// about open for the most common invocation on this rig. Whether the pinned
+// notice should speak on an unlabeled listing is a question about ITS scope,
+// filed separately rather than decided from inside this one.
 func printHiddenByStatusNotice(ctx context.Context, s workapi.StatusSearcher, listing workapi.StatusNoticeContext, resultCount int, storeDesc string) bool {
 	if isQuiet() || !listing.Applies() {
 		return false
 	}
-	lines := hiddenByStatusNoticeLines(listing.Dropped(), countHiddenByStatus(ctx, s, listing), resultCount, storeDesc)
+	lines := hiddenByStatusNoticeLines(listing.Dropped(), countHiddenByStatus(ctx, s, listing), countHiddenPinnedByStatus(ctx, s, listing), resultCount, storeDesc)
 	for _, line := range lines {
 		fmt.Fprintln(os.Stderr, line)
 	}
@@ -129,10 +198,17 @@ func printHiddenByStatusNotice(ctx context.Context, s workapi.StatusSearcher, li
 // would send a reader looking in the wrong place for issues that are in the
 // table already read.
 //
-// It does NOT suppress the pinned notice. The two populations are disjoint by
+// It does NOT suppress the pinned notice. The populations are disjoint by
 // construction — the status probe inherits the pinned exclusion, and the pinned
 // probe inherits the caller's status term — so both counts are true, both are
 // about rows this listing hid, and they have different remedies.
+//
+// That construction is what left a row hidden by BOTH terms outside both counts
+// (bd-6xa): each probe stops exactly where the other begins, and nothing stood
+// in the seam. The intersection is now counted by the status notice's own
+// second probe and reported on its own line, with its own remedy, so the three
+// counts partition the hidden rows rather than merely failing to overlap.
+// Disjoint was never the property worth having; exhaustive was.
 func printListNotices(ctx context.Context, s workapi.WispSearcher, p listLabelPredicates, status workapi.StatusNoticeContext, pinned workapi.PinnedNoticeContext, resultCount int, storeDesc string) {
 	if printHiddenByStatusNotice(ctx, s, status, resultCount, storeDesc) {
 		printHiddenPinnedNotice(ctx, s, p, pinned, resultCount, storeDesc)
