@@ -47,7 +47,19 @@ func DrainAndCloseProbe(conn net.Conn) bool {
 // before the probe connection closed — a dial-succeeded-but-mute server
 // (TCP accepting, MySQL engine not yet writing) reports greeted == false.
 func ProbeSQLServer(network, addr string, timeout time.Duration) (greeted bool, err error) {
-	conn, dialErr := net.DialTimeout(network, addr, timeout)
+	// G704 (SSRF via taint analysis) is waived on the dial below, for the same
+	// reason the two dials in cmd/bd/dolt.go are: addr is the Dolt sql-server
+	// address this workspace is configured to talk to, dialed by the user's own
+	// process on their own machine — there is no server here relaying a
+	// caller-supplied URL across a privilege boundary. The dial is also bare
+	// TCP: the probe sends nothing and returns nothing but whether a greeting
+	// arrived.
+	//
+	// The directive is on the statement rather than on a line of its own
+	// because that is the line gosec reports (probe.go:50:34) and the rule only
+	// fires on some runs — a placement that had to be inferred could not be
+	// checked against a linter that answers differently run to run. See bd-824.
+	conn, dialErr := net.DialTimeout(network, addr, timeout) //nolint:gosec // G704: see above
 	if dialErr != nil {
 		return false, dialErr
 	}

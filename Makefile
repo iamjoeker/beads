@@ -44,7 +44,7 @@ endif
 endif
 
 .PHONY: all build doctor-build test test-icu-path test-full-cgo test-dolt test-regression test-upgrade test-cross-version test-migration corpus-regen bench bench-quick clean clean-test-tmp install install-force help check-up-to-date fmt fmt-check check-testing-short
-.PHONY: ci-pr-core ci-pr-policy ci-pr-lint ci-package-mcp ci-package-npm
+.PHONY: ci-pr-core ci-pr-policy ci-pr-lint ci-package-mcp ci-package-npm golangci-lint
 .PHONY: api-gen api-check
 
 # Default target
@@ -214,6 +214,19 @@ ci-pr-policy:
 
 ci-pr-lint:
 	@./scripts/ci/pr-lint.sh
+
+# Print the path to a golangci-lint binary at the version .golangci-version
+# pins, installing it first if nothing on this machine matches. Useful for
+# running the linter by hand without picking up whichever build happens to be
+# on PATH:
+#
+#   $$(make -s golangci-lint) run --config=.golangci.yml ./internal/...
+#
+# The versions matter more than they look: the pin and a `@latest` install
+# disagree about the finding SET, and the newer one's gosec taint rules are not
+# deterministic on this tree. See scripts/ci/lib/golangci-lint.sh and bd-824.
+golangci-lint:
+	@bash -c 'source scripts/ci/lib/golangci-lint.sh && golangci_lint_binary "$$PWD"'
 
 # The generated half of the wire contract. The document is hand-written and is
 # the source of truth; this file is its output.
@@ -436,6 +449,7 @@ help:
 	@echo "  make ci-pr-core  - Run required PR core Go test wrapper"
 	@echo "  make ci-pr-policy - Run required PR policy wrapper"
 	@echo "  make ci-pr-lint  - Run required PR formatting and lint wrapper"
+	@echo "  make golangci-lint - Print (installing if needed) the pinned golangci-lint binary"
 	@echo "  make ci-package-mcp - Run MCP Python package gate"
 	@echo "  make ci-package-npm - Run npm package gate"
 	@echo "  make test-regression - Run differential regression tests (baseline vs candidate)"
