@@ -238,6 +238,30 @@ func testMainInner(m *testing.M) int {
 		}
 	}()
 
+	// And the actor pair, for the same reason and in the same two tests: a Gas
+	// Town agent shell exports BD_ACTOR=<agent address>, viper's AutomaticEnv
+	// binds it to the "actor" key, and it outranks the target workspace's
+	// config.yaml — so both context-binding tests read the invoking agent's
+	// address where they assert "target-actor" (bd-mc9). BEADS_ACTOR is scrubbed
+	// beside it because it is the same setting one rung higher in precedence:
+	// leaving it would move the failure rather than fix it the moment a shell
+	// exports the current name instead of the deprecated one. Tests that need
+	// either variable set it explicitly via t.Setenv.
+	origBdActor := os.Getenv("BD_ACTOR")
+	os.Unsetenv("BD_ACTOR")
+	defer func() {
+		if origBdActor != "" {
+			os.Setenv("BD_ACTOR", origBdActor)
+		}
+	}()
+	origBeadsActor := os.Getenv("BEADS_ACTOR")
+	os.Unsetenv("BEADS_ACTOR")
+	defer func() {
+		if origBeadsActor != "" {
+			os.Setenv("BEADS_ACTOR", origBeadsActor)
+		}
+	}()
+
 	// BD_BRANCH is no longer used (all writers operate on main with transactions).
 
 	// Start shared test Dolt server if the hook is registered (CGO builds).
