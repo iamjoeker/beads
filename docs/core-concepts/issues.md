@@ -158,10 +158,20 @@ bd close bd-42 --json
 
 ## Searching and Filtering
 
+`--status` matches the status column *exactly*. `--status open` means
+`status = open`, not "not closed" — it drops in_progress, blocked, deferred and
+hooked beads, which on a busy repo is much of the live work. A bare `bd list`
+is the filter for "what work exists"; reach for `--status` only when you want
+one particular status.
+
 ```bash
-# By status
+# Everything that is not closed — the usual question
+bd list
+
+# By status — one exact status per name, comma-separated for an OR set
 bd list --status open
 bd list --status in_progress
+bd list --status open,in_progress,blocked
 
 # By priority
 bd list --priority 1
@@ -176,5 +186,5 @@ bd list --label-any urgent,critical
 bd list --label-all backend,security
 
 # Combined filters
-bd list --status open --priority 1 --type bug --json
+bd list --priority 1 --type bug --json
 ```

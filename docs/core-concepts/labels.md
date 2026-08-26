@@ -54,7 +54,7 @@ bd list --label backend,auth
 bd list --label-any frontend,backend
 
 # Combine filters
-bd list --status open --priority 1 --label security
+bd list --priority 1 --label security
 ```
 
 ## Separating labels, and labels with spaces
@@ -142,7 +142,7 @@ admin
 
 **Example:**
 ```bash
-bd list --label payments --status open  # All open payment issues
+bd list --label payments                # All live payment issues
 bd list --label-any auth,security       # Security-related work
 ```
 
@@ -200,7 +200,7 @@ release-blocker
 
 **Example:**
 ```bash
-bd list --label v1.0 --status open    # What's left for v1.0?
+bd list --label v1.0                  # What's left for v1.0?
 bd label add bd-42 release-blocker
 ```
 
@@ -247,8 +247,8 @@ All specified labels must be present:
 # Issues that are BOTH backend AND urgent
 bd list --label backend,urgent
 
-# Open bugs that need review AND tests
-bd list --status open --type bug --label needs-review,needs-tests
+# Live bugs that need review AND tests
+bd list --type bug --label needs-review,needs-tests
 ```
 
 ### OR Filtering (--label-any)
@@ -318,7 +318,7 @@ bd label add bd-44 v1.0
 
 # Track v1.0 progress
 bd list --label v1.0 --status closed    # Done
-bd list --label v1.0 --status open      # Remaining
+bd list --label v1.0                    # Remaining
 bd stats  # Overall progress
 
 # Mark critical items
@@ -332,7 +332,7 @@ bd label add bd-45 release-blocker
 bd ready --json | jq '.[] | select(.labels[]? == "backend")'
 
 # Frontend team finds small tasks
-bd list --status open --label frontend,small
+bd list --label frontend,small
 
 # Find help-wanted items for new contributors
 bd list --label help-wanted,good-first-issue
@@ -655,7 +655,7 @@ done
 
 # Track sprint progress
 bd list --label sprint-12 --status closed    # Velocity
-bd list --label sprint-12 --status open      # Remaining
+bd list --label sprint-12                    # Remaining
 bd stats | grep "In Progress"                # Current WIP
 ```
 

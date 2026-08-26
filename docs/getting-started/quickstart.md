@@ -220,7 +220,7 @@ Ready Work Explanation
 ─ Summary: 1 ready, 2 blocked
 ```
 
-**Note:** `bd ready` is not the same as `bd list --status open`. The `list` command shows all open issues regardless of blockers. The `ready` command computes the dependency graph and only shows truly unblocked work.
+**Note:** `bd ready` is not the same as `bd list`. The `list` command shows every bead that is not closed, regardless of blockers. The `ready` command computes the dependency graph and only shows truly unblocked work. Note also that `bd list --status open` is narrower than both: `--status` matches the status column exactly, so it drops in_progress, blocked, deferred and hooked beads.
 
 ## Work the queue
 
@@ -360,7 +360,7 @@ bd admin cleanup --force
 - Filter ready work: `bd ready --priority 1`
 - Explain the graph: `bd ready --explain`
 - Check graph integrity: `bd graph check`
-- Search issues: `bd list --status open`
+- List live work: `bd list`
 - Detect cycles: `bd dep cycles`
 - Gates for PR/CI sync: [`bd gate`](/cli-reference/gate)
 - More sync scenarios: [`bd dolt`](/cli-reference/dolt)

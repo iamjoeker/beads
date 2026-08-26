@@ -219,28 +219,28 @@ func BuildListFilter(in issueops.ListRequest, cfg ListConfig) (types.IssueFilter
 	}
 
 	// The status selector is parsed once here; every consumer below — the
-	// "all" short-circuit, the default exclusions, the pinned default —
-	// works from the same parts so their readings cannot drift.
+	// "all" and "live" short-circuits, the default exclusions, the pinned
+	// default — works from the same parts so their readings cannot drift.
 	statusParts := splitStatusSelector(in.Status)
-	statusAll := len(statusParts) == 1 && statusParts[0] == "all"
+	statusAll := selectorIs(statusParts, StatusSelectorAll)
+	statusLive := selectorIs(statusParts, StatusSelectorLive)
 
 	if in.ReadyFlag {
 		s := types.StatusOpen
 		filter.Status = &s
-	} else if len(statusParts) > 0 && !statusAll {
+	} else if len(statusParts) > 0 && !statusAll && !statusLive {
 		if err := applyStatusParts(&filter, statusParts, cfg.CustomStatusNames()); err != nil {
 			return filter, err
 		}
 	}
 
-	if len(statusParts) == 0 && !in.AllFlag && !in.ReadyFlag && !in.PinnedFlag {
-		excludeStatuses := []types.Status{types.StatusClosed, types.StatusPinned}
-		for _, cs := range cfg.CustomStatuses {
-			if cs.Category == types.CategoryDone || cs.Category == types.CategoryFrozen {
-				excludeStatuses = append(excludeStatuses, types.Status(cs.Name))
-			}
-		}
-		filter.ExcludeStatus = excludeStatuses
+	// "live" takes the SAME arm as no selector at all, rather than expanding to
+	// an OR set of the live status names. Expanding it would fix the meaning of
+	// "live" at this call and leave a second definition to drift from the
+	// default listing's; sharing the arm makes `--status live` equal to a bare
+	// `bd list` by construction, which is the equality the flag help promises.
+	if (len(statusParts) == 0 || statusLive) && !in.AllFlag && !in.ReadyFlag && !in.PinnedFlag {
+		filter.ExcludeStatus = LiveStatusExclusions(cfg)
 	}
 
 	if in.Priority != nil {
@@ -446,6 +446,49 @@ func applyTypeSuppressions(in issueops.ListRequest, cfg ListConfig, filter *type
 	}
 }
 
+// The two selectors that name a SET rather than a status. Everything else a
+// caller can type in --status is matched against the status column exactly,
+// which is the whole of bd-j3z: `--status open` means "the status is literally
+// open", and a reader who took it for "not closed" lost the hooked, in_progress,
+// blocked and deferred rows without being told. These two are the names for
+// what such a reader meant.
+const (
+	// StatusSelectorAll selects every status, closed included.
+	StatusSelectorAll = "all"
+	// StatusSelectorLive selects every status the default listing shows:
+	// everything except closed, pinned, and the custom statuses categorized
+	// done or frozen. It is the same arm as no selector at all, so it cannot
+	// come to mean something a bare `bd list` does not.
+	StatusSelectorLive = "live"
+)
+
+// selectorIs reports whether the parsed selector is exactly the given set
+// name. Both set selectors are single-part by construction — applyStatusParts
+// refuses to combine them with a status — so a multi-part selector containing
+// one is a caller error, not a set selection.
+func selectorIs(parts []string, name string) bool {
+	return len(parts) == 1 && parts[0] == name
+}
+
+// LiveStatusExclusions returns the statuses a listing of live work excludes:
+// closed, the pinned status, and every custom status categorized done or
+// frozen.
+//
+// Built-in `deferred` is NOT here even though its category is frozen. That is
+// deliberate and load-bearing for bd-j3z: deferred beads are exactly the ones
+// nobody revisits, which makes them the worst thing for a "what work exists"
+// listing to hide, and the default listing has always shown them. Deriving this
+// set from the categories instead would silently drop them.
+func LiveStatusExclusions(cfg ListConfig) []types.Status {
+	exclude := []types.Status{types.StatusClosed, types.StatusPinned}
+	for _, cs := range cfg.CustomStatuses {
+		if cs.Category == types.CategoryDone || cs.Category == types.CategoryFrozen {
+			exclude = append(exclude, types.Status(cs.Name))
+		}
+	}
+	return exclude
+}
+
 // splitStatusSelector splits a --status selector into its trimmed
 // comma-separated parts. An empty selector yields nil. This is the only
 // reading of the selector syntax; everything downstream works on the parts.
@@ -467,12 +510,17 @@ func splitStatusSelector(status string) []string {
 // those beads. allApplies is false under --ready, which forces status open
 // and otherwise ignores the selector, so "all" must not lift the pinned
 // default there.
+//
+// "live" is absent on purpose: it is the default listing under another name,
+// and the default listing hides pinned rows. Admitting them here would make
+// `--status live` differ from a bare `bd list`, which is the one thing that
+// selector promises it does not do.
 func statusSelectsPinned(parts []string, allApplies bool) bool {
 	for _, part := range parts {
 		switch part {
 		case "pinned", "hooked":
 			return true
-		case "all":
+		case StatusSelectorAll:
 			if allApplies {
 				return true
 			}
@@ -504,6 +552,13 @@ func applyStatusParts(filter *types.IssueFilter, parts []string, customStatusNam
 	if len(parts) == 1 {
 		s := types.Status(parts[0])
 		if !s.IsValidWithCustom(customStatusNames) {
+			// The set selectors reach here only from a caller that does not
+			// implement them — BuildListFilter answers both before this point.
+			// Naming them as statuses that do not exist would be true and
+			// useless; a caller who typed one learned it from `bd list`.
+			if parts[0] == StatusSelectorAll || parts[0] == StatusSelectorLive {
+				return fmt.Errorf("status %q is a `bd list` selector, not a status this command filters on (valid: %s)", parts[0], ValidStatusList(customStatusNames))
+			}
 			return fmt.Errorf("invalid status %q (valid: %s)", parts[0], ValidStatusList(customStatusNames))
 		}
 		filter.Status = &s
@@ -513,11 +568,12 @@ func applyStatusParts(filter *types.IssueFilter, parts []string, customStatusNam
 	for _, part := range parts {
 		s := types.Status(part)
 		if !s.IsValidWithCustom(customStatusNames) {
-			// "all" is a real selector on its own (every status), so failing
-			// it as merely "invalid" would contradict the flag help. A custom
-			// status literally named "all" passes validation above instead.
-			if part == "all" {
-				return fmt.Errorf(`status "all" cannot be combined with other statuses`)
+			// "all" and "live" are real selectors on their own (every status,
+			// and every status a bare listing shows), so failing them as merely
+			// "invalid" would contradict the flag help. A custom status
+			// literally named "all" or "live" passes validation above instead.
+			if part == StatusSelectorAll || part == StatusSelectorLive {
+				return fmt.Errorf("status %q cannot be combined with other statuses", part)
 			}
 			return fmt.Errorf("invalid status %q in multi-status filter (valid: %s)", part, ValidStatusList(customStatusNames))
 		}

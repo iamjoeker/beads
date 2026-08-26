@@ -223,21 +223,35 @@ func watchIssues(ctx context.Context, store storage.DoltStorage, filter types.Is
 }
 
 func openAndPrepare(ctx context.Context, in listInput) (uow.UnitOfWork, types.IssueFilter, error) {
+	uw, filter, _, err := openAndPrepareWithConfig(ctx, in)
+	return uw, filter, err
+}
+
+// openAndPrepareWithConfig is openAndPrepare for the callers that need the
+// CONFIG too, not only the filter it produced.
+//
+// The status disclosure is the one such caller: which statuses count as live
+// depends on the custom statuses' categories, and those live in the config
+// rather than in the filter. It is handed back from here rather than reloaded
+// beside the notice so both readings come from the same load — a second
+// LoadUOWListConfig could answer differently on a store someone is configuring,
+// and the notice would then describe a listing that never ran.
+func openAndPrepareWithConfig(ctx context.Context, in listInput) (uow.UnitOfWork, types.IssueFilter, workapi.ListConfig, error) {
 	uw, err := openProxiedListUOW(ctx)
 	if err != nil {
-		return nil, types.IssueFilter{}, err
+		return nil, types.IssueFilter{}, workapi.ListConfig{}, err
 	}
 	cfg, err := workapi.LoadUOWListConfig(ctx, uw)
 	if err != nil {
 		uw.Close(ctx)
-		return nil, types.IssueFilter{}, err
+		return nil, types.IssueFilter{}, workapi.ListConfig{}, err
 	}
 	filter, err := workapi.BuildListFilter(in.ListRequest, cfg)
 	if err != nil {
 		uw.Close(ctx)
-		return nil, types.IssueFilter{}, err
+		return nil, types.IssueFilter{}, workapi.ListConfig{}, err
 	}
-	return uw, filter, nil
+	return uw, filter, cfg, nil
 }
 
 func runListProxiedHierarchicalParent(ctx context.Context, uw uow.UnitOfWork, in listInput, filter types.IssueFilter) error {
