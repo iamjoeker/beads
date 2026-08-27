@@ -31,6 +31,9 @@ case "$CENSUS_MODE" in
 esac
 
 DOLT_COVERAGE_MODE="${BEADS_TEST_DOLT_COVERAGE:-auto}"
+# A misspelt waiver is worth an error rather than a silent fall-through to
+# auto: the user who typed it believed they had waived the tier, and would
+# read whatever came next as the result of that decision.
 if [[ "$DOLT_COVERAGE_MODE" != "auto" && "$DOLT_COVERAGE_MODE" != "off" ]]; then
     echo "FATAL: BEADS_TEST_DOLT_COVERAGE=$DOLT_COVERAGE_MODE; valid values are 'auto' (default) and 'off'" >&2
     exit 1
