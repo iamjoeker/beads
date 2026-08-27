@@ -100,11 +100,7 @@ func TestContributorRoutingTracer(t *testing.T) {
 		ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
 		defer cancel()
 
-		projectStore, err := dolt.New(ctx, &dolt.Config{Path: projectDBPath})
-		if err != nil {
-			t.Skipf("skipping: Dolt server not available: %v", err)
-		}
-		defer projectStore.Close()
+		projectStore := newTestStoreIsolatedDB(t, projectDBPath, "proj")
 
 		// Set routing config in project store (canonical keys)
 		if err := projectStore.SetConfig(ctx, "routing.mode", "auto"); err != nil {
@@ -151,11 +147,7 @@ func TestContributorRoutingTracer(t *testing.T) {
 
 		// Initialize planning database and verify we can create issues there
 		planningDBPath := filepath.Join(planningBeadsDir, "beads.db")
-		planningStore, err := dolt.New(ctx, &dolt.Config{Path: planningDBPath})
-		if err != nil {
-			t.Skipf("skipping: Dolt server not available: %v", err)
-		}
-		defer planningStore.Close()
+		planningStore := newTestStoreIsolatedDB(t, planningDBPath, "plan")
 
 		// Initialize planning store with required config
 		if err := planningStore.SetConfig(ctx, "issue_prefix", "plan-"); err != nil {
@@ -205,11 +197,7 @@ func TestBackwardCompatContributorConfig(t *testing.T) {
 	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
 	defer cancel()
 
-	store, err := dolt.New(ctx, &dolt.Config{Path: dbPath})
-	if err != nil {
-		t.Skipf("skipping: Dolt server not available: %v", err)
-	}
-	defer store.Close()
+	store := newTestStoreIsolatedDB(t, dbPath, "compat")
 
 	// Set LEGACY contributor.* keys (what old versions of bd init --contributor would set)
 	if err := store.SetConfig(ctx, "contributor.auto_route", "true"); err != nil {
@@ -258,6 +246,36 @@ func TestBackwardCompatContributorConfig(t *testing.T) {
 // =============================================================================
 // Phase 4: E2E Tests for all sync modes and routing scenarios
 // =============================================================================
+
+// Every store in this file is opened through newTestStoreIsolatedDB, the same
+// helper the other cmd/bd routing tests use (routing_read_test.go,
+// close_routing_test.go). It is not interchangeable with a bare
+// dolt.New(&dolt.Config{Path: ...}), and the difference is what bd-7ni was:
+//
+//	store, err := dolt.New(ctx, &dolt.Config{Path: dbPath})
+//	if err != nil { t.Skipf("skipping: Dolt server not available: %v", err) }
+//
+// With only Path set, applyConfigDefaults invents a database name by hashing
+// Path under BEADS_TEST_MODE=1 and CreateIfMissing is false, so the open asks
+// the test container for testdb_<hash> — a name nothing ever created. Measured
+// under the real-container gate with BEADS_CMD_BD_REQUIRE_DOLT=1 set, every one
+// of those opens failed with `database "testdb_..." not found on Dolt server at
+// 127.0.0.1:<port>`, and because the bail-out was t.Skipf the package still
+// exited 0 and printed "ok": 9 of this file's top-level tests reported green in
+// a gate built to make a missing Dolt fatal, without reaching an assertion. The
+// message they printed — "Dolt server not available" — was false; the server was
+// up and answering on that very port.
+//
+// newTestStoreIsolatedDB names the database itself, passes CreateIfMissing, and
+// writes metadata.json next to dbPath so anything that later reopens the
+// workspace by path resolves the same database. Its own t.Skip fires only when
+// testDoltServerPort is 0, and BEADS_CMD_BD_REQUIRE_DOLT=1 turns that into a
+// hard failure of the run (startTestDoltServer), so it cannot go green silently
+// the way the skips above did.
+//
+// Isolated rather than the shared branch-per-test database: these tests assert
+// that an issue created in one store is NOT visible in another, which is only
+// meaningful across genuinely separate databases.
 
 // contributorRoutingEnv provides a reusable test environment for contributor routing tests
 type contributorRoutingEnv struct {
@@ -309,10 +327,7 @@ func (env *contributorRoutingEnv) cleanup() {
 func (env *contributorRoutingEnv) initProjectStore(syncMode string) *dolt.DoltStore {
 	env.t.Helper()
 	projectDBPath := filepath.Join(env.projectDir, ".beads", "beads.db")
-	store, err := dolt.New(env.ctx, &dolt.Config{Path: projectDBPath})
-	if err != nil {
-		env.t.Skipf("skipping: Dolt server not available: %v", err)
-	}
+	store := newTestStoreIsolatedDB(env.t, projectDBPath, "proj")
 
 	// Set routing config
 	if err := store.SetConfig(env.ctx, "routing.mode", "auto"); err != nil {
@@ -350,10 +365,7 @@ func (env *contributorRoutingEnv) initProjectStore(syncMode string) *dolt.DoltSt
 func (env *contributorRoutingEnv) initPlanningStore() *dolt.DoltStore {
 	env.t.Helper()
 	planningDBPath := filepath.Join(env.planningDir, ".beads", "beads.db")
-	store, err := dolt.New(env.ctx, &dolt.Config{Path: planningDBPath})
-	if err != nil {
-		env.t.Skipf("skipping: Dolt server not available: %v", err)
-	}
+	store := newTestStoreIsolatedDB(env.t, planningDBPath, "plan")
 
 	if err := store.SetConfig(env.ctx, "issue_prefix", "plan-"); err != nil {
 		env.t.Fatalf("failed to set issue_prefix in planning store: %v", err)
@@ -663,11 +675,7 @@ func TestExplicitRepoOverride(t *testing.T) {
 	}
 
 	overrideDBPath := filepath.Join(overrideBeadsDir, "beads.db")
-	overrideStore, err := dolt.New(env.ctx, &dolt.Config{Path: overrideDBPath})
-	if err != nil {
-		t.Skipf("skipping: Dolt server not available: %v", err)
-	}
-	defer overrideStore.Close()
+	overrideStore := newTestStoreIsolatedDB(t, overrideDBPath, "over")
 
 	if err := overrideStore.SetConfig(env.ctx, "issue_prefix", "over-"); err != nil {
 		t.Fatalf("failed to set issue_prefix in override store: %v", err)
@@ -738,11 +746,7 @@ func TestBEADS_DIRPrecedence(t *testing.T) {
 	}
 
 	externalDBPath := filepath.Join(externalBeadsDir, "beads.db")
-	externalStore, err := dolt.New(env.ctx, &dolt.Config{Path: externalDBPath})
-	if err != nil {
-		t.Skipf("skipping: Dolt server not available: %v", err)
-	}
-	defer externalStore.Close()
+	externalStore := newTestStoreIsolatedDB(t, externalDBPath, "ext")
 
 	if err := externalStore.SetConfig(env.ctx, "issue_prefix", "ext-"); err != nil {
 		t.Fatalf("failed to set issue_prefix in external store: %v", err)
