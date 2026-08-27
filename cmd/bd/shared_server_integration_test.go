@@ -14,6 +14,7 @@ import (
 	"strconv"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -48,9 +49,30 @@ func ssEnvInt(key string, def int) int {
 //
 // Configuration via environment variables:
 //
-//	BEADS_TEST_SS_DIRS     — number of project directories  (default: 50)
-//	BEADS_TEST_SS_CLIENTS  — number of concurrent clients   (default: 500)
+//	BEADS_TEST_SS_DIRS     — number of project directories  (default: 10)
+//	BEADS_TEST_SS_CLIENTS  — number of concurrent clients   (default: 50)
 //	BEADS_TEST_SS_MAXPROCS — max concurrent subprocesses    (default: GOMAXPROCS*4)
+//
+// The defaults are sized to finish inside scripts/test.sh's 25m timeout. Each
+// client is ssOpsPerClient bd SUBPROCESSES run back to back, so cost is
+// clients×ssOpsPerClient process spawns, not clients goroutines: the historical
+// 50×500 default is ~50,500 spawns and measured ~60-85 minutes, which cannot fit and
+// produced a timeout that was read as a deadlock (bd-9p6). Run that load
+// deliberately, with a timeout to match:
+//
+//	BEADS_TEST_SS_DIRS=50 BEADS_TEST_SS_CLIENTS=500 TEST_TIMEOUT=150m \
+//	  ./scripts/test.sh -run TestSharedServerConcurrent ./cmd/bd
+//
+// Any configuration that cannot finish in the remaining deadline fails early
+// with the measured rate rather than running out the clock — see watch.
+//
+// This test runs in NO automated lane today, and sizing was only half the
+// reason. Nothing sets BEADS_TEST_SHARED_SERVER, and setting it in
+// .github/workflows/nightly.yml would still not run it: that job sets
+// BEADS_TEST_SKIP=dolt because Docker-based Dolt testcontainers hang in GitHub
+// Actions (scripts/repro-dolt-hang/), and NewContainerProvider honors that
+// switch, so the test would t.Skipf at the container step. Enabling it for real
+// is blocked on that hang, not on this file.
 //
 // Recommended: set BEADS_TEST_EMBEDDED_DOLT=1 to skip the unrelated
 // singleton Dolt container that TestMain starts for other tests in this package.
@@ -62,8 +84,8 @@ func TestSharedServerConcurrent(t *testing.T) {
 		t.Skip("not supported on Windows")
 	}
 
-	numDirs := ssEnvInt("BEADS_TEST_SS_DIRS", 50)
-	numClients := ssEnvInt("BEADS_TEST_SS_CLIENTS", 500)
+	numDirs := ssEnvInt("BEADS_TEST_SS_DIRS", 10)
+	numClients := ssEnvInt("BEADS_TEST_SS_CLIENTS", 50)
 	maxProcs := ssEnvInt("BEADS_TEST_SS_MAXPROCS", runtime.GOMAXPROCS(0)*4)
 	t.Logf("config: dirs=%d clients=%d maxprocs=%d", numDirs, numClients, maxProcs)
 
@@ -154,8 +176,14 @@ func TestSharedServerConcurrent(t *testing.T) {
 
 	// ── Fan out client workloads ────────────────────────────────────────
 	phase = time.Now()
-	eg, egCtx = errgroup.WithContext(ctx)
+	wlCtx, abort := context.WithCancel(ctx)
+	defer abort()
+	eg, egCtx = errgroup.WithContext(wlCtx)
 	eg.SetLimit(maxProcs)
+
+	prog := &ssProgress{}
+	stopWatch := prog.watch(t, numClients, maxProcs, abort)
+
 	for c := range numClients {
 		c := c
 		eg.Go(func() error {
@@ -167,15 +195,153 @@ func TestSharedServerConcurrent(t *testing.T) {
 				env:    baseEnv,
 				ctx:    egCtx,
 				t:      t,
+				prog:   prog,
 			}
-			return cl.runWorkload()
+			err := cl.runWorkload()
+			if err == nil {
+				prog.clients.Add(1)
+			}
+			return err
 		})
 	}
-	if err := eg.Wait(); err != nil {
+	err = eg.Wait()
+	stopWatch()
+	if err != nil {
+		// A projected overrun cancels wlCtx, so the errgroup surfaces a
+		// context error rather than a real defect. Say which one happened.
+		if reason := prog.abortReason(); reason != "" {
+			t.Fatalf("workload: %s", reason)
+		}
 		t.Fatalf("workload: %v", err)
 	}
-	t.Logf("workloads (%d clients x %d dirs): %s", numClients, numDirs, time.Since(phase))
+	t.Logf("workloads (%d clients x %d dirs): %s — %d ops",
+		numClients, numDirs, time.Since(phase), prog.ops.Load())
 	t.Logf("total: %s", time.Since(testStart))
+}
+
+// ---------------------------------------------------------------------------
+// Progress accounting
+// ---------------------------------------------------------------------------
+
+// ssOpsPerClient is how many bd subprocesses one runWorkload spawns:
+// 30 create + 14 dep + 25 update + 15 verify + 7 list + 10 delete.
+// Used only to project a completion time, so it costs nothing if it drifts
+// slightly — the projection is a guard rail, not an assertion.
+const ssOpsPerClient = 101
+
+// ssProgress counts finished subprocess invocations so that a run which is
+// merely SLOW is distinguishable from one that is WEDGED.
+//
+// Go prints the same "panic: test timed out after 25m0s" for both, and the
+// goroutine dump does not separate them either. At saturation this test's dump
+// is ~N [select] + ~N [syscall] + ~N [IO wait] for N live subprocesses — the
+// per-subprocess triple os/exec creates — plus exactly ONE [chan send]: the
+// errgroup admission semaphore in the fan-out loop above, which stays blocked
+// for the whole run because that is what backpressure looks like when
+// numClients exceeds maxProcs. That shape was read as "126 blocked producers
+// against 4 blocked receivers, a producer/consumer stall" and cost a merge
+// (bd-9p6); the run was in fact spawning ~850 subprocesses a minute at the
+// moment it was dumped. No channel in this test has more than one sender.
+//
+// The heartbeat is the discriminator that was missing: "+0 ops" across an
+// interval is a stall, a nonzero delta is not.
+type ssProgress struct {
+	ops     atomic.Int64
+	clients atomic.Int64
+
+	mu     sync.Mutex
+	reason string
+}
+
+// op records one completed bd subprocess invocation. Nil-safe so that a
+// bdClient built without a progress counter degrades to "no heartbeat" rather
+// than panicking in a goroutine, which would surface as an unrelated crash.
+func (p *ssProgress) op() {
+	if p == nil {
+		return
+	}
+	p.ops.Add(1)
+}
+
+func (p *ssProgress) setReason(s string) {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	if p.reason == "" {
+		p.reason = s
+	}
+}
+
+func (p *ssProgress) abortReason() string {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	return p.reason
+}
+
+// watch logs a heartbeat every 30s and, once it has a rate to extrapolate
+// from, aborts the run if the configured load cannot finish before the test
+// deadline. Returns a stop function.
+//
+// Failing at 90s with "this load needs ~62m, deadline allows ~21m" is worth
+// far more than the same failure at 25m with a goroutine dump attached: the
+// dump invites a deadlock diagnosis, and the numbers do not.
+func (p *ssProgress) watch(t *testing.T, numClients, maxProcs int, abort context.CancelFunc) func() {
+	t.Helper()
+
+	const interval = 30 * time.Second
+	totalOps := int64(numClients) * ssOpsPerClient
+	deadline, hasDeadline := t.Deadline()
+
+	done := make(chan struct{})
+	stopped := make(chan struct{})
+	go func() {
+		defer close(stopped)
+		tick := time.NewTicker(interval)
+		defer tick.Stop()
+		start := time.Now()
+		var last int64
+		for {
+			select {
+			case <-done:
+				return
+			case <-tick.C:
+			}
+
+			n := p.ops.Load()
+			delta := n - last
+			last = n
+			elapsed := time.Since(start)
+			t.Logf("progress: %d/%d clients, %d/%d ops (+%d in %s, %.1f ops/s)",
+				p.clients.Load(), numClients, n, totalOps, delta, interval,
+				float64(n)/elapsed.Seconds())
+
+			if !hasDeadline || n == 0 {
+				continue
+			}
+			// Project from the rate observed so far. Only act once a full
+			// interval of evidence exists and the overrun is not marginal —
+			// a slow start under load must not fail an otherwise fine run.
+			eta := time.Duration(float64(elapsed) * float64(totalOps) / float64(n))
+			remaining := time.Until(deadline)
+			if eta-elapsed > remaining*2 {
+				p.setReason(fmt.Sprintf(
+					"projected %s to run %d clients x %d ops at the observed %.1f ops/s "+
+						"(maxprocs=%d), but only %s of the test deadline remains. "+
+						"This is a sizing failure, not a hang — %d ops completed in %s. "+
+						"Lower BEADS_TEST_SS_CLIENTS/BEADS_TEST_SS_DIRS, or raise the "+
+						"timeout (TEST_TIMEOUT for scripts/test.sh).",
+					eta.Round(time.Second), numClients, ssOpsPerClient,
+					float64(n)/elapsed.Seconds(), maxProcs,
+					remaining.Round(time.Second), n, elapsed.Round(time.Second)))
+				abort()
+				return
+			}
+		}
+	}()
+
+	return func() {
+		close(done)
+		<-stopped
+	}
 }
 
 // ---------------------------------------------------------------------------
@@ -189,6 +355,7 @@ type bdClient struct {
 	env    []string
 	ctx    context.Context
 	t      *testing.T
+	prog   *ssProgress
 	op     int // running operation counter
 }
 
@@ -197,6 +364,7 @@ func (c *bdClient) bd(args ...string) (string, error) {
 	c.op++
 	start := time.Now()
 	out, err := ssExec(c.ctx, c.binary, c.dir, c.env, args...)
+	c.prog.op()
 	c.t.Logf("%s [op %d] %s — %s", c.tag, c.op, strings.Join(args, " "), time.Since(start))
 	return out, err
 }
@@ -207,6 +375,7 @@ func (c *bdClient) create(title string, extra ...string) (string, error) {
 	start := time.Now()
 	args := append([]string{"create", title, "--json"}, extra...)
 	out, err := ssExec(c.ctx, c.binary, c.dir, c.env, args...)
+	c.prog.op()
 	c.t.Logf("%s [op %d] create %q — %s", c.tag, c.op, title, time.Since(start))
 	if err != nil {
 		return "", fmt.Errorf("%s: %w", out, err)
@@ -219,6 +388,7 @@ func (c *bdClient) show(id string) (map[string]any, error) {
 	c.op++
 	start := time.Now()
 	out, err := ssExec(c.ctx, c.binary, c.dir, c.env, "show", id, "--json")
+	c.prog.op()
 	c.t.Logf("%s [op %d] show %s — %s", c.tag, c.op, id, time.Since(start))
 	if err != nil {
 		return nil, fmt.Errorf("%s: %w", out, err)
@@ -232,6 +402,7 @@ func (c *bdClient) list(extra ...string) ([]any, error) {
 	start := time.Now()
 	args := append([]string{"list", "--json", "--flat"}, extra...)
 	out, err := ssExec(c.ctx, c.binary, c.dir, c.env, args...)
+	c.prog.op()
 	c.t.Logf("%s [op %d] list %s — %s", c.tag, c.op, strings.Join(extra, " "), time.Since(start))
 	if err != nil {
 		return nil, fmt.Errorf("%s: %w", out, err)
