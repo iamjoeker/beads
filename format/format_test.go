@@ -5,6 +5,7 @@ import (
 	"testing"
 
 	"github.com/steveyegge/beads/internal/types"
+	"github.com/steveyegge/beads/internal/ui"
 )
 
 func TestStatusIcon(t *testing.T) {
@@ -17,10 +18,14 @@ func TestStatusIcon(t *testing.T) {
 		{"blocked", "●"},
 		{"closed", "✓"},
 		{"deferred", "❄"},
-		{"hooked", "◇"},
-		{"pinned", "📌"},
-		{"unknown", "○"},
-		{"", "○"},
+		// hooked used to return the custom diamond and pinned a pushpin emoji;
+		// both now come from the single vocabulary in internal/ui.
+		{"hooked", ui.StatusIconHooked},
+		{"pinned", ui.StatusIconPinned},
+		// Unknown statuses get the custom diamond, not the open circle: an
+		// unrecognized status is not the same thing as an open one.
+		{"unknown", ui.StatusIconCustom},
+		{"", ui.StatusIconCustom},
 	}
 	for _, tt := range tests {
 		t.Run(tt.status, func(t *testing.T) {
@@ -28,6 +33,17 @@ func TestStatusIcon(t *testing.T) {
 				t.Errorf("StatusIcon(%q) = %q, want %q", tt.status, got, tt.want)
 			}
 		})
+	}
+}
+
+// TestStatusIconMatchesUI pins the delegation itself: every built-in status must
+// render identically here and in internal/ui, so this copy cannot drift back out
+// of sync the way hooked did.
+func TestStatusIconMatchesUI(t *testing.T) {
+	for _, s := range types.AllStatuses {
+		if got, want := StatusIcon(string(s)), ui.GetStatusIcon(string(s)); got != want {
+			t.Errorf("StatusIcon(%q) = %q, ui.GetStatusIcon = %q", s, got, want)
+		}
 	}
 }
 

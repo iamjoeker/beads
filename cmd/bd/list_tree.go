@@ -8,6 +8,7 @@ import (
 	"time"
 
 	"github.com/steveyegge/beads/internal/types"
+	"github.com/steveyegge/beads/internal/ui"
 	"github.com/steveyegge/beads/internal/utils"
 )
 
@@ -311,7 +312,7 @@ func displayPrettyListWithDepsMode(issues []*types.Issue, showHeader bool, allDe
 	fmt.Println(strings.Repeat("-", 80))
 	fmt.Println(listFooterLine(len(issues), countIssuesByStatus(issues), truncated, readyFiltered))
 	fmt.Println()
-	fmt.Println("Status: ○ open  ◐ in_progress  ● blocked  ✓ closed  ❄ deferred")
+	fmt.Println(ui.StatusLegend())
 	fmt.Println("Priority: P0–P4 (label only; not a status icon)")
 	if dr != nil {
 		fmt.Printf("Deps:   %s = depends-on / relationship (points to target); siblings ordered so dependencies come first; ↗ = target outside current view\n", depGlyph)

@@ -268,7 +268,7 @@ consistency.
 
 Use small Unicode symbols with semantic colors applied via lipgloss:
 
-- Status: `○ ◐ ● ✓ ❄`
+- Status: `○ ◐ ● ❄ ✓ ★ ⚑` (and `◇` for a user-defined custom status)
 - Priority: `P0`–`P4` label with color (no status glyph)
 
 #### Status Icons
@@ -279,9 +279,19 @@ Use these symbols consistently across all commands:
 ○ open        - Available to work (white/default)
 ◐ in_progress - Currently being worked (yellow)
 ● blocked     - Waiting on dependencies (red)
-✓ closed      - Completed (muted gray)
 ❄ deferred    - Scheduled for later (blue/muted)
+✓ closed      - Completed (muted gray)
+★ pinned      - Persistent, stays open indefinitely
+⚑ hooked      - Claimed by a worker
+◇ <custom>    - User-defined status with no built-in glyph
 ```
+
+Every built-in status needs its own glyph, and `◇` belongs to custom statuses
+alone: a built-in that falls through to it is indistinguishable from one the user
+invented. The icon table (`internal/ui.GetStatusIcon`) and the legend printed
+under listings (`internal/ui.StatusLegend`) are both driven off
+`types.AllStatuses`, so adding a status there is what surfaces it in both — do
+not hardcode a legend string at the call site.
 
 #### Priority Labels and Colors
 

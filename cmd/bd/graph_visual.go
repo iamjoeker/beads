@@ -41,7 +41,7 @@ func renderGraphVisualTo(out io.Writer, layout *GraphLayout, subgraph *TemplateS
 	}
 
 	printf("\n%s Dependency graph for %s:\n\n", ui.RenderAccent("📊"), layout.RootID)
-	println("  Status: ○ open  ◐ in_progress  ● blocked  ✓ closed  ❄ deferred")
+	println("  " + ui.StatusLegend())
 	println()
 
 	numLayers := len(layout.Layers)

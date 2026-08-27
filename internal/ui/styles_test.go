@@ -201,6 +201,11 @@ func TestGetStatusIconWithCategory(t *testing.T) {
 		{"closed", "closed", "", StatusIconClosed},
 		{"deferred", "deferred", "", StatusIconDeferred},
 		{"pinned", "pinned", "", StatusIconPinned},
+		{"hooked", "hooked", "", StatusIconHooked},
+		// A built-in status must win over a category that would map it
+		// elsewhere — hooked is CategoryWIP, and must still not render as
+		// in_progress.
+		{"hooked with wip category", "hooked", types.CategoryWIP, StatusIconHooked},
 		// Custom statuses inherit icon from category
 		{"custom active", "review", types.CategoryActive, StatusIconOpen},
 		{"custom wip", "testing", types.CategoryWIP, StatusIconInProgress},
@@ -222,12 +227,19 @@ func TestGetStatusIconWithCategory(t *testing.T) {
 }
 
 func TestRenderStatusIconBuiltIns(t *testing.T) {
-	// All built-in statuses should return non-empty strings
-	builtIns := []string{"open", "in_progress", "blocked", "closed", "deferred", "pinned"}
-	for _, status := range builtIns {
-		icon := RenderStatusIcon(status)
+	// Every built-in status needs its own icon. Driven off types.AllStatuses
+	// rather than a hand-written list: hooked was missing from both the switch
+	// and the hardcoded list here, so the icon silently fell through to
+	// StatusIconCustom and no test noticed.
+	for _, status := range types.AllStatuses {
+		icon := RenderStatusIcon(string(status))
 		if icon == "" {
 			t.Errorf("RenderStatusIcon(%q) returned empty string", status)
+		}
+		// Compare on the unstyled glyph so this holds with color on or off.
+		if glyph := GetStatusIcon(string(status)); glyph == StatusIconCustom {
+			t.Errorf("GetStatusIcon(%q) = %q, the custom-status glyph: built-in statuses need their own icon",
+				status, glyph)
 		}
 	}
 	// Unknown status should get custom icon
@@ -245,6 +257,7 @@ func TestGetStatusIconBuiltIns(t *testing.T) {
 		"closed":      StatusIconClosed,
 		"deferred":    StatusIconDeferred,
 		"pinned":      StatusIconPinned,
+		"hooked":      StatusIconHooked,
 	}
 	for status, want := range expected {
 		got := GetStatusIcon(status)
@@ -327,6 +340,48 @@ func TestRenderStatusIconWithCategory(t *testing.T) {
 	noCategory := RenderStatusIconWithCategory("mystery", "")
 	if noCategory != StatusIconCustom {
 		t.Errorf("no-category custom icon %q != StatusIconCustom %q", noCategory, StatusIconCustom)
+	}
+}
+
+// TestStatusLegendCoversAllStatuses is the regression test for the legend
+// itself: four hardcoded legend strings named five of seven statuses, so a
+// listing could report "5 hooked" directly above a legend with no hooked entry.
+// The legend is now generated, and this fails if a status is ever added without
+// a glyph to go with it.
+func TestStatusLegendCoversAllStatuses(t *testing.T) {
+	legend := StatusLegend()
+	if !strings.HasPrefix(legend, "Status: ") {
+		t.Errorf("StatusLegend() = %q, want it to start with %q", legend, "Status: ")
+	}
+	for _, s := range types.AllStatuses {
+		entry := GetStatusIcon(string(s)) + " " + string(s)
+		if !strings.Contains(legend, entry) {
+			t.Errorf("StatusLegend() = %q, missing entry %q", legend, entry)
+		}
+	}
+	// No built-in may share the custom-status diamond, or the legend would
+	// list the same glyph under two names.
+	if strings.Contains(StatusLegendEntries(), StatusIconCustom) {
+		t.Errorf("StatusLegendEntries() = %q contains the custom glyph %q",
+			StatusLegendEntries(), StatusIconCustom)
+	}
+}
+
+// TestStatusIconsAreNotEmoji enforces the AGENTS.md rule that status glyphs are
+// small Unicode symbols, never emoji: emoji are double-width and break column
+// alignment. StatusIconPinned was a pushpin until the legend was generated and
+// started printing it.
+func TestStatusIconsAreNotEmoji(t *testing.T) {
+	for _, s := range types.AllStatuses {
+		icon := GetStatusIcon(string(s))
+		for _, r := range icon {
+			// Emoji live well above the BMP symbol blocks the design system
+			// draws from; the pushpin (U+1F4CC) is one of them.
+			if r > 0xFFFF {
+				t.Errorf("GetStatusIcon(%q) = %q contains emoji-range rune %U; use a small Unicode symbol",
+					s, icon, r)
+			}
+		}
 	}
 }
 

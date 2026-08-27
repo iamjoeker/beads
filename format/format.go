@@ -146,25 +146,14 @@ func DependencyInfo(blockedBy, blocks []string, parent string) string {
 }
 
 // StatusIcon returns the status icon character without styling.
+//
+// This was a second, hand-maintained copy of the icon table and had drifted:
+// hooked returned the diamond reserved for user-defined statuses. It now
+// delegates to ui.GetStatusIcon so there is one vocabulary. Unknown statuses
+// therefore get the custom diamond rather than the open circle, which is what
+// every other renderer already did.
 func StatusIcon(status string) string {
-	switch status {
-	case "open":
-		return "○"
-	case "in_progress":
-		return "◐"
-	case "blocked":
-		return "●"
-	case "closed":
-		return "✓"
-	case "deferred":
-		return "❄"
-	case "hooked":
-		return "◇"
-	case "pinned":
-		return "📌"
-	default:
-		return "○"
-	}
+	return ui.GetStatusIcon(status)
 }
 
 // ListSummary formats the summary footer for a list of issues.

@@ -51,7 +51,7 @@ and credit their design/tests.
 **NEVER use emoji-style icons** (🔴🟠🟡🔵⚪) in CLI output. They cause cognitive overload.
 
 **ALWAYS use small Unicode symbols** with semantic colors (status uses symbols; priority uses labels):
-- Status: `○ ◐ ● ✓ ❄`
+- Status: `○ ◐ ● ❄ ✓ ★ ⚑` (and `◇` for a user-defined custom status)
 - Priority: `P0`–`P4` label with color (no status glyph)
 
 See [AGENT_INSTRUCTIONS.md](AGENT_INSTRUCTIONS.md) for full development guidelines.

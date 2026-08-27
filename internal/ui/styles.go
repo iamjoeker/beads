@@ -279,9 +279,32 @@ const (
 	StatusIconBlocked    = "●" // needs attention (filled circle)
 	StatusIconClosed     = "✓" // completed (checkmark)
 	StatusIconDeferred   = "❄" // scheduled for later (snowflake)
-	StatusIconPinned     = "📌" // elevated priority
+	StatusIconPinned     = "★" // persistent, stays open indefinitely (star)
+	StatusIconHooked     = "⚑" // claimed by a worker (flag)
 	StatusIconCustom     = "◇" // custom/uncategorized status (diamond)
 )
+
+// StatusLegendEntries renders every built-in status as "<icon> <name>", joined
+// by two spaces — the body of the legend printed under text listings.
+//
+// It is derived from types.AllStatuses rather than hardcoded, so a status added
+// there cannot fall out of the legend the way hooked did: hooked and pinned were
+// both absent from four separately maintained legend strings while hooked also
+// rendered as StatusIconCustom, the glyph reserved for user-defined statuses.
+func StatusLegendEntries() string {
+	parts := make([]string, 0, len(types.AllStatuses))
+	for _, s := range types.AllStatuses {
+		parts = append(parts, GetStatusIcon(string(s))+" "+string(s))
+	}
+	return strings.Join(parts, "  ")
+}
+
+// StatusLegend returns the full legend line, e.g.
+// "Status: ○ open  ◐ in_progress  ...". Use this everywhere a listing prints a
+// status legend; see StatusLegendEntries for why it is generated.
+func StatusLegend() string {
+	return "Status: " + StatusLegendEntries()
+}
 
 // RenderStatusIcon returns the appropriate icon for a status with semantic coloring.
 // This is the canonical source for status icon rendering - use this everywhere.
@@ -300,6 +323,8 @@ func RenderStatusIcon(status string) string {
 		return MutedStyle.Render(StatusIconDeferred)
 	case "pinned":
 		return StatusPinnedStyle.Render(StatusIconPinned)
+	case "hooked":
+		return StatusHookedStyle.Render(StatusIconHooked)
 	default:
 		return StatusIconCustom // custom/unknown status
 	}
@@ -322,6 +347,8 @@ func RenderStatusIconWithCategory(status string, category types.StatusCategory) 
 		return MutedStyle.Render(StatusIconDeferred)
 	case "pinned":
 		return StatusPinnedStyle.Render(StatusIconPinned)
+	case "hooked":
+		return StatusHookedStyle.Render(StatusIconHooked)
 	}
 	// Custom status — inherit from category
 	switch category {
@@ -354,6 +381,8 @@ func GetStatusIcon(status string) string {
 		return StatusIconDeferred
 	case "pinned":
 		return StatusIconPinned
+	case "hooked":
+		return StatusIconHooked
 	default:
 		return StatusIconCustom
 	}
@@ -374,6 +403,8 @@ func GetStatusIconWithCategory(status string, category types.StatusCategory) str
 		return StatusIconDeferred
 	case "pinned":
 		return StatusIconPinned
+	case "hooked":
+		return StatusIconHooked
 	}
 	switch category {
 	case types.CategoryActive:
