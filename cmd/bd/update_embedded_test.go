@@ -388,11 +388,62 @@ func TestEmbeddedUpdate(t *testing.T) {
 		}
 	})
 
-	t.Run("update_notes_overwrite_warns", func(t *testing.T) {
+	// bd-2mx: an unasked-for --notes replacement is REFUSED before the write.
+	// The old behaviour — write, then warn on stderr, then exit 0 — is what
+	// destroyed a substantive investigation note in production: the two things
+	// a careful caller checks (the exit status, and stdout) both said success.
+	t.Run("update_notes_overwrite_refused_without_replace_notes", func(t *testing.T) {
+		issue := bdCreate(t, bd, dir, "Notes refusal test", "--type", "task")
+		bdUpdate(t, bd, dir, issue.ID, "--notes", "original notes")
+
+		out := bdUpdateFail(t, bd, dir, issue.ID, "--notes", "replacement notes")
+		for _, want := range []string{"nothing was written", "--append-notes", "--replace-notes"} {
+			if !strings.Contains(out, want) {
+				t.Errorf("expected refusal to mention %q, got: %s", want, out)
+			}
+		}
+		// The point of refusing rather than warning: the data is still there.
+		if got := bdShow(t, bd, dir, issue.ID); got.Notes != "original notes" {
+			t.Errorf("refused update must leave notes untouched, got %q", got.Notes)
+		}
+	})
+
+	// A --notes "" from a failed shell expansion is the same refusal, and it is
+	// the one that wiped a field entirely.
+	t.Run("update_notes_empty_wipe_refused", func(t *testing.T) {
+		issue := bdCreate(t, bd, dir, "Notes wipe test", "--type", "task")
+		bdUpdate(t, bd, dir, issue.ID, "--notes", "original notes")
+
+		out := bdUpdateFail(t, bd, dir, issue.ID, "--notes", "")
+		if !strings.Contains(out, "erase") {
+			t.Errorf("expected the empty-value refusal to name the erase, got: %s", out)
+		}
+		if got := bdShow(t, bd, dir, issue.ID); got.Notes != "original notes" {
+			t.Errorf("refused wipe must leave notes untouched, got %q", got.Notes)
+		}
+	})
+
+	// --append-notes "" could only ever append nothing. It used to print
+	// "✓ Updated issue" and exit 0, which is the failure mode of the flag that
+	// the --notes warning recommends as the safe alternative.
+	t.Run("update_append_notes_empty_refused", func(t *testing.T) {
+		issue := bdCreate(t, bd, dir, "Append refusal test", "--type", "task")
+		bdUpdate(t, bd, dir, issue.ID, "--notes", "original notes")
+
+		out := bdUpdateFail(t, bd, dir, issue.ID, "--append-notes", "")
+		if !strings.Contains(out, "shell expansion") {
+			t.Errorf("expected the refusal to name the likely cause, got: %s", out)
+		}
+		if got := bdShow(t, bd, dir, issue.ID); got.Notes != "original notes" {
+			t.Errorf("refused append must leave notes untouched, got %q", got.Notes)
+		}
+	})
+
+	t.Run("update_notes_overwrite_warns_under_replace_notes", func(t *testing.T) {
 		issue := bdCreate(t, bd, dir, "Notes warning test", "--type", "task")
 		bdUpdate(t, bd, dir, issue.ID, "--notes", "original notes")
 
-		stdout, stderr := bdUpdateCapture(t, bd, dir, issue.ID, "--notes", "replacement notes")
+		stdout, stderr := bdUpdateCapture(t, bd, dir, issue.ID, "--notes", "replacement notes", "--replace-notes")
 		warning := fmt.Sprintf("warning: %s: --notes replaced existing notes (use --append-notes to preserve history)", issue.ID)
 		if !strings.Contains(stderr, warning) {
 			t.Errorf("expected stderr to contain %q, got: %s", warning, stderr)

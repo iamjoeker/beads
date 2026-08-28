@@ -81,6 +81,13 @@ Updates are applied per issue ID, not atomically across IDs: when some IDs
 fail, the remaining issues are still updated, every failed ID is reported on
 stderr, and the command exits nonzero.
 
+--notes REPLACES the notes field. When the issue already carries notes, the
+write is refused before anything is written; use --append-notes to add to
+them, or --replace-notes to discard them deliberately. --append-notes refuses
+an empty value, which could only ever append nothing — the shape a failed
+shell expansion takes. Both refusals exit nonzero rather than reporting a
+success the write did not achieve.
+
 Exit codes: 1 for general failures; 13 when every failure is a stale
 --if-assignee/--if-status guard (the precondition no longer held, nothing was
 written — another actor won the race, so retrying the same guard is
@@ -213,6 +220,9 @@ pointless).`,
 		}
 		if cmd.Flags().Changed("append-notes") {
 			appendNotes, _ := cmd.Flags().GetString("append-notes")
+			if err := errEmptyAppendNotes(appendNotes); err != nil {
+				return HandleErrorRespectJSON("%v", err)
+			}
 			updates[storageissueops.OpAppendNotes] = appendNotes
 		}
 		if cmd.Flags().Changed("acceptance") || cmd.Flags().Changed("acceptance-criteria") {
@@ -406,6 +416,11 @@ pointless).`,
 		// --force bypasses the live-claim reassign fence (bd-98s5c); mutually
 		// exclusive with --if-assignee at the flag-group level.
 		forceFlag, _ := cmd.Flags().GetBool("force")
+		// Deliberately NOT folded into --force: --force is passed to get past
+		// the reassign fence and the close policy, and a caller reaching for it
+		// for those reasons must not silently acquire permission to destroy a
+		// notes field as well (bd-2mx).
+		replaceNotesFlag, _ := cmd.Flags().GetBool("replace-notes")
 
 		if len(updates) == 0 && !claimFlag {
 			fmt.Println("No updates specified")
@@ -433,6 +448,7 @@ pointless).`,
 		if err != nil {
 			return HandleErrorRespectJSON("%v", err)
 		}
+		notesEdit := notesIntentFromUpdates(updates)
 		ctx := rootCtx
 		opsCtx, err := issueOpsContext(ctx)
 		if err != nil {
@@ -537,6 +553,16 @@ pointless).`,
 			if clearDeferStatus && issue.Status == types.StatusDeferred {
 				patch.Status = issueops.Field[issueops.Status]{Set: true, Value: types.StatusOpen}
 			}
+			// Refused BEFORE the mutation, not warned about after it: the
+			// point of bd-2mx is that a report issued once the row is gone
+			// cannot be a guardrail. Recorded as an ordinary per-ID failure so
+			// a batch keeps the IDs it can write and still exits nonzero.
+			if err := errNotesReplacementRefused(issue.Notes, updates, replaceNotesFlag); err != nil {
+				fmt.Fprintf(os.Stderr, "Error updating %s: %v\n", id, err)
+				recordFailure(id, err.Error())
+				closeIfUnmutated(result)
+				continue
+			}
 			notesOverwritten := replacesExistingNotes(issue.Notes, updates)
 
 			ops, err := writeOps(issueStore)
@@ -574,7 +600,17 @@ pointless).`,
 				continue
 			}
 			updatedIssue := updateResult.Issue
+			// The success line is conditional on the post-state carrying the
+			// edit, not on the call having returned (bd-2mx). trackMutation
+			// still runs: the row may well have been written, and skipping the
+			// commit would leave the store inconsistent with what the failure
+			// reports.
 			trackMutation(result)
+			if err := errNotesWriteNotLanded(notesEdit, updatedIssue); err != nil {
+				fmt.Fprintf(os.Stderr, "Error updating %s: %v\n", id, err)
+				recordFailure(id, err.Error())
+				continue
+			}
 			if notesOverwritten {
 				notesOverwriteWarnings[issueStore] = append(notesOverwriteWarnings[issueStore], id)
 			}
@@ -997,7 +1033,8 @@ func init() {
 	updateCmd.Flags().String("title", "", "New title")
 	updateCmd.Flags().StringP("type", "t", "", "New type (bug|feature|task|epic|chore|decision|spike|story|milestone); custom types require types.custom config; aliases: enhancement/feat→feature, dec/adr→decision")
 	registerCommonIssueFlags(updateCmd)
-	updateCmd.Flags().Lookup("notes").Usage = "Additional notes (replaces existing notes; use --append-notes to append)"
+	updateCmd.Flags().Lookup("notes").Usage = "Additional notes (replaces existing notes; refused when the issue already has notes unless --replace-notes; use --append-notes to append)"
+	updateCmd.Flags().Bool("replace-notes", false, "Allow --notes to discard notes the issue already has")
 	updateCmd.Flags().Bool("allow-empty-description", false, "Allow empty description replacement when reading from stdin or file")
 	updateCmd.Flags().String("spec-id", "", "Link to specification document")
 	updateCmd.Flags().String("acceptance-criteria", "", "DEPRECATED: use --acceptance")

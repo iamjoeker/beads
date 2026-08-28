@@ -38,6 +38,10 @@ type updateInput struct {
 	// bd-98s5c: --force bypasses the live-claim reassign fence (mutually
 	// exclusive with --if-assignee at the flag-group level).
 	force bool
+	// bd-2mx: --replace-notes is the explicit permission for a --notes write
+	// to discard notes the issue already carries. Separate from --force by
+	// design; see the comment on the direct route's replaceNotesFlag.
+	replaceNotes bool
 }
 
 func gatherUpdateInput(ctx context.Context, cmd *cobra.Command) (*updateInput, error) {
@@ -80,6 +84,7 @@ func gatherUpdateInput(ctx context.Context, cmd *cobra.Command) (*updateInput, e
 		in.fields["assignee"] = assignee
 	}
 	in.force, _ = cmd.Flags().GetBool("force")
+	in.replaceNotes, _ = cmd.Flags().GetBool("replace-notes")
 	description, descChanged, err := getDescriptionFlag(cmd)
 	if err != nil {
 		return nil, HandleErrorRespectJSON("%v", err)
@@ -106,6 +111,9 @@ func gatherUpdateInput(ctx context.Context, cmd *cobra.Command) (*updateInput, e
 	}
 	if cmd.Flags().Changed("append-notes") {
 		in.appendNotes, _ = cmd.Flags().GetString("append-notes")
+		if err := errEmptyAppendNotes(in.appendNotes); err != nil {
+			return nil, HandleErrorRespectJSON("%v", err)
+		}
 		in.hasAppendNotes = true
 	}
 	if cmd.Flags().Changed("acceptance") || cmd.Flags().Changed("acceptance-criteria") {

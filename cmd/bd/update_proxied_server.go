@@ -111,6 +111,13 @@ func applyUpdateProxiedOne(ctx context.Context, id string, in *updateInput) (*ty
 		fmt.Fprintf(os.Stderr, "Error updating %s: %v\n", id, err)
 		return nil, &updateIDFailure{ID: id, Error: fmt.Sprintf("updating: %v", err)}, nil
 	}
+	// Refused before the mutation on this route too, so both front doors of
+	// `bd update` treat a destructive --notes identically (bd-2mx). Reported as
+	// a per-ID failure, which is what makes the batch exit nonzero.
+	if err := errNotesReplacementRefused(before.Notes, in.fields, in.replaceNotes); err != nil {
+		fmt.Fprintf(os.Stderr, "Error updating %s: %v\n", id, err)
+		return nil, &updateIDFailure{ID: id, Error: err.Error()}, nil
+	}
 	notesOverwritten := replacesExistingNotes(before.Notes, in.fields)
 
 	var expectedStatus *issueops.Status
@@ -160,6 +167,17 @@ func applyUpdateProxiedOne(ctx context.Context, id string, in *updateInput) (*ty
 		// does.
 		updated.Labels = nil
 		updated.Comments = nil
+	}
+
+	// The success this route reports is conditional on the post-state carrying
+	// the notes edit, not on the contract call having returned (bd-2mx). The
+	// failure names what the stored row actually holds, so a caller can tell
+	// "refused before the write" from "written, but not what you asked for".
+	notesEdit := notesIntentFromUpdates(in.fields)
+	notesEdit.appended = in.appendNotes
+	if err := errNotesWriteNotLanded(notesEdit, updated); err != nil {
+		fmt.Fprintf(os.Stderr, "Error updating %s: %v\n", id, err)
+		return nil, &updateIDFailure{ID: id, Error: err.Error()}, nil
 	}
 
 	// Post-commit reporting: the write has landed, so these run exactly once no

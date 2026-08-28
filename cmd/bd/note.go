@@ -182,7 +182,15 @@ To read notes on an issue, use: bd show <id>`,
 
 		SetLastTouchedID(result.ResolvedID)
 
+		// This GetIssue is a fresh read of the committed row, not the mutation's
+		// own account of itself, which makes it the one instrument in this
+		// command that can contradict the write. Checking it is the difference
+		// between "the call returned" and "the note is there"; bd-2mx is a
+		// catalog of success lines printed from the first.
 		updatedIssue, _ := issueStore.GetIssue(ctx, result.ResolvedID)
+		if err := errNotesWriteNotLanded(notesIntent{appended: noteText}, updatedIssue); err != nil {
+			return HandleErrorRespectJSON("%s: %v", result.ResolvedID, err)
+		}
 		title := ""
 		if updatedIssue != nil {
 			title = updatedIssue.Title

@@ -67,11 +67,26 @@ func TestProxiedServerUpdate(t *testing.T) {
 		}
 	})
 
+	// bd-2mx: both routes of `bd update` refuse an unasked-for replacement
+	// identically, so the proxied path asserts the refusal too — a guard that
+	// holds on only one front door is not a guard.
+	t.Run("notes_overwrite_refused_without_replace_notes", func(t *testing.T) {
+		p := bdProxiedInit(t, bd, "unr")
+		issue := bdProxiedCreate(t, bd, p.dir, "Notes overwrite refusal", "--notes", "original notes")
+		out := bdProxiedUpdateFail(t, bd, p.dir, issue.ID, "--notes", "replacement notes")
+		if !strings.Contains(out, "nothing was written") {
+			t.Errorf("expected a pre-write refusal, got: %s", out)
+		}
+		if got := bdProxiedShow(t, bd, p.dir, issue.ID); got.Notes != "original notes" {
+			t.Errorf("refused update must leave notes untouched, got %q", got.Notes)
+		}
+	})
+
 	t.Run("notes_overwrite_warns_on_stderr", func(t *testing.T) {
 		p := bdProxiedInit(t, bd, "unw")
 		issue := bdProxiedCreate(t, bd, p.dir, "Notes overwrite", "--notes", "original notes")
 		stdout, stderr, err := bdProxiedRunBuffers(t, bd, p.dir,
-			"update", "--json", issue.ID, "--notes", "replacement notes")
+			"update", "--json", issue.ID, "--notes", "replacement notes", "--replace-notes")
 		if err != nil {
 			t.Fatalf("overwrite notes: %v\nstdout:\n%s\nstderr:\n%s", err, stdout, stderr)
 		}
@@ -946,7 +961,7 @@ func TestProxiedServerUpdate3(t *testing.T) {
 		t.Parallel()
 		p := newSharedProxiedProject(t, bd, "un")
 		issue := bdProxiedCreate(t, bd, p.dir, "Notes test", "--notes", "first")
-		updated := bdProxiedUpdateOne(t, bd, p.dir, issue.ID, "--notes", "replacement")
+		updated := bdProxiedUpdateOne(t, bd, p.dir, issue.ID, "--notes", "replacement", "--replace-notes")
 		if updated.Notes != "replacement" {
 			t.Errorf("notes: got %q, want %q", updated.Notes, "replacement")
 		}

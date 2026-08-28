@@ -124,6 +124,11 @@ func runNoteProxiedServer(ctx context.Context, id, noteText string) error {
 	if err != nil {
 		return HandleErrorRespectJSON("note %s: %v", id, err)
 	}
+	// Same post-condition the direct route checks, so `bd note` reports a
+	// success it achieved on both front doors (bd-2mx).
+	if err := errNotesWriteNotLanded(notesIntent{appended: noteText}, updated); err != nil {
+		return HandleErrorRespectJSON("%s: %v", id, err)
+	}
 	if jsonOutput {
 		if updated != nil {
 			return outputJSON(updated)
