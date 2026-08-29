@@ -1306,6 +1306,10 @@ func getStatusEmoji(status types.Status) string {
 		return "❄" // U+2744 Snowflake (on ice)
 	case types.StatusClosed:
 		return "☑" // U+2611 Ballot Box with Check
+	case types.StatusHooked:
+		return "⚑" // U+2691 Black Flag (claimed by a worker)
+	case types.StatusPinned:
+		return "★" // U+2605 Black Star (persistent, stays open indefinitely)
 	default:
 		return "?"
 	}

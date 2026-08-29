@@ -526,6 +526,8 @@ func TestGetStatusEmoji(t *testing.T) {
 		{types.StatusInProgress, "◧"},
 		{types.StatusBlocked, "⚠"},
 		{types.StatusClosed, "☑"},
+		{types.StatusHooked, "⚑"},
+		{types.StatusPinned, "★"},
 		{types.Status("unknown"), "?"},
 	}
 

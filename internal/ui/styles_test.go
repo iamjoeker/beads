@@ -385,6 +385,30 @@ func TestStatusIconsAreNotEmoji(t *testing.T) {
 	}
 }
 
+// TestRenderPinFlag covers the Issue.Pinned boolean prefix, a different axis
+// from status=pinned (RenderStatusIcon's star): a row can carry both, so the
+// pin flag needs its own glyph and must not be the pushpin AGENTS.md forbids.
+func TestRenderPinFlag(t *testing.T) {
+	got := RenderPinFlag(true)
+	if got == "" {
+		t.Fatal("RenderPinFlag(true) returned empty string")
+	}
+	if strings.Contains(got, "📌") {
+		t.Errorf("RenderPinFlag(true) = %q still contains the pushpin emoji", got)
+	}
+	for _, r := range got {
+		if r > 0xFFFF {
+			t.Errorf("RenderPinFlag(true) = %q contains emoji-range rune %U; use a small Unicode symbol", got, r)
+		}
+	}
+	if PinFlagIcon == StatusIconPinned {
+		t.Errorf("PinFlagIcon must not equal StatusIconPinned %q: a row can carry both flags", StatusIconPinned)
+	}
+	if got := RenderPinFlag(false); got != "" {
+		t.Errorf("RenderPinFlag(false) = %q, want empty string", got)
+	}
+}
+
 func TestIsAgentMode(t *testing.T) {
 	// Test default (no env vars) - t.Setenv automatically restores after test
 	t.Setenv("BD_AGENT_MODE", "")
