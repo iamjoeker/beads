@@ -14,6 +14,7 @@ import (
 	"github.com/steveyegge/beads/internal/audit"
 	"github.com/steveyegge/beads/internal/config"
 	"github.com/steveyegge/beads/internal/debug"
+	"github.com/steveyegge/beads/internal/git"
 	"github.com/steveyegge/beads/internal/metrics"
 	"github.com/steveyegge/beads/internal/storage"
 	"github.com/steveyegge/beads/internal/types"
@@ -100,6 +101,13 @@ the flags appear in the command line.`,
 		}
 
 		force, _ := cmd.Flags().GetBool("force")
+
+		if !force {
+			if err := checkMergeLandingClaims(reasons); err != nil {
+				return HandleErrorRespectJSON("%v", err)
+			}
+		}
+
 		continueFlag, _ := cmd.Flags().GetBool("continue")
 		noAuto, _ := cmd.Flags().GetBool("no-auto")
 		suggestNext, _ := cmd.Flags().GetBool("suggest-next")
@@ -620,6 +628,47 @@ func validateCloseReasons(reasons []string) error {
 		}
 	}
 	return nil
+}
+
+// checkMergeLandingClaims refuses a close whose reason claims the fix already
+// landed ("Fixed: ...", "Merged in <sha>") when the current git repository's
+// HEAD demonstrably has not reached origin's default branch (bd-rpg). It only
+// checks the process's working directory once per command, since every
+// caller of `bd close` in a single invocation is running from the same
+// worktree.
+//
+// It fails OPEN: when the landing question cannot be answered (not a git
+// repo, no resolvable HEAD, no discoverable remote default branch, or the
+// remote is unreachable), the close proceeds unblocked. See
+// git.VerifyHeadLandedOnOrigin for the full rationale. --force bypasses this
+// check entirely, for the caller who knows better (e.g. closing in advance
+// of a submission that is about to happen).
+func checkMergeLandingClaims(reasons []string) error {
+	claims := false
+	for _, r := range reasons {
+		if validation.CloseReasonClaimsMergeLanding(r) {
+			claims = true
+			break
+		}
+	}
+	if !claims {
+		return nil
+	}
+
+	check := git.VerifyHeadLandedOnOrigin(".")
+	if check.Landed || check.Target == "" {
+		return nil
+	}
+
+	short := check.HeadSHA
+	if len(short) > 12 {
+		short = short[:12]
+	}
+	return fmt.Errorf(
+		"close reason claims the fix landed, but HEAD (%s) is not on origin/%s; "+
+			"if this work has not been submitted to the merge queue yet, do that first "+
+			"instead of closing the issue directly (use --force to close anyway)",
+		short, check.Target)
 }
 
 // isMachineCheckableGate returns true if the issue is a gate with a machine-checkable await type.

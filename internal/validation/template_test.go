@@ -355,3 +355,30 @@ func TestValidateCloseReason(t *testing.T) {
 		})
 	}
 }
+
+func TestCloseReasonClaimsMergeLanding(t *testing.T) {
+	tests := []struct {
+		name   string
+		reason string
+		want   bool
+	}{
+		{"fixed with colon", "Fixed: increased session TTL", true},
+		{"fix with colon", "fix: session TTL bug", true},
+		{"merged with colon", "Merged in abc1234", true},
+		{"bare fixed", "fixed", true},
+		{"case insensitive", "FIXED: done", true},
+		{"leading token still fires even with trailing prose", "fixed the merge conflict detector", true},
+		{"no-changes is not a landing claim", "no-changes: already handled upstream", false},
+		{"duplicate is not a landing claim", "duplicate of bd-123", false},
+		{"empty", "", false},
+		{"a colon far into prose is not a declared category", "I checked the queue and it stayed green: fixed", false},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			if got := CloseReasonClaimsMergeLanding(tt.reason); got != tt.want {
+				t.Errorf("CloseReasonClaimsMergeLanding(%q) = %v, want %v", tt.reason, got, tt.want)
+			}
+		})
+	}
+}

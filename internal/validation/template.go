@@ -212,3 +212,63 @@ func ValidateCloseReason(reason string) error {
 	}
 	return nil
 }
+
+// closeReasonTokenMaxLen bounds how far into a close reason the leading token
+// is allowed to run. A reason is free text, and prose that happens to contain
+// a colon ("I checked the queue: nothing there") must not be read as a
+// declared close category.
+const closeReasonTokenMaxLen = 24
+
+// mergeLandingClaimingCloseReasons are the leading close-reason tokens that
+// assert an issue's fix is already on the target branch — either landed
+// directly ("Fixed: ...") or via a merge queue ("Merged in <sha>").
+var mergeLandingClaimingCloseReasons = map[string]bool{
+	"fixed":  true,
+	"fix":    true,
+	"merged": true,
+}
+
+// CloseReasonClaimsMergeLanding reports whether a close reason's leading
+// token asserts the issue's fix is already on the target branch.
+//
+// It matches on the LEADING TOKEN only, the same rule as
+// CloseReasonDischargesMergeQueue-style checks elsewhere: a colon (or word
+// break) appearing early enough marks the boundary of a declared category, so
+// "I checked the queue and it stayed green: fixed" is prose with "fixed"
+// buried at the end, not a declared category at the front, and does not
+// match. "fixed the merge conflict detector" DOES match — its leading word is
+// the category token "fixed" — which is a deliberate tradeoff: the guard is
+// a leading-word heuristic, not a natural-language classifier.
+//
+// This exists because a close reason making this claim is a factual
+// assertion, not a formality (bd-rpg / gastown gt-20la): a polecat closed a
+// bead as fixed/merged with the fix commit only ever existing on its own
+// branch, never submitted to the merge queue, never reached main. `bd close`
+// accepted the close with no verification that the claimed landing was true.
+func CloseReasonClaimsMergeLanding(reason string) bool {
+	token := closeReasonToken(reason)
+	return token != "" && mergeLandingClaimingCloseReasons[token]
+}
+
+// closeReasonToken extracts the declared category from a close reason: the
+// text before the first colon when there is one close to the front,
+// otherwise the first word. Spaces and underscores inside the token are
+// normalized to hyphens so "no changes:", "no_changes:" and "no-changes:"
+// are one category.
+func closeReasonToken(reason string) string {
+	head := strings.ToLower(strings.TrimSpace(reason))
+	if head == "" {
+		return ""
+	}
+	if i := strings.IndexByte(head, ':'); i >= 0 && i <= closeReasonTokenMaxLen {
+		head = head[:i]
+	} else if i := strings.IndexAny(head, " \t\n"); i >= 0 {
+		head = head[:i]
+	}
+	head = strings.Trim(head, " \t.,;\"'()[]")
+	head = strings.NewReplacer(" ", "-", "_", "-").Replace(head)
+	if head == "" || len(head) > closeReasonTokenMaxLen {
+		return ""
+	}
+	return head
+}

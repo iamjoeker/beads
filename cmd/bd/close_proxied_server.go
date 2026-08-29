@@ -80,6 +80,12 @@ func runCloseProxiedServer(cmd *cobra.Command, ctx context.Context, args []strin
 
 	in := gatherCloseProxiedInput(cmd)
 
+	if !in.force {
+		if err := checkMergeLandingClaims(reasons); err != nil {
+			return HandleErrorRespectJSON("%v", err)
+		}
+	}
+
 	if in.continueOn && len(args) > 1 {
 		return HandleErrorRespectJSON("--continue only works when closing a single issue")
 	}
