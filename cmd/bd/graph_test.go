@@ -495,6 +495,58 @@ func TestComputeLayout(t *testing.T) {
 	})
 }
 
+// TestIsOpenStatusCoversAllBuiltinStatuses guards bd-yys: isOpenStatus, and the
+// openStatuses list --all queries with, must together account for every
+// status in types.AllStatuses. Pinned and hooked previously fell through the
+// default case as "not open" despite the doc comment only excluding closed
+// and deferred; a status added to AllStatuses later should hit this table
+// rather than silently landing in whichever bucket the switch's default arm
+// picks.
+func TestIsOpenStatusCoversAllBuiltinStatuses(t *testing.T) {
+	want := map[types.Status]bool{
+		types.StatusOpen:       true,
+		types.StatusInProgress: true,
+		types.StatusBlocked:    true,
+		types.StatusDeferred:   false,
+		types.StatusClosed:     false,
+		types.StatusPinned:     true,
+		types.StatusHooked:     true,
+	}
+
+	if len(want) != len(types.AllStatuses) {
+		t.Fatalf("test table has %d statuses, types.AllStatuses has %d — update this table", len(want), len(types.AllStatuses))
+	}
+
+	for _, s := range types.AllStatuses {
+		wantOpen, ok := want[s]
+		if !ok {
+			t.Fatalf("types.AllStatuses contains %q, which this test's table does not cover", s)
+		}
+		if got := isOpenStatus(s); got != wantOpen {
+			t.Errorf("isOpenStatus(%q) = %v, want %v", s, got, wantOpen)
+		}
+	}
+}
+
+// TestOpenStatusesDerivedFromIsOpenStatus guards that loadAllGraphSubgraphs
+// and loadAllGraphSubgraphsUOW query exactly the statuses isOpenStatus admits,
+// so --all and --open can never drift apart the way the hardcoded three-status
+// loop and this switch did before bd-yys.
+func TestOpenStatusesDerivedFromIsOpenStatus(t *testing.T) {
+	for _, s := range types.AllStatuses {
+		inList := false
+		for _, o := range openStatuses {
+			if o == s {
+				inList = true
+				break
+			}
+		}
+		if want := isOpenStatus(s); inList != want {
+			t.Errorf("openStatuses contains %q = %v, isOpenStatus(%q) = %v; must match", s, inList, s, want)
+		}
+	}
+}
+
 func TestFilterSubgraphOpen(t *testing.T) {
 	t.Run("nil subgraph", func(t *testing.T) {
 		if filterSubgraphOpen(nil) != nil {

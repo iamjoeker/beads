@@ -104,15 +104,11 @@ func loadGraphSubgraphUOW(ctx context.Context, uw uow.UnitOfWork, root *types.Is
 }
 
 func loadAllGraphSubgraphsUOW(ctx context.Context, uw uow.UnitOfWork) ([]*TemplateSubgraph, error) {
-	var allIssues []*types.Issue
-	for _, status := range []types.Status{types.StatusOpen, types.StatusInProgress, types.StatusBlocked} {
-		statusCopy := status
-		page, err := uw.IssueUseCase().SearchIssues(ctx, "", types.IssueFilter{Status: &statusCopy})
-		if err != nil {
-			return nil, fmt.Errorf("failed to search issues: %w", err)
-		}
-		allIssues = append(allIssues, page.Items...)
+	page, err := uw.IssueUseCase().SearchIssues(ctx, "", types.IssueFilter{Statuses: openStatuses})
+	if err != nil {
+		return nil, fmt.Errorf("failed to search issues: %w", err)
 	}
+	allIssues := page.Items
 
 	if len(allIssues) == 0 {
 		return nil, nil
