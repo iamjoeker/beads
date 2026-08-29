@@ -81,9 +81,8 @@ Examples:
 --max-rows / BEADS_MAX_ROWS caveat: the cap is checked differently per mode.
 Single-issue graphs (no --all) check the connected-component node count
 after the BFS traversal completes — the whole subgraph is always walked
-first, then rejected if it's over cap. --all checks each status
-(open/in_progress/blocked) independently, so up to 3x the cap can be loaded
-in total before any individual status trips it.`,
+first, then rejected if it's over cap. --all loads every open status in one
+query, so the cap applies to the true total.`,
 	Args:          cobra.RangeArgs(0, 1),
 	SilenceUsage:  true,
 	SilenceErrors: true,
@@ -468,29 +467,23 @@ func loadGraphSubgraph(ctx context.Context, s storage.DoltStorage, issueID strin
 	return subgraph, nil
 }
 
-// loadAllGraphSubgraphs loads all open issues and groups them by connected component
-// Each component is a subgraph of issues that share dependencies. The defensive
-// row cap (be-x42v) is propagated to each per-status SearchIssues call so any
-// single status that exceeds the cap returns the typed error directly.
+// loadAllGraphSubgraphs loads all open issues (openStatuses) and groups them
+// by connected component. Each component is a subgraph of issues that share
+// dependencies. The defensive row cap (be-x42v) applies to this single
+// SearchIssues call, so it bounds the true total rather than a per-status
+// slice of it.
 func loadAllGraphSubgraphs(ctx context.Context, s storage.DoltStorage, maxRows int, maxRowsSource string) ([]*TemplateSubgraph, error) {
 	if s == nil {
 		return nil, fmt.Errorf("no database connection")
 	}
 
-	// Get all open issues (open, in_progress, blocked)
-	// We need to make multiple calls since IssueFilter takes a single status
-	var allIssues []*types.Issue
-	for _, status := range []types.Status{types.StatusOpen, types.StatusInProgress, types.StatusBlocked} {
-		statusCopy := status
-		issues, err := s.SearchIssues(ctx, "", types.IssueFilter{
-			Status:        &statusCopy,
-			MaxRows:       maxRows,
-			MaxRowsSource: maxRowsSource,
-		})
-		if err != nil {
-			return nil, fmt.Errorf("failed to search issues: %w", err)
-		}
-		allIssues = append(allIssues, issues...)
+	allIssues, err := s.SearchIssues(ctx, "", types.IssueFilter{
+		Statuses:      openStatuses,
+		MaxRows:       maxRows,
+		MaxRowsSource: maxRowsSource,
+	})
+	if err != nil {
+		return nil, fmt.Errorf("failed to search issues: %w", err)
 	}
 
 	if len(allIssues) == 0 {
@@ -651,15 +644,29 @@ func assembleAllSubgraphs(allIssues []*types.Issue, issueMap map[string]*types.I
 }
 
 // isOpenStatus returns true for statuses considered "open" / actionable.
-// Closed and deferred (frozen) issues are excluded by --open.
+// Closed and deferred (frozen) issues are excluded by --open; that is the
+// only exclusion, so pinned and hooked issues count as open here (bd-yys).
 func isOpenStatus(s types.Status) bool {
 	switch s {
-	case types.StatusOpen, types.StatusInProgress, types.StatusBlocked:
-		return true
-	default:
+	case types.StatusClosed, types.StatusDeferred:
 		return false
+	default:
+		return true
 	}
 }
+
+// openStatuses is every built-in status isOpenStatus admits, computed once so
+// --all and --open share one definition instead of drifting apart the way
+// graph.go's --all loop and this switch had (bd-yys).
+var openStatuses = func() []types.Status {
+	out := make([]types.Status, 0, len(types.AllStatuses))
+	for _, s := range types.AllStatuses {
+		if isOpenStatus(s) {
+			out = append(out, s)
+		}
+	}
+	return out
+}()
 
 // filterSubgraphOpen removes closed/deferred issues from a subgraph and
 // computes a transitive closure of blocking edges through removed nodes so
