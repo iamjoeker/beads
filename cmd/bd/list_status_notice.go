@@ -168,14 +168,11 @@ func statusProbeCount(n int) string {
 // output must stay parseable, and every other non-error advisory in this
 // package goes to stderr and respects --quiet the same way.
 //
-// This notice is NOT gated on a label predicate, and printHiddenPinnedNotice
-// is — so the doubly-hidden count reaches a plain `bd list --status open` while
-// the pinned notice, on the same listing, stays silent about the pinned rows
-// that DID match the caller's status. That asymmetry is deliberate here and not
-// worth reproducing: gating this count on a label would leave the gap bd-6xa is
-// about open for the most common invocation on this rig. Whether the pinned
-// notice should speak on an unlabeled listing is a question about ITS scope,
-// filed separately rather than decided from inside this one.
+// This notice is NOT gated on a label predicate. printHiddenPinnedNotice used
+// to be, which left the pinned rows that DID match a caller's status silent on
+// a plain `bd list --status open` even as this notice spoke about the doubly
+// hidden ones — that asymmetry is what bd-qk2 filed and fixed: the pinned
+// notice now fires unlabeled too, for the same reason this one always has.
 func printHiddenByStatusNotice(ctx context.Context, s workapi.StatusSearcher, listing workapi.StatusNoticeContext, resultCount int, storeDesc string) bool {
 	if isQuiet() || !listing.Applies() {
 		return false
