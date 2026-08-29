@@ -20,12 +20,10 @@ func parseTimeFlag(s string) (time.Time, error) {
 	return timeparsing.ParseRelativeTime(s, time.Now())
 }
 
-// pinIndicator returns a pushpin emoji prefix for pinned issues
+// pinIndicator returns the styled pin-flag prefix for pinned issues.
+// Delegates to the shared ui.RenderPinFlag for consistency across commands.
 func pinIndicator(issue *types.Issue) string {
-	if issue.Pinned {
-		return "📌 "
-	}
-	return ""
+	return ui.RenderPinFlag(issue.Pinned)
 }
 
 // Priority tags for pretty output - simple text, semantic colors applied via ui package

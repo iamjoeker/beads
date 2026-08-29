@@ -147,6 +147,10 @@ func TestStatusPlainIcon(t *testing.T) {
 		{types.StatusInProgress, "◐"},
 		{types.StatusBlocked, "●"},
 		{types.StatusClosed, "✓"},
+		{types.StatusDeferred, "❄"},
+		{types.StatusHooked, "⚑"},
+		{types.StatusPinned, "★"},
+		{types.Status("unknown"), "◇"},
 	}
 
 	for _, tt := range tests {
@@ -154,6 +158,15 @@ func TestStatusPlainIcon(t *testing.T) {
 		if got != tt.want {
 			t.Errorf("statusPlainIcon(%s) = %q, want %q", tt.status, got, tt.want)
 		}
+	}
+
+	// Regression: hooked and pinned must not silently render as deferred
+	// (the snowflake), the same bug bd-qbc fixed for the listing legend.
+	if got := statusPlainIcon(types.StatusHooked); got == statusPlainIcon(types.StatusDeferred) {
+		t.Errorf("statusPlainIcon(hooked) = %q, must differ from deferred %q", got, got)
+	}
+	if got := statusPlainIcon(types.StatusPinned); got == statusPlainIcon(types.StatusDeferred) {
+		t.Errorf("statusPlainIcon(pinned) = %q, must differ from deferred %q", got, got)
 	}
 }
 

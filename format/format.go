@@ -59,19 +59,13 @@ func CompactIssue(issue *types.Issue, labels []string, blockedBy, blocks []strin
 	statusIcon := ui.RenderStatusIcon(string(issue.Status))
 
 	if issue.Status == types.StatusClosed {
-		pinPrefix := ""
-		if issue.Pinned {
-			pinPrefix = "📌 "
-		}
+		pinPrefix := ui.RenderPinFlag(issue.Pinned)
 		line := fmt.Sprintf("%s %s%s [P%d] [%s]%s%s - %s%s",
 			statusIcon, pinPrefix, issue.ID, issue.Priority,
 			issue.IssueType, assigneeStr, labelsStr, issue.Title, depInfo)
 		buf.WriteString(ui.RenderClosedLine(line))
 	} else {
-		pinPrefix := ""
-		if issue.Pinned {
-			pinPrefix = "📌 "
-		}
+		pinPrefix := ui.RenderPinFlag(issue.Pinned)
 		buf.WriteString(fmt.Sprintf("%s %s%s [%s] [%s]%s%s - %s%s",
 			statusIcon,
 			pinPrefix,
@@ -90,20 +84,14 @@ func LongIssue(issue *types.Issue, labels []string) string {
 
 	status := string(issue.Status)
 	if status == "closed" {
-		pinPrefix := ""
-		if issue.Pinned {
-			pinPrefix = "📌 "
-		}
+		pinPrefix := ui.RenderPinFlag(issue.Pinned)
 		line := fmt.Sprintf("%s%s [P%d] [%s] %s\n  %s",
 			pinPrefix, issue.ID, issue.Priority,
 			issue.IssueType, status, issue.Title)
 		buf.WriteString(ui.RenderClosedLine(line))
 		buf.WriteString("\n")
 	} else {
-		pinPrefix := ""
-		if issue.Pinned {
-			pinPrefix = "📌 "
-		}
+		pinPrefix := ui.RenderPinFlag(issue.Pinned)
 		buf.WriteString(fmt.Sprintf("%s%s [%s] [%s] %s\n",
 			pinPrefix,
 			ui.RenderID(issue.ID),

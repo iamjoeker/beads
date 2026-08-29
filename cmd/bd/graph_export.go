@@ -150,8 +150,14 @@ func statusPlainIcon(status types.Status) string {
 		return "●"
 	case types.StatusClosed:
 		return "✓"
-	default:
+	case types.StatusDeferred:
 		return "❄"
+	case types.StatusHooked:
+		return "⚑"
+	case types.StatusPinned:
+		return "★"
+	default:
+		return "◇" // custom/unrecognized status - not deferred
 	}
 }
 

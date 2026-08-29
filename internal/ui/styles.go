@@ -63,6 +63,7 @@ func DisableColors() {
 	StatusBlockedStyle = lipgloss.NewStyle()
 	StatusPinnedStyle = lipgloss.NewStyle()
 	StatusHookedStyle = lipgloss.NewStyle()
+	PinFlagStyle = lipgloss.NewStyle()
 	PriorityP0Style = lipgloss.NewStyle()
 	PriorityP1Style = lipgloss.NewStyle()
 	PriorityP2Style = lipgloss.NewStyle()
@@ -196,6 +197,7 @@ var (
 	StatusBlockedStyle    = lipgloss.NewStyle()
 	StatusPinnedStyle     = lipgloss.NewStyle()
 	StatusHookedStyle     = lipgloss.NewStyle()
+	PinFlagStyle          = lipgloss.NewStyle()
 )
 
 // Priority styles
@@ -242,6 +244,7 @@ func initStyles() {
 	StatusBlockedStyle = lipgloss.NewStyle().Foreground(ColorStatusBlocked)
 	StatusPinnedStyle = lipgloss.NewStyle().Foreground(ColorStatusPinned)
 	StatusHookedStyle = lipgloss.NewStyle().Foreground(ColorStatusHooked)
+	PinFlagStyle = lipgloss.NewStyle().Foreground(ColorStatusPinned)
 
 	PriorityP0Style = lipgloss.NewStyle().Foreground(ColorPriorityP0).Bold(true)
 	PriorityP1Style = lipgloss.NewStyle().Foreground(ColorPriorityP1)
@@ -282,6 +285,11 @@ const (
 	StatusIconPinned     = "★" // persistent, stays open indefinitely (star)
 	StatusIconHooked     = "⚑" // claimed by a worker (flag)
 	StatusIconCustom     = "◇" // custom/uncategorized status (diamond)
+
+	// PinFlagIcon marks the Issue.Pinned boolean, a persistent-metadata flag
+	// independent of status=pinned (StatusIconPinned). A row can carry both,
+	// so this cannot reuse the star.
+	PinFlagIcon = "⌖" // U+2316 position indicator (pin marker)
 )
 
 // StatusLegendEntries renders every built-in status as "<icon> <name>", joined
@@ -328,6 +336,17 @@ func RenderStatusIcon(status string) string {
 	default:
 		return StatusIconCustom // custom/unknown status
 	}
+}
+
+// RenderPinFlag returns the styled pin-flag prefix ("<icon> ") when the
+// Issue.Pinned boolean is set, or "" otherwise. This is a separate axis from
+// status=pinned (RenderStatusIcon's star): a row can be both, so it needs its
+// own glyph rather than reusing StatusIconPinned.
+func RenderPinFlag(pinned bool) string {
+	if !pinned {
+		return ""
+	}
+	return PinFlagStyle.Render(PinFlagIcon) + " "
 }
 
 // RenderStatusIconWithCategory returns the icon for a status, using category

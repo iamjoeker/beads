@@ -58,8 +58,12 @@ func TestListParseTimeFlag(t *testing.T) {
 }
 
 func TestListPinIndicator(t *testing.T) {
-	if pinIndicator(&types.Issue{Pinned: true}) == "" {
+	got := pinIndicator(&types.Issue{Pinned: true})
+	if got == "" {
 		t.Fatalf("expected pin indicator")
+	}
+	if strings.Contains(got, "📌") {
+		t.Fatalf("pinIndicator(%q) still contains the pushpin emoji AGENTS.md forbids", got)
 	}
 	if pinIndicator(&types.Issue{Pinned: false}) != "" {
 		t.Fatalf("expected empty pin indicator")
