@@ -255,3 +255,9 @@ tmp/build/cli-docs/where.md
 tmp/build/cli-docs/worktree.md
 tmp/docs/CLI_REFERENCE.md
 *.gate.lock*
+
+# Gas Town (added by gt)
+.claude/
+CLAUDE.md
+CLAUDE.local.md
+GEMINI.md
