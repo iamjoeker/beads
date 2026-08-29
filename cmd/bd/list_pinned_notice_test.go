@@ -89,8 +89,33 @@ func TestHiddenPinnedNoticeLines(t *testing.T) {
 		if lines := hiddenPinnedNoticeLines([]string{"tech-debt"}, 0, 0, store); lines != nil {
 			t.Errorf("a listing that hid nothing has nothing to disclose, got %v", lines)
 		}
-		if lines := hiddenPinnedNoticeLines(nil, 3, 0, store); lines != nil {
-			t.Errorf("no label filter means no notice, got %v", lines)
+		if lines := hiddenPinnedNoticeLines(nil, 0, 0, store); lines != nil {
+			t.Errorf("an unlabeled listing that hid nothing has nothing to disclose, got %v", lines)
+		}
+	})
+
+	// bd-qk2: an unlabeled `bd list --status open` hid pinned rows exactly as
+	// silently as a labeled one, because the notice's label gate had nothing to
+	// do with whether the pinned default fired.
+	t.Run("unlabeled listing over pinned matches", func(t *testing.T) {
+		lines := strings.Join(hiddenPinnedNoticeLines(nil, 3, 0, store), "\n")
+		for _, want := range []string{"3 PINNED", store, "--pinned", "--all"} {
+			if !strings.Contains(lines, want) {
+				t.Errorf("expected %q in:\n%s", want, lines)
+			}
+		}
+		if strings.Contains(lines, "carries") || strings.Contains(lines, "carrying") {
+			t.Errorf("an unlabeled listing has no label to name:\n%s", lines)
+		}
+	})
+
+	t.Run("unlabeled short listing over pinned matches", func(t *testing.T) {
+		lines := strings.Join(hiddenPinnedNoticeLines(nil, 3, 1, store), "\n")
+		if !strings.Contains(lines, "3 further PINNED") {
+			t.Errorf("a non-empty listing must report the rows it hid as further ones:\n%s", lines)
+		}
+		if strings.Contains(lines, "carries") || strings.Contains(lines, "carrying") {
+			t.Errorf("an unlabeled listing has no label to name:\n%s", lines)
 		}
 	})
 
@@ -151,7 +176,8 @@ func TestPrintHiddenPinnedNoticeFiresOnlyWhenTheDefaultHidSomething(t *testing.T
 		"no label filter": {
 			predicates: listLabelPredicates{},
 			request:    issueops.ListRequest{},
-			why:        "an unlabeled listing gets no notice",
+			want:       true,
+			why:        "the pinned default hides rows from an unlabeled listing too, and bd-qk2 is the notice staying silent about it",
 		},
 	}
 

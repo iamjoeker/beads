@@ -50,18 +50,20 @@ func countHiddenPinned(ctx context.Context, s workapi.PinnedSearcher, listing wo
 	return count
 }
 
-// hiddenPinnedNoticeLines renders the notice for a labeled listing that hid
-// pinned matches. It returns nil when there is nothing measured to say: no
-// label filter, a probe that could not run, or a probe that found the listing
-// hid nothing — an ordinary listing, which should stay ordinary.
+// hiddenPinnedNoticeLines renders the notice for a listing that hid pinned
+// matches. It fires whether or not the listing carried a label — the pinned
+// default excludes those rows from every `bd list`, labeled or not, so a
+// notice gated on a label predicate would stay silent on the commonest
+// invocation on this rig (bd-qk2). It returns nil when there is nothing
+// measured to say: a probe that could not run, or a probe that found the
+// listing hid nothing — an ordinary listing, which should stay ordinary.
 //
 // store names the database that was searched, so the count is about a place and
 // not about the tracker in general.
 func hiddenPinnedNoticeLines(labels []string, hidden, resultCount int, store string) []string {
-	if len(labels) == 0 || hidden <= 0 {
+	if hidden <= 0 {
 		return nil
 	}
-	joined := strings.Join(quotedLabels(labels), ", ")
 
 	// The store is named where one is known and called "the same store"
 	// otherwise, so the sentence never implies a place the caller could not
@@ -78,11 +80,25 @@ func hiddenPinnedNoticeLines(labels []string, hidden, resultCount int, store str
 		count = fmt.Sprintf("at least %d", hidden)
 	}
 
+	// carrying is the label clause used when the listing hid rows it still
+	// found something to say about, present only when the listing actually
+	// filtered by label — an unlabeled listing has no label to name, and
+	// saying "carrying" nothing would be a clause about a filter that was
+	// never typed.
+	var carrying string
+	if len(labels) > 0 {
+		carrying = " carrying " + strings.Join(quotedLabels(labels), ", ")
+	}
+
 	var headline string
-	if resultCount == 0 {
+	switch {
+	case resultCount == 0 && len(labels) > 0:
+		joined := strings.Join(quotedLabels(labels), ", ")
 		headline = fmt.Sprintf("note: no listed issue carries %s, but %s PINNED issue(s)%s match this same query.", joined, count, where)
-	} else {
-		headline = fmt.Sprintf("note: %d issue(s) listed, and %s further PINNED issue(s) carrying %s%s were hidden.", resultCount, count, joined, where)
+	case resultCount == 0:
+		headline = fmt.Sprintf("note: nothing was listed, but %s PINNED issue(s)%s match this same query.", count, where)
+	default:
+		headline = fmt.Sprintf("note: %d issue(s) listed, and %s further PINNED issue(s)%s%s were hidden.", resultCount, count, carrying, where)
 	}
 	return []string{
 		headline,
@@ -96,7 +112,13 @@ func hiddenPinnedNoticeLines(labels []string, hidden, resultCount int, store str
 //
 // Whether a listing owes one is workapi.PinnedNoticeContext's question, not
 // this file's: the exclusion is a rule of the listing query, and a frontend
-// that re-derived it from the flags would be a second reading of it.
+// that re-derived it from the flags would be a second reading of it. It is NOT
+// gated on a label predicate — the pinned default hides rows from every
+// `bd list`, labeled or not, and gating the disclosure on a label left the
+// commonest invocation on this rig, a bare `bd list --status open`, disclosing
+// nothing about the pinned rows it dropped (bd-qk2). labels is used only for
+// wording: present, it names what the hidden rows carry; empty, the notice
+// still fires, worded without a label clause.
 //
 // stderr and --quiet for the reasons printEmptyLabelledListNotice uses them:
 // --json output must stay parseable, and every other non-error advisory in this
@@ -105,10 +127,7 @@ func printHiddenPinnedNotice(ctx context.Context, s workapi.PinnedSearcher, p li
 	if isQuiet() || !listing.Applies() {
 		return false
 	}
-	labels, ok := p.terms()
-	if !ok {
-		return false
-	}
+	labels, _ := p.terms()
 	lines := hiddenPinnedNoticeLines(labels, countHiddenPinned(ctx, s, listing), resultCount, storeDesc)
 	for _, line := range lines {
 		fmt.Fprintln(os.Stderr, line)
@@ -116,9 +135,11 @@ func printHiddenPinnedNotice(ctx context.Context, s workapi.PinnedSearcher, p li
 	return len(lines) > 0
 }
 
-// printLabelledListNotices emits the disclosures a labeled listing owes its
-// reader, in the order of nearness: the rows this very query matched and hid
-// first, the other table second.
+// printLabelledListNotices emits the disclosures a listing owes its reader
+// beyond the status one, in the order of nearness: the rows this very query
+// matched and hid first, the other table second. Its name predates the pinned
+// half firing on an unlabeled listing too (bd-qk2); only the wisp fallback it
+// calls is actually gated on a label predicate.
 //
 // The pinned notice SUPPRESSES the wisp one when it fires, and not merely to
 // keep the output short. The wisp notice's own headline is "no ISSUE carries
