@@ -109,6 +109,8 @@ type CountRequest struct {
 	TitleContains string
 	DescContains  string
 	NotesContains string
+	// MetadataFields requires equality for every top-level key/value pair.
+	MetadataFields map[string]string
 
 	CreatedAfter  *time.Time
 	CreatedBefore *time.Time

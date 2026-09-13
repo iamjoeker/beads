@@ -245,7 +245,7 @@ func runListCore(cmd *cobra.Command, _ []string) error {
 	}
 
 	if in.watchMode {
-		if err := watchIssues(ctx, activeStore, filter, in.ReadyFlag, in.ParentID, in.SortBy, in.Reverse, in.effectiveLimit); err != nil {
+		if err := watchIssues(ctx, activeStore, filter, in.ReadyFlag, in.ParentID, in.SortBy, in.Reverse, in.effectiveLimit, in.Status); err != nil {
 			if capErr := handleMaxRowsError(err); capErr != nil {
 				return capErr
 			}
@@ -346,7 +346,7 @@ func runListCore(cmd *cobra.Command, _ []string) error {
 				return HandleError("loading dependencies for --deps: %v", depErr)
 			}
 			// Hierarchical --parent walks use an unlimited per-level query, so the tree is never page-truncated.
-			displayPrettyListWithDepsMode(treeIssues, false, allDeps, in.depsMode, false, in.ReadyFlag)
+			displayPrettyListWithDepsMode(treeIssues, false, allDeps, in.depsMode, false, in.ReadyFlag, in.Status)
 			printSkipLabelsFooter(in.SkipLabels)
 			return nil
 		}
@@ -355,7 +355,7 @@ func runListCore(cmd *cobra.Command, _ []string) error {
 		if depErr != nil && in.depsMode != "" {
 			return HandleError("loading dependencies for --deps: %v", depErr)
 		}
-		displayPrettyListWithDepsMode(issues, false, allDeps, in.depsMode, truncated, in.ReadyFlag)
+		displayPrettyListWithDepsMode(issues, false, allDeps, in.depsMode, truncated, in.ReadyFlag, in.Status)
 		printTruncationHint(truncated, in.effectiveLimit)
 		printSkipLabelsFooter(in.SkipLabels)
 		return nil
@@ -446,7 +446,7 @@ func init() {
 	listCmd.Flags().Bool("all", false, "Show all issues including closed (overrides default filter)")
 	listCmd.Flags().Bool("long", false, "Show detailed multi-line output for each issue")
 	listCmd.Flags().String("sort", "", "Sort by field: priority, created, updated, closed, status, id, title, type, assignee")
-	listCmd.Flags().BoolP("reverse", "r", false, "Reverse sort order")
+	listCmd.Flags().BoolP("reverse", "r", false, "Invert the sort field's default direction (created/updated/closed default to newest-first, so --sort updated --reverse is oldest-first)")
 
 	// Pattern matching
 	listCmd.Flags().String("title-contains", "", "Filter by title substring (case-insensitive)")
@@ -505,6 +505,14 @@ func init() {
 	// one keys on issue TYPE, and the records this hides are ordinary beads
 	// carrying a label (list_exclude_labels.go).
 	registerIncludeHiddenFlag(listCmd)
+
+	// Ephemeral plane: the wisps table is suppressed by default. This is the
+	// PLANE knob on its own — ListRequest.IncludeEphemeral — as distinct from
+	// --include-infra, which admits the plane AND lifts the infra-type
+	// exclusions above. Without it the plane is reachable from the CLI only
+	// through --include-infra's wider bundle, which leaves --wisp-type below
+	// with no narrow way to match anything.
+	listCmd.Flags().Bool("include-ephemeral", false, "Include ephemeral wisp-plane rows in output (normally hidden)")
 
 	// Explicit type exclusion
 	listCmd.Flags().StringSlice("exclude-type", nil, "Exclude issue types from results (comma-separated or repeatable, e.g., --exclude-type=convoy,epic)")

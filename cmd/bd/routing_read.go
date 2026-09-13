@@ -244,5 +244,5 @@ func openRoutedStoreTarget(ctx context.Context, store storage.DoltStorage, writa
 	if err != nil {
 		return nil, target, fmt.Errorf("failed to open routed store at %s: %w", target.RepoPath, err)
 	}
-	return targetStore, target, nil
+	return wireExternalDependencyPolicy(targetStore), target, nil
 }

@@ -3,14 +3,18 @@ package uow
 import (
 	"context"
 	"database/sql"
+	"database/sql/driver"
 	"errors"
 	"fmt"
+	"io"
+	"net"
 	"sync/atomic"
 	"time"
 
 	"github.com/cenkalti/backoff/v4"
-	_ "github.com/go-sql-driver/mysql"
+	"github.com/go-sql-driver/mysql"
 
+	"github.com/steveyegge/beads/internal/debug"
 	"github.com/steveyegge/beads/internal/storage"
 	"github.com/steveyegge/beads/internal/storage/dbproxy/proxy"
 	"github.com/steveyegge/beads/internal/storage/dbproxy/util"
@@ -163,6 +167,40 @@ func (p *doltSQLProvider) BeginTx(ctx context.Context) (Tx, error) {
 	}, nil
 }
 
+// selectProbeDatabase lets schema's pre-lock convergence probe reach the
+// database on a session that is not yet on one. openAndInitSchema has two entry
+// shapes since wy-s8ytnw, and only one of them needs this: the steady-state
+// open connects straight to the target database, so the probe reads it from
+// DATABASE() and returns before consulting the selector at all
+// (schema.selectTargetDatabase). The fall-through open still pins its
+// schema-init pool with an EMPTY DSN database, and there, without this, the
+// probe reads NULL from DATABASE(), declines, and every invocation queues on
+// the server-wide migration lock it exists to skip.
+//
+// The USE MUST remain the DDL repository's own UseDatabase — the exact
+// statement prepareBootstrap issues below. That identity is the reason the
+// probe may skip locked preparation when it reports converged: preparation's
+// contribution on an existing database is precisely this USE (its bare CREATE
+// DATABASE can only have failed with "database exists" and captured no heal
+// authority). Reimplementing the statement here, or letting the two quote
+// identifiers differently, would silently break that argument.
+//
+// It is injected rather than reached for from schema/: domain/db's own test
+// suite migrates a scratch database with schema, so a schema -> domain/db
+// import compiles as a library and then fails the domain/db TEST build with
+// "import cycle not allowed in test". uow already depends on both, so the
+// dependency is legal exactly here.
+func selectProbeDatabase(ctx context.Context, conn schema.DBConn, database string) (string, error) {
+	quoted, err := db.QuoteIdentifier(database)
+	if err != nil {
+		return "", err
+	}
+	if err := db.NewDDLSQLRepository(conn).UseDatabase(ctx, database); err != nil {
+		return "", err
+	}
+	return quoted, nil
+}
+
 func (p *doltSQLProvider) initSchema(ctx context.Context, database string) error {
 	bo := backoff.NewExponentialBackOff()
 	bo.InitialInterval = 25 * time.Millisecond
@@ -170,133 +208,170 @@ func (p *doltSQLProvider) initSchema(ctx context.Context, database string) error
 	// full cold-start migration pass (every migration + a Dolt commit each),
 	// not just a transient blip — it grows as migrations accumulate.
 	bo.MaxElapsedTime = 60 * time.Second
-	// Fresh-bootstrap ownership proof for the #4566 guard self-heal
-	// (gastownhall/beads#5012): the first attempt issues a bare CREATE
-	// DATABASE (no IF NOT EXISTS), so the server arbitrates creation
-	// atomically — success proves THIS init created the database, and an
-	// already-exists refusal (1007) proves it did not. Only the proven
-	// creator captures and passes a one-shot FreshBootstrapHealCapability: on
-	// a database this init
-	// created, a retry attempt that finds dirty tables can only be seeing a
-	// previous attempt's own half-applied migration step (a session that
-	// died between a step's SQL and its per-step Dolt commit — the "busy
-	// buffer" shape on a loaded shared server), never pre-existing user
-	// data, so the migrate call may discard that debris and converge instead
-	// of failing the init permanently. The capability also binds that proof to
-	// the endpoint, server UUID, database, and initial HEAD, preventing a stale
-	// creator from resetting a drop/recreated name. A concurrent initializer
-	// that loses the create race keeps the guard's refusal unchanged. `created`
-	// is sticky across retry attempts for availability re-creation; reset
-	// authority is captured only in the exact CREATE-winning attempt and is
-	// never inferred again from probing or CREATE IF NOT EXISTS.
-	created := false
-	var bootstrapHeal *schema.FreshBootstrapHealCapability
-	prepareBootstrap := func(ctx context.Context, conn *sql.Conn) (*schema.FreshBootstrapHealCapability, error) {
-		ddl := db.NewDDLSQLRepository(conn)
-		justCreated := false
-		if created {
-			// Re-assert on retries so a database dropped between attempts
-			// (e.g. a concurrent clean-databases) is recreated rather than
-			// failing the USE below.
-			if err := ddl.CreateDatabaseIfNotExists(ctx, database); err != nil {
-				return nil, &bootstrapPreparationError{err: fmt.Errorf("uow: creating database: %w", err)}
-			}
-		} else {
-			switch err := ddl.CreateDatabase(ctx, database); {
-			case err == nil:
-				created = true
-				justCreated = true
-			case isDatabaseExistsError(err):
-				// Pre-existing (or a concurrent initializer won the create
-				// race): not ours, heal stays off.
-			case isSerializationError(err):
-				// Only the initial bare CREATE preserves its historical
-				// serialization retry classification. The later sticky CREATE,
-				// USE, and identity capture remain permanent regardless of
-				// their nested driver error.
-				return nil, &bootstrapPreparationError{
-					err:       fmt.Errorf("uow: creating database: %w", err),
-					retryable: true,
-				}
-			default:
-				return nil, &bootstrapPreparationError{err: fmt.Errorf("uow: creating database: %w", err)}
-			}
-		}
-		if err := ddl.UseDatabase(ctx, database); err != nil {
-			return nil, &bootstrapPreparationError{err: fmt.Errorf("uow: switching to database: %w", err)}
-		}
-		if justCreated {
-			// Capture authority only in the same attempt that won the exact bare
-			// CREATE. A later retry may re-create a missing database for
-			// availability, but it must never infer ownership of a replacement
-			// incarnation from CREATE IF NOT EXISTS.
-			var err error
-			bootstrapHeal, err = schema.CaptureFreshBootstrapHealCapability(
-				ctx, conn, p.serverEndpoint, database,
-			)
-			if err != nil {
-				return nil, &bootstrapPreparationError{err: fmt.Errorf("uow: capture fresh database identity: %w", err)}
-			}
-		}
-		return bootstrapHeal, nil
-	}
+	// One preparer per initSchema call carries the sticky fresh-bootstrap state
+	// (created/heal) across every backoff attempt; see bootstrapPreparer.
+	preparer := &bootstrapPreparer{provider: p, database: database}
 	return backoff.Retry(func() error {
-		conn, err := p.db.Conn(ctx)
-		if err != nil {
-			if isSerializationError(err) {
-				return fmt.Errorf("uow: pin connection: %w", err)
-			}
-			return backoff.Permanent(fmt.Errorf("uow: pin connection: %w", err))
-		}
-		defer conn.Close()
-
-		ddl := db.NewDDLSQLRepository(conn)
-		if p.teamServer {
-			if err := ddl.UseDatabase(ctx, database); err != nil {
-				if isSerializationError(err) {
-					return fmt.Errorf("uow: switching to database: %w", err)
-				}
-				return backoff.Permanent(fmt.Errorf(
-					"uow: database %q not found — the schema is managed by beads-team-server; ask your operator to run 'bts init' first: %w",
-					database, err))
-			}
-			if err := checkTeamServerSchema(ctx, conn, database); err != nil {
-				if isSerializationError(err) {
-					return fmt.Errorf("uow: team-server schema check: %w", err)
-				}
-				return backoff.Permanent(err)
-			}
-			// Identity is checked only after the schema check proves the
-			// metadata table exists at this binary's version.
-			if err := checkTeamServerIdentity(ctx, conn, database, p.expectedProjectID); err != nil {
-				if isSerializationError(err) {
-					return fmt.Errorf("uow: team-server identity check: %w", err)
-				}
-				return backoff.Permanent(err)
-			}
-			return nil
-		}
-		if p.preview {
-			// Preview open: attach to the database that is already there and
-			// stop. No CreateDatabase, no MigrateUpWithLock — a --dry-run or
-			// --inspect that migrated the workspace before rendering its plan
-			// would be the exact side effect the flag exists to prevent.
-			if err := ddl.UseDatabase(ctx, database); err != nil {
-				if isSerializationError(err) {
-					return fmt.Errorf("uow: switching to database: %w", err)
-				}
-				return backoff.Permanent(fmt.Errorf(
-					"uow: database %q not found — preview commands (--dry-run, --inspect) never create or migrate a database; run the command without the preview flag first: %w",
-					database, err))
-			}
-			return nil
-		}
-		if _, err := schema.MigrateUpWithLock(ctx, conn, database,
-			schema.WithLockedPreparation(p.serverEndpoint, prepareBootstrap)); err != nil {
-			return classifyInitSchemaError(err)
-		}
-		return nil
+		return p.initSchemaAttempt(ctx, database, preparer)
 	}, backoff.WithContext(bo, ctx))
+}
+
+// initSchemaAttempt runs a single backoff attempt of initSchema. It pins a
+// connection and fans out to the team-server, preview, or migrating open path.
+// Each path returns a bare error for a serialization retry and backoff.Permanent
+// for a terminal failure.
+func (p *doltSQLProvider) initSchemaAttempt(ctx context.Context, database string, preparer *bootstrapPreparer) error {
+	conn, err := p.db.Conn(ctx)
+	if err != nil {
+		if isSerializationError(err) {
+			return fmt.Errorf("uow: pin connection: %w", err)
+		}
+		return backoff.Permanent(fmt.Errorf("uow: pin connection: %w", err))
+	}
+	defer conn.Close()
+
+	if p.teamServer {
+		return p.verifyTeamServerSchema(ctx, conn, database)
+	}
+	if p.preview {
+		return p.attachPreviewDatabase(ctx, conn, database)
+	}
+	if _, err := schema.MigrateUpWithLock(ctx, conn, database,
+		schema.WithDatabaseSelector(selectProbeDatabase),
+		schema.WithLockedPreparation(p.serverEndpoint, preparer.prepare)); err != nil {
+		return classifyInitSchemaError(err)
+	}
+	return nil
+}
+
+// verifyTeamServerSchema is the team-server open path: the schema is owned by
+// beads-team-server (bts), so bd never creates the database or migrates. It
+// attaches to the existing database and verifies the schema version, then the
+// project identity — identity is checked only after the schema check proves the
+// metadata table exists at this binary's version.
+func (p *doltSQLProvider) verifyTeamServerSchema(ctx context.Context, conn *sql.Conn, database string) error {
+	ddl := db.NewDDLSQLRepository(conn)
+	if err := ddl.UseDatabase(ctx, database); err != nil {
+		if isSerializationError(err) {
+			return fmt.Errorf("uow: switching to database: %w", err)
+		}
+		return backoff.Permanent(fmt.Errorf(
+			"uow: database %q not found — the schema is managed by beads-team-server; ask your operator to run 'bts init' first: %w",
+			database, err))
+	}
+	if err := checkTeamServerSchema(ctx, conn, database); err != nil {
+		if isSerializationError(err) {
+			return fmt.Errorf("uow: team-server schema check: %w", err)
+		}
+		return backoff.Permanent(err)
+	}
+	if err := checkTeamServerIdentity(ctx, conn, database, p.expectedProjectID); err != nil {
+		if isSerializationError(err) {
+			return fmt.Errorf("uow: team-server identity check: %w", err)
+		}
+		return backoff.Permanent(err)
+	}
+	return nil
+}
+
+// attachPreviewDatabase is the preview open path: attach to the database that is
+// already there and stop. No CreateDatabase, no MigrateUpWithLock — a --dry-run
+// or --inspect that migrated the workspace before rendering its plan would be the
+// exact side effect the flag exists to prevent.
+func (p *doltSQLProvider) attachPreviewDatabase(ctx context.Context, conn *sql.Conn, database string) error {
+	ddl := db.NewDDLSQLRepository(conn)
+	if err := ddl.UseDatabase(ctx, database); err != nil {
+		if isSerializationError(err) {
+			return fmt.Errorf("uow: switching to database: %w", err)
+		}
+		return backoff.Permanent(fmt.Errorf(
+			"uow: database %q not found — preview commands (--dry-run, --inspect) never create or migrate a database; run the command without the preview flag first: %w",
+			database, err))
+	}
+	return nil
+}
+
+// bootstrapPreparer carries the sticky fresh-bootstrap state across the backoff
+// retry attempts of a single initSchema call and runs as MigrateUpWithLock's
+// locked-preparation callback (see prepare).
+//
+// Fresh-bootstrap ownership proof for the #4566 guard self-heal
+// (gastownhall/beads#5012): the first attempt issues a bare CREATE DATABASE (no
+// IF NOT EXISTS), so the server arbitrates creation atomically — success proves
+// THIS init created the database, and an already-exists refusal (1007) proves it
+// did not. Only the proven creator captures and passes a one-shot
+// FreshBootstrapHealCapability: on a database this init created, a retry attempt
+// that finds dirty tables can only be seeing a previous attempt's own
+// half-applied migration step (a session that died between a step's SQL and its
+// per-step Dolt commit — the "busy buffer" shape on a loaded shared server),
+// never pre-existing user data, so the migrate call may discard that debris and
+// converge instead of failing the init permanently. The capability also binds
+// that proof to the endpoint, server UUID, database, and initial HEAD, preventing
+// a stale creator from resetting a drop/recreated name. A concurrent initializer
+// that loses the create race keeps the guard's refusal unchanged.
+type bootstrapPreparer struct {
+	provider *doltSQLProvider
+	database string
+	// created is sticky across retry attempts for availability re-creation;
+	// reset authority is captured only in the exact CREATE-winning attempt and is
+	// never inferred again from probing or CREATE IF NOT EXISTS.
+	created bool
+	// heal is the one-shot capability captured in the CREATE-winning attempt and
+	// re-returned unchanged on later attempts.
+	heal *schema.FreshBootstrapHealCapability
+}
+
+// prepare is MigrateUpWithLock's locked-preparation callback. It (re)creates and
+// selects the target database and, only in the attempt that won the bare CREATE,
+// captures the fresh-bootstrap heal capability. See bootstrapPreparer.
+func (b *bootstrapPreparer) prepare(ctx context.Context, conn *sql.Conn) (*schema.FreshBootstrapHealCapability, error) {
+	ddl := db.NewDDLSQLRepository(conn)
+	justCreated := false
+	if b.created {
+		// Re-assert on retries so a database dropped between attempts
+		// (e.g. a concurrent clean-databases) is recreated rather than
+		// failing the USE below.
+		if err := ddl.CreateDatabaseIfNotExists(ctx, b.database); err != nil {
+			return nil, &bootstrapPreparationError{err: fmt.Errorf("uow: creating database: %w", err)}
+		}
+	} else {
+		switch err := ddl.CreateDatabase(ctx, b.database); {
+		case err == nil:
+			b.created = true
+			justCreated = true
+		case isDatabaseExistsError(err):
+			// Pre-existing (or a concurrent initializer won the create
+			// race): not ours, heal stays off.
+		case isSerializationError(err):
+			// Only the initial bare CREATE preserves its historical
+			// serialization retry classification. The later sticky CREATE,
+			// USE, and identity capture remain permanent regardless of
+			// their nested driver error.
+			return nil, &bootstrapPreparationError{
+				err:       fmt.Errorf("uow: creating database: %w", err),
+				retryable: true,
+			}
+		default:
+			return nil, &bootstrapPreparationError{err: fmt.Errorf("uow: creating database: %w", err)}
+		}
+	}
+	if err := ddl.UseDatabase(ctx, b.database); err != nil {
+		return nil, &bootstrapPreparationError{err: fmt.Errorf("uow: switching to database: %w", err)}
+	}
+	if justCreated {
+		// Capture authority only in the same attempt that won the exact bare
+		// CREATE. A later retry may re-create a missing database for
+		// availability, but it must never infer ownership of a replacement
+		// incarnation from CREATE IF NOT EXISTS.
+		var err error
+		b.heal, err = schema.CaptureFreshBootstrapHealCapability(
+			ctx, conn, b.provider.serverEndpoint, b.database,
+		)
+		if err != nil {
+			return nil, &bootstrapPreparationError{err: fmt.Errorf("uow: capture fresh database identity: %w", err)}
+		}
+	}
+	return b.heal, nil
 }
 
 func buildDSN(ep proxy.Endpoint, database, user, password, tlsConfigName string) string {
@@ -311,31 +386,216 @@ func buildDSN(ep proxy.Endpoint, database, user, password, tlsConfigName string)
 	}.String()
 }
 
+// pinger is the subset of *sql.DB that pingWithRetry needs, narrowed so
+// tests can script a sequence of transient failures without a real
+// connection.
+type pinger interface {
+	PingContext(ctx context.Context) error
+}
+
+// pingAttemptTimeout bounds a single ping attempt. The DSN sets a dial
+// Timeout (5s, internal/storage/dbproxy/util/dsn.go) but no ReadTimeout, so a
+// server that accepts the TCP connection and then stalls mid-handshake is
+// otherwise bounded only by the caller's context. Kept above the dial timeout
+// so a genuine dial timeout still surfaces as itself instead of being masked
+// by this cap.
+const pingAttemptTimeout = 10 * time.Second
+
+// isTransientPingError reports whether err is a connection-level failure worth
+// retrying — the shapes a Dolt server produces when it drops or stalls a
+// connection mid-handshake or mid-ping — as opposed to a durable rejection
+// (bad credentials, unknown database) that retrying cannot fix.
+//
+// Any *net.OpError counts. Before the handshake completes there is no
+// application-level rejection that can reach us as one, so at boot an OpError
+// is always the connection itself: refused while the server restarts, reset,
+// or broken pipe. MySQL's own rejections arrive as *mysql.MySQLError and stay
+// permanent. A name that does not resolve is the exception — it will not start
+// resolving, so retrying only spends the whole budget before reporting the
+// same misconfiguration.
+//
+// context.DeadlineExceeded counts only because pingWithRetry applies a
+// per-attempt deadline and checks the caller's context *before* consulting
+// this function, so a DeadlineExceeded that reaches here can only be that
+// per-attempt cap. Do not call this without that guard: classifying the
+// caller's own expiry as transient would retry a context that is already dead,
+// which is the regression #6000 introduced from the other direction.
+//
+// Deliberately narrower than internal/storage/dolt's isRetryableError, which
+// covers this same ground for query-time retries in server mode. That one
+// matches on error text and additionally admits migration-lock, Dolt
+// read-only, and MySQL-1105 shapes — server states that describe a *statement*
+// being refused, which a boot ping cannot be in because nothing has executed on
+// the connection yet. Matching sentinels and types with errors.Is/errors.As
+// keeps this side typed, and keeps a bootstrap ping from inheriting retry
+// semantics that only make sense mid-transaction.
+func isTransientPingError(err error) bool {
+	var dnsErr *net.DNSError
+	if errors.As(err, &dnsErr) && !dnsErr.IsTemporary && !dnsErr.IsTimeout {
+		return false
+	}
+	var opErr *net.OpError
+	return errors.Is(err, driver.ErrBadConn) ||
+		errors.Is(err, mysql.ErrInvalidConn) ||
+		errors.Is(err, io.EOF) ||
+		errors.Is(err, io.ErrUnexpectedEOF) ||
+		errors.Is(err, context.DeadlineExceeded) ||
+		errors.As(err, &opErr)
+}
+
+// pingWithRetry pings until the server answers, the error proves durable, or
+// bo's MaxElapsedTime is spent. Each attempt gets its own deadline:
+// backoff.Retry bounds the gap between attempts but cannot interrupt one
+// already in flight, so without this cap a server that accepts TCP and then
+// stalls blocks for the caller's entire context.
+func pingWithRetry(ctx context.Context, p pinger, bo *backoff.ExponentialBackOff, attemptTimeout time.Duration) error {
+	return backoff.Retry(func() error {
+		attemptCtx, cancel := context.WithTimeout(ctx, attemptTimeout)
+		defer cancel()
+
+		err := p.PingContext(attemptCtx)
+		if err == nil {
+			return nil
+		}
+		// The caller's context is spent, so nothing further can succeed and
+		// its Canceled/DeadlineExceeded must not be read as a transient
+		// per-attempt timeout. This check is what lets isTransientPingError
+		// treat DeadlineExceeded as retryable at all.
+		if ctx.Err() != nil {
+			return backoff.Permanent(err)
+		}
+		if isTransientPingError(err) {
+			return err
+		}
+		return backoff.Permanent(err)
+	}, backoff.WithContext(bo, ctx))
+}
+
+// openDB opens dsn and waits out a server that is still coming up, retrying
+// transient ping failures for up to 30s (#6003).
 func openDB(ctx context.Context, dsn string) (*sql.DB, error) {
+	bo := backoff.NewExponentialBackOff()
+	bo.MaxElapsedTime = 30 * time.Second
+	return openPool(dsn, func(conn *sql.DB) error {
+		return pingWithRetry(ctx, conn, bo, pingAttemptTimeout)
+	})
+}
+
+// openDBProbe opens dsn and proves it with ONE bounded ping instead of
+// openDB's 30s retry budget. It exists for openAndInitSchema's fast path,
+// whose failure is not terminal: every error there falls through to the
+// historical open, which keeps the retry budget it has always owned. Retrying
+// here as well would charge an unreachable server twice — this budget and then
+// the fall-through's, ~60s where the pre-fast-path code spent 30s — to answer
+// a question one ping answers. The sibling fast path in internal/storage/dolt
+// (openServerConnection's bare PingContext ahead of its no-database init
+// connection) is deliberately the same shape.
+//
+// The one attempt is still capped at pingAttemptTimeout, for the reason
+// pingWithRetry caps its own attempts: the DSN sets no ReadTimeout, so a server
+// that accepts TCP and then stalls mid-handshake is otherwise bounded only by
+// the caller's context.
+func openDBProbe(ctx context.Context, dsn string) (*sql.DB, error) {
+	return openPool(dsn, func(conn *sql.DB) error {
+		pingCtx, cancel := context.WithTimeout(ctx, pingAttemptTimeout)
+		defer cancel()
+		return conn.PingContext(pingCtx)
+	})
+}
+
+// openPool opens dsn and hands the pool to prove, which must establish that
+// the server answers on it. The error texts are load-bearing — callers match
+// on "uow: open db" and "uow: ping db" — and a pool whose prove fails is
+// closed here rather than leaked to a caller that only sees an error.
+func openPool(dsn string, prove func(*sql.DB) error) (*sql.DB, error) {
 	conn, err := sql.Open("mysql", dsn)
 	if err != nil {
 		return nil, fmt.Errorf("uow: open db: %w", err)
 	}
-	if err := conn.PingContext(ctx); err != nil {
+	if err := prove(conn); err != nil {
 		return nil, errors.Join(fmt.Errorf("uow: ping db: %w", err), conn.Close())
 	}
 	return conn, nil
 }
 
 func openAndInitSchema(ctx context.Context, ep proxy.Endpoint, database, rootUser, rootPassword, tlsConfigName string, teamServer bool, expectedProjectID string, opts providerOptions) (UnitOfWorkProvider, error) {
+	newProvider := func(pool *sql.DB) *doltSQLProvider {
+		return &doltSQLProvider{
+			defaultBranch:     defaultBranch,
+			db:                pool,
+			serverEndpoint:    "tcp:" + ep.Address(),
+			teamServer:        teamServer,
+			expectedProjectID: expectedProjectID,
+			preview:           opts.preview,
+		}
+	}
+
+	// Fast path (wy-s8ytnw): connect straight to the target database. A
+	// successful connect IS the existence proof (the same reasoning the
+	// dolt store applies to Gateway servers), so the steady-state open —
+	// a database that already exists, which is every open but the very
+	// first — costs ONE MySQL session instead of two: initSchema runs on
+	// this pool (USE + the converged-schema reads, or a real migration
+	// when one is pending; the bare CREATE DATABASE inside the locked
+	// preparation is refused with 1007 exactly as it is on a no-database
+	// connection, so `created` stays false and fresh-bootstrap heal can
+	// never be armed by a database this call did not create), and the
+	// same pool is then handed to the provider.
+	//
+	// Reusing the migrating pool is safe — but NOT because migrations leave
+	// the session alone. They do not: six shipped migrations issue
+	// `SET FOREIGN_KEY_CHECKS = 0` and restore `= 1` (0041, 0043, 0047,
+	// 0050, 0053, 0058 under internal/storage/schema/migrations), and the
+	// guarded ones leave user variables (`SET @sql`, `SET @needs_add`) set.
+	// It is safe because of three narrower facts:
+	//   - initSchemaAttempt pins ONE session per attempt (p.db.Conn), so a
+	//     script's SET and its restoring SET cannot land on different
+	//     sessions;
+	//   - every script that clears FOREIGN_KEY_CHECKS restores it before it
+	//     can report success, and a leftover user variable is inert: nothing
+	//     outside these scripts reads one, and each script assigns before it
+	//     reads;
+	//   - every initSchema failure below closes this whole pool, so a script
+	//     that died between the two SETs never hands its session back.
+	// That is a convention where it used to be structural: before this fast
+	// path the schema-init pool was always discarded, so a migration could
+	// leak session state with impunity. Now a migration that leaves a system
+	// session variable changed on the success path would leak it into live
+	// query sessions — and an attempt that dies mid-script returns its
+	// connection to the pool, so the restore has to be part of the script,
+	// not of the caller. See internal/storage/schema/migrations/README.md.
+	//
+	// Any connect failure — the database does not exist yet (1049), the
+	// server is down, bad credentials — falls through to the historical
+	// no-database init connection, which owns creation, the ownership
+	// signal, and every error message callers already match on. The probe is
+	// single-shot (openDBProbe) precisely so that fall-through cannot cost a
+	// second full retry budget.
+	probeConn, probeErr := openDBProbe(ctx, buildDSN(ep, database, rootUser, rootPassword, tlsConfigName))
+	if probeErr == nil {
+		provider := newProvider(probeConn)
+		if err := provider.initSchema(ctx, database); err != nil {
+			_ = probeConn.Close()
+			return nil, fmt.Errorf("uow: init schema: %w", err)
+		}
+		return provider, nil
+	}
+
+	// Advisory only: the fall-through below is the historical open, so this is
+	// never fatal. But a silently discarded error is a fast path that has
+	// quietly stopped firing — here that means every bd invocation is back to
+	// burning two MySQL sessions, the exact cost this path exists to remove,
+	// with nothing to say so. Same reasoning as the convergence probe in
+	// internal/storage/schema/lock.go.
+	debug.Logf("uow: single-session open unavailable for %q, using the no-database init connection: %v\n",
+		database, probeErr)
+
 	initDB, err := openDB(ctx, buildDSN(ep, "", rootUser, rootPassword, tlsConfigName))
 	if err != nil {
 		return nil, err
 	}
 
-	initProvider := &doltSQLProvider{
-		defaultBranch:     defaultBranch,
-		db:                initDB,
-		serverEndpoint:    "tcp:" + ep.Address(),
-		teamServer:        teamServer,
-		expectedProjectID: expectedProjectID,
-		preview:           opts.preview,
-	}
+	initProvider := newProvider(initDB)
 
 	if err := initProvider.initSchema(ctx, database); err != nil {
 		_ = initDB.Close()
@@ -351,12 +611,5 @@ func openAndInitSchema(ctx context.Context, ep proxy.Endpoint, database, rootUse
 		return nil, err
 	}
 
-	return &doltSQLProvider{
-		defaultBranch:     defaultBranch,
-		db:                dbConn,
-		serverEndpoint:    "tcp:" + ep.Address(),
-		teamServer:        teamServer,
-		expectedProjectID: expectedProjectID,
-		preview:           opts.preview,
-	}, nil
+	return newProvider(dbConn), nil
 }
