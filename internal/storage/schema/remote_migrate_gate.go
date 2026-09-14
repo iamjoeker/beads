@@ -73,6 +73,15 @@ type RemoteMigrateGateError struct {
 	// for the recognized values. Always empty when Decision is "adopt",
 	// "adopt-ff", or "fork-skew" — those stops already explain themselves.
 	FallbackReason string
+	// AttemptedRemoteRef names the remote-tracking ref (remotes/<name>/<branch>)
+	// the smart gate tried and failed to read, when FallbackReason is
+	// fallbackReasonUnreadableState. Set only when routeSmartGate got far
+	// enough to build a ref before the read failed — bd-usl: the gate used
+	// to report only "unreadable-remote-state" with no way to tell which
+	// remote it meant, so a misresolved name (e.g. sync.remote="upstream"
+	// while the only Dolt remote is "origin") was diagnosable only by reading
+	// the source.
+	AttemptedRemoteRef string
 	// UnrecognizedSmartGateEnv carries a BD_SMART_GATE value that was set but
 	// not understood (only boolean values are recognized), mirroring
 	// UnrecognizedEnv above but for the smart gate's own opt-out variable, so
@@ -168,6 +177,9 @@ func (e *RemoteMigrateGateError) fallbackReasonNote() string {
 	switch e.FallbackReason {
 	case fallbackReasonUnreadableState:
 		why = "it could not read the remote's cached schema state (no cached ref, a stale/pre-content_hash one, or the cached remote is behind this clone)"
+		if e.AttemptedRemoteRef != "" {
+			why += fmt.Sprintf(" — tried %q", e.AttemptedRemoteRef)
+		}
 	case fallbackReasonBelowFloor:
 		why = "this database is below the convergence floor — a legacy non-deterministic migration is still pending, so an unattended first-mover migrate is not safe to trust"
 	case fallbackReasonOptedOut:
@@ -479,6 +491,7 @@ func checkRemoteMigrateGate(ctx context.Context, db DBConn, remoteName string, e
 	// follow-up).
 	fallbackReason := ""
 	unrecognizedSmartGateEnv := ""
+	attemptedRemoteRef := ""
 	if SmartGateEnabled() {
 		decision, skew, ref, atLatest := routeSmartGate(ctx, db, current, latest, remoteName, adopt)
 		switch decision {
@@ -552,6 +565,7 @@ func checkRemoteMigrateGate(ctx context.Context, db DBConn, remoteName string, e
 			fallbackReason = fallbackReasonBelowFloor
 		case smartUndetermined:
 			fallbackReason = fallbackReasonUnreadableState
+			attemptedRemoteRef = ref
 		}
 		// An unparseable BD_SMART_GATE value defaults to enabled (same as
 		// unset), so routing above still ran — but it is a more actionable
@@ -571,6 +585,7 @@ func checkRemoteMigrateGate(ctx context.Context, db DBConn, remoteName string, e
 		Pending:                  len(pending),
 		UnrecognizedEnv:          unrecognizedEnv,
 		FallbackReason:           fallbackReason,
+		AttemptedRemoteRef:       attemptedRemoteRef,
 		UnrecognizedSmartGateEnv: unrecognizedSmartGateEnv,
 	}
 }

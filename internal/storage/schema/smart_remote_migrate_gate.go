@@ -286,6 +286,10 @@ func routeSmartGate(ctx context.Context, db DBConn, current, latest int, remoteN
 	if remoteName == "" {
 		remoteName = smartGateDefaultRemote
 	}
+	// Resolved even on the smartUndetermined paths below, before the ref is
+	// known to resolve: callers report `ref` in the gate error's fallback
+	// note so an operator can see WHICH remote-tracking ref it tried to read
+	// (bd-usl), rather than only "unreadable-remote-state".
 	// The caller's remote value is a *sync* config value, not necessarily a Dolt
 	// remote NAME: it is frequently a URL, and when unset it defaults to the
 	// literal string "upstream". Building remotes/<that>/<branch> from it yields
@@ -299,11 +303,12 @@ func routeSmartGate(ctx context.Context, db DBConn, current, latest int, remoteN
 	remote, err := ReadMigrationContentHashes(ctx, db, ref)
 	if err != nil {
 		// Cached ref absent/stale (never pushed/pulled) or pre-content_hash:
-		// nothing to compare — fall back to the blunt block.
-		return smartUndetermined, nil, "", false
+		// nothing to compare — fall back to the blunt block. ref is still
+		// reported (not blanked) so the caller can name which ref it tried.
+		return smartUndetermined, nil, ref, false
 	}
 	if len(remote) == 0 {
-		return smartUndetermined, nil, "", false
+		return smartUndetermined, nil, ref, false
 	}
 
 	if skew := ContentHashSkew(local, remote); len(skew) > 0 {
@@ -322,7 +327,7 @@ func routeSmartGate(ctx context.Context, db DBConn, current, latest int, remoteN
 		// The cached remote is behind this clone. That is not the first-mover
 		// state the smart gate is allowed to auto-resolve, so keep the human
 		// coordination block rather than silently moving farther ahead.
-		return smartUndetermined, nil, "", false
+		return smartUndetermined, nil, ref, false
 	}
 
 	// remote == local on every shared version and at the same max version: a first-mover.

@@ -151,6 +151,9 @@ func TestSmartGateRouting(t *testing.T) {
 		if gateErr.FallbackReason != fallbackReasonUnreadableState {
 			t.Errorf("FallbackReason = %q, want %q", gateErr.FallbackReason, fallbackReasonUnreadableState)
 		}
+		if gateErr.AttemptedRemoteRef != "remotes/origin/main" {
+			t.Errorf("AttemptedRemoteRef = %q, want %q", gateErr.AttemptedRemoteRef, "remotes/origin/main")
+		}
 		if !strings.Contains(gateErr.UserMessage(), "could not read the remote's cached schema state") {
 			t.Errorf("UserMessage should explain the unreadable-state fallback:\n%s", gateErr.UserMessage())
 		}
@@ -261,6 +264,12 @@ func TestSmartGateRouting(t *testing.T) {
 		if gateErr.FallbackReason != fallbackReasonUnreadableState {
 			t.Errorf("FallbackReason = %q, want %q", gateErr.FallbackReason, fallbackReasonUnreadableState)
 		}
+		if gateErr.AttemptedRemoteRef != "remotes/origin/main" {
+			t.Errorf("AttemptedRemoteRef = %q, want %q", gateErr.AttemptedRemoteRef, "remotes/origin/main")
+		}
+		if !strings.Contains(gateErr.UserMessage(), `tried "remotes/origin/main"`) {
+			t.Errorf("UserMessage should name the attempted remote ref:\n%s", gateErr.UserMessage())
+		}
 		if err := mock.ExpectationsWereMet(); err != nil {
 			t.Fatalf("unmet expectations: %v", err)
 		}
@@ -282,6 +291,9 @@ func TestSmartGateRouting(t *testing.T) {
 		}
 		if gateErr.FallbackReason != fallbackReasonUnreadableState {
 			t.Errorf("FallbackReason = %q, want %q", gateErr.FallbackReason, fallbackReasonUnreadableState)
+		}
+		if gateErr.AttemptedRemoteRef != "" {
+			t.Errorf("AttemptedRemoteRef = %q, want empty — routing never got far enough to build a ref", gateErr.AttemptedRemoteRef)
 		}
 		if err := mock.ExpectationsWereMet(); err != nil {
 			t.Fatalf("unmet expectations: %v", err)
