@@ -4,14 +4,24 @@ import (
 	"context"
 	"database/sql"
 	"fmt"
+	"reflect"
 	"time"
 
 	"github.com/steveyegge/beads/internal/storage"
 	"github.com/steveyegge/beads/internal/types"
 )
 
-// HistoryInTx returns the complete version history for an issue by querying
-// the dolt_history_issues system table. The result is ordered newest-first.
+// HistoryInTx returns the version history for an issue by querying the
+// dolt_history_issues system table, collapsed to entries where the issue's
+// own content actually changed. The result is ordered newest-first.
+//
+// dolt_history_issues carries a row for EVERY commit that touched the issues
+// table, for every id that existed at that commit -- not just commits that
+// changed that id's row. Left unfiltered, an issue's entry count tracks
+// unrelated database activity (every other issue's edits) rather than its
+// own history: a bead created once and never updated can show hundreds of
+// identical "history" entries (bd-rwd). collapseUnchanged removes the
+// no-op snapshots so what remains is the issue's actual change history.
 //
 // The subquery wrapper avoids Dolt's max1Row optimization on PK lookup:
 // dolt_history_* tables return multiple rows per PK (one per commit), but
@@ -99,8 +109,31 @@ func HistoryInTx(ctx context.Context, tx DBTX, issueID string) ([]*storage.Histo
 			Issue:      &issue,
 		})
 	}
+	if err := rows.Err(); err != nil {
+		return nil, err
+	}
 
-	return entries, rows.Err()
+	return collapseUnchanged(entries), nil
+}
+
+// collapseUnchanged drops entries whose issue content is identical to the
+// next-older entry (entries is ordered newest-first, so that's the
+// following slice element). Those entries are snapshots from commits that
+// touched other rows in the issues table, not this one, and shouldn't be
+// counted or displayed as if they were changes to this issue. The oldest
+// entry is always kept -- it has nothing older to compare against and
+// represents the issue's earliest known state.
+func collapseUnchanged(entries []*storage.HistoryEntry) []*storage.HistoryEntry {
+	if len(entries) == 0 {
+		return entries
+	}
+	kept := make([]*storage.HistoryEntry, 0, len(entries))
+	for i, e := range entries {
+		if i == len(entries)-1 || !reflect.DeepEqual(e.Issue, entries[i+1].Issue) {
+			kept = append(kept, e)
+		}
+	}
+	return kept
 }
 
 // PreviousExternalRefInTx returns the external_ref value recorded for

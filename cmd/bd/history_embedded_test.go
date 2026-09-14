@@ -89,8 +89,8 @@ func TestEmbeddedHistory(t *testing.T) {
 			t.Errorf("expected 'History for' header: %s", out)
 		}
 		// Should show commit hashes
-		if !strings.Contains(out, "Author:") {
-			t.Errorf("expected 'Author:' in history output: %s", out)
+		if !strings.Contains(out, "Committer:") {
+			t.Errorf("expected 'Committer:' in history output: %s", out)
 		}
 	})
 

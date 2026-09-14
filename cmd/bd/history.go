@@ -21,14 +21,18 @@ var (
 var historyCmd = &cobra.Command{
 	Use:     "history <id>",
 	GroupID: "views",
-	Short:   "Show version history for an issue",
-	Long: `Show the complete version history of an issue, including all commits
-where the issue was modified.
+	Short:   "Show content-change history for an issue",
+	Long: `Show the issue's content at each commit where it actually changed.
+
+The "Author" shown is the Dolt commit committer, not necessarily who edited
+this issue -- a shared sync or merge commit can carry a different committer
+than the person who made the edit. For per-field attribution (who set which
+value, and when), use --events instead.
 
 Examples:
-  bd history bd-123           # Show all history for issue bd-123
+  bd history bd-123           # Show change history for issue bd-123
   bd history bd-123 --limit 5 # Show last 5 changes
-  bd history bd-123 --events  # Show database audit events`,
+  bd history bd-123 --events  # Show database audit events with actor attribution`,
 	Args:          cobra.ExactArgs(1),
 	SilenceUsage:  true,
 	SilenceErrors: true,
@@ -108,7 +112,10 @@ func runHistory(ctx context.Context, backend historyBackend, issueID string, lim
 		fmt.Printf("%s %s\n",
 			ui.RenderMuted(entry.CommitHash[:8]),
 			ui.RenderMuted(entry.CommitDate.Format("2006-01-02 15:04:05")))
-		fmt.Printf("  Author: %s\n", entry.Committer)
+		// Committer, not "Author": this is who committed the enclosing Dolt
+		// commit, not necessarily who edited this issue (bd-rwd). Use
+		// `bd history --events` for per-field actor attribution.
+		fmt.Printf("  Committer: %s\n", entry.Committer)
 
 		if entry.Issue != nil {
 			statusIcon := ui.GetStatusIcon(string(entry.Issue.Status))

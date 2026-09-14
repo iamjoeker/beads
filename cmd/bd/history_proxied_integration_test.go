@@ -57,8 +57,8 @@ func TestProxiedServerHistory(t *testing.T) {
 		if !strings.Contains(s, "History for") {
 			t.Errorf("expected 'History for' header: %s", s)
 		}
-		if !strings.Contains(s, "Author:") {
-			t.Errorf("expected 'Author:' in history output: %s", s)
+		if !strings.Contains(s, "Committer:") {
+			t.Errorf("expected 'Committer:' in history output: %s", s)
 		}
 	})
 
