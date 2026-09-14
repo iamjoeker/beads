@@ -206,10 +206,20 @@ func printHiddenByStatusNotice(ctx context.Context, s workapi.StatusSearcher, li
 // second probe and reported on its own line, with its own remedy, so the three
 // counts partition the hidden rows rather than merely failing to overlap.
 // Disjoint was never the property worth having; exhaustive was.
+//
+// A fourth notice (list_wisp_status_notice.go) fires last of all: a bare
+// `--status` selector with no label predicate has nothing above it to say
+// anything (the wisp-by-label notice never runs without a label, and the two
+// status/pinned notices only speak about rows they found IN the issues table),
+// so a status-filtered zero whose only matches are wisps — the shape bd-7ti
+// filed — would otherwise go undisclosed.
 func printListNotices(ctx context.Context, s workapi.WispSearcher, p listLabelPredicates, status workapi.StatusNoticeContext, pinned workapi.PinnedNoticeContext, resultCount int, storeDesc string) {
 	if printHiddenByStatusNotice(ctx, s, status, resultCount, storeDesc) {
 		printHiddenPinnedNotice(ctx, s, p, pinned, resultCount, storeDesc)
 		return
 	}
-	printLabelledListNotices(ctx, s, p, pinned, resultCount, storeDesc)
+	if printLabelledListNotices(ctx, s, p, pinned, resultCount, storeDesc) {
+		return
+	}
+	printEmptyStatusListNotice(ctx, s, status, resultCount, storeDesc)
 }

@@ -162,13 +162,13 @@ func quotedLabels(labels []string) []string {
 // stderr, not stdout: --json output must stay parseable, and every other
 // non-error advisory in this package (the routing notice, tips) goes to stderr
 // and respects --quiet the same way.
-func printEmptyLabelledListNotice(ctx context.Context, s workapi.WispSearcher, p listLabelPredicates, resultCount int, storeDesc string) {
+func printEmptyLabelledListNotice(ctx context.Context, s workapi.WispSearcher, p listLabelPredicates, resultCount int, storeDesc string) bool {
 	if resultCount > 0 || isQuiet() {
-		return
+		return false
 	}
 	labels, ok := p.terms()
 	if !ok {
-		return
+		return false
 	}
 	wispOnly := wispOnlyLabelsAmong(p.Labels, p.LabelsAny)
 	count := countMatchingWisps(ctx, s, p)
@@ -176,6 +176,7 @@ func printEmptyLabelledListNotice(ctx context.Context, s workapi.WispSearcher, p
 	for _, line := range lines {
 		fmt.Fprintln(os.Stderr, line)
 	}
+	return len(lines) > 0
 }
 
 // describeLocalSearchedStore names the database this command opened locally, in

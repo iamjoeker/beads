@@ -146,9 +146,9 @@ func printHiddenPinnedNotice(ctx context.Context, s workapi.PinnedSearcher, p li
 // <label>", which a hidden pinned match makes false — the issues exist, in the
 // table that was read, and naming the wisp plane would send a reader looking
 // for them in the wrong place.
-func printLabelledListNotices(ctx context.Context, s workapi.WispSearcher, p listLabelPredicates, listing workapi.PinnedNoticeContext, resultCount int, storeDesc string) {
+func printLabelledListNotices(ctx context.Context, s workapi.WispSearcher, p listLabelPredicates, listing workapi.PinnedNoticeContext, resultCount int, storeDesc string) bool {
 	if printHiddenPinnedNotice(ctx, s, p, listing, resultCount, storeDesc) {
-		return
+		return true
 	}
-	printEmptyLabelledListNotice(ctx, s, p, resultCount, storeDesc)
+	return printEmptyLabelledListNotice(ctx, s, p, resultCount, storeDesc)
 }

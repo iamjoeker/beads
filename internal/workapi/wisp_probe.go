@@ -43,6 +43,25 @@ func WispLabelProbeFilter(labels, labelsAny []string, labelPattern, labelRegex s
 	}
 }
 
+// WispStatusProbeFilter selects wisps by the STATUS a listing selected, and by
+// nothing else — the status-selector counterpart of WispLabelProbeFilter, used
+// by StatusNoticeContext.CountMatchingWisps.
+//
+// Unlike the label probe, status is not dropped here: it is the very predicate
+// being asked about. A merged merge-request wisp is closed by definition, so
+// this probe answers a narrower and more useful question than "does this label
+// exist in the wisp plane at all" — "do any wisps carry the exact status this
+// listing named", which is what makes a `--status in_progress` zero
+// structural rather than empirical (bd-7ti).
+func WispStatusProbeFilter(statuses []types.Status, limit int) types.IssueFilter {
+	ephemeral := true
+	return types.IssueFilter{
+		Ephemeral: &ephemeral,
+		Statuses:  statuses,
+		Limit:     limit,
+	}
+}
+
 // HasLabelPredicate reports whether a listing selected on labels at all. The
 // pattern and regex forms count: they select on labels just as much as the
 // exact forms do, and a zero from one of them is just as ambiguous.

@@ -210,4 +210,71 @@ func TestStatusNoticeZeroValueOwesNothing(t *testing.T) {
 	if len(c.Dropped()) != 0 {
 		t.Errorf("Dropped() = %v, want empty", c.Dropped())
 	}
+	if len(c.Selected()) != 0 {
+		t.Errorf("Selected() = %v, want empty", c.Selected())
+	}
+}
+
+// Selected is populated whenever the caller named any live status, even one
+// that drops nothing — unlike Applies(), which a `--status live` selector
+// fails. A wisp-plane match for that set is exactly as informative as one for
+// a narrower selector, so the wisp-status notice keys off Selected, not
+// Applies.
+func TestStatusNoticeSelected(t *testing.T) {
+	if got := noticeFor(t, issueops.ListRequest{Status: "in_progress"}).Selected(); !reflect.DeepEqual(got, []string{"in_progress"}) {
+		t.Fatalf("Selected() = %v, want [in_progress]", got)
+	}
+	// A selector naming every live status drops nothing (Applies() is false),
+	// but it still named a positive set, and a wisp-plane match for that set
+	// is exactly as informative as one for a narrower selector.
+	complete := "open,in_progress,blocked,deferred,hooked,in_review"
+	if got := noticeFor(t, issueops.ListRequest{Status: complete}).Selected(); len(got) == 0 {
+		t.Fatalf("a complete live selector still named a positive set, got %v", got)
+	}
+	if got := noticeFor(t, issueops.ListRequest{}).Selected(); len(got) != 0 {
+		t.Fatalf("an unfiltered listing selected nothing, got %v", got)
+	}
+}
+
+// The wisp-plane analogue of CountHidden: the probe behind a status-filtered
+// zero that CountHidden cannot explain because it never asks the wisps table.
+func TestStatusNoticeCountMatchingWisps(t *testing.T) {
+	ctx := context.Background()
+	listing := noticeFor(t, issueops.ListRequest{Status: "in_progress"})
+
+	t.Run("counts the wisps the probe returned", func(t *testing.T) {
+		s := &statusSearcherStub{issues: []*types.Issue{{ID: "bd-wisp-1"}}}
+		got, err := listing.CountMatchingWisps(ctx, s, 5000)
+		if err != nil {
+			t.Fatalf("CountMatchingWisps: %v", err)
+		}
+		if got != 1 {
+			t.Fatalf("CountMatchingWisps = %d, want 1", got)
+		}
+		if s.got.Ephemeral == nil || !*s.got.Ephemeral {
+			t.Error("the probe must be routed to the wisps table")
+		}
+		if !reflect.DeepEqual(s.got.Statuses, []types.Status{types.StatusInProgress}) {
+			t.Errorf("the probe must carry the selected status, got %+v", s.got.Statuses)
+		}
+	})
+
+	t.Run("no store is an error, not a zero", func(t *testing.T) {
+		if _, err := listing.CountMatchingWisps(ctx, nil, 5000); !errors.Is(err, ErrNoWispSearcher) {
+			t.Fatalf("CountMatchingWisps(nil) error = %v, want ErrNoWispSearcher", err)
+		}
+	})
+
+	// A listing that selected nothing (no --status typed, or --ready) has
+	// nothing to ask the wisp plane about, and must not pay for a query.
+	t.Run("a listing with no selection does not query", func(t *testing.T) {
+		s := &statusSearcherStub{}
+		got, err := noticeFor(t, issueops.ListRequest{}).CountMatchingWisps(ctx, s, 5000)
+		if err != nil || got != 0 {
+			t.Fatalf("CountMatchingWisps = (%d, %v), want (0, nil)", got, err)
+		}
+		if s.calls != 0 {
+			t.Fatalf("probe ran %d times on a listing that selected nothing", s.calls)
+		}
+	})
 }

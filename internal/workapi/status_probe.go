@@ -184,6 +184,20 @@ func (c StatusNoticeContext) Dropped() []string {
 	return out
 }
 
+// Selected returns the live statuses this listing's selector named, for the
+// renderer to name in a notice about the SAME table it did read. It is
+// populated whenever the caller narrowed to any live status at all, unlike
+// Applies — a `--status live` selector that dropped nothing still selected
+// something, and a wisp-plane zero for it is just as worth disclosing as one
+// for `--status in_progress`. The slice is a copy for the reason Dropped's is.
+func (c StatusNoticeContext) Selected() []string {
+	out := make([]string, 0, len(c.selected))
+	for _, s := range c.selected {
+		out = append(out, string(s))
+	}
+	return out
+}
+
 // CountHidden counts the live issues the listing dropped for their status.
 //
 // The error is returned rather than folded into a zero for the reason the other
@@ -228,6 +242,36 @@ func (c StatusNoticeContext) CountHiddenPinned(ctx context.Context, s StatusSear
 		return 0, err
 	}
 	return len(issues), nil
+}
+
+// CountMatchingWisps counts the wisps whose status is one this listing
+// selected — the wisp-plane analog of CountHidden, and the probe behind a
+// status-filtered zero that CountHidden cannot explain: CountHidden only ever
+// asks the issues table, so a query like `bd list --status=in_progress` that
+// matches nothing there reads as an ordinary empty result even when the only
+// matching rows are merge-request wisps at that exact status (bd-7ti).
+//
+// It is gated on len(c.selected) alone, not on Applies(): a `--status live`
+// selector drops nothing (Applies() is false) but still named a positive set
+// of statuses, and a wisp-plane match for that set is exactly as informative
+// as one for a narrower selector.
+//
+// Only the selected status set is inherited, for the reason
+// WispLabelProbeFilter inherits only labels: every other predicate would
+// narrow the probe without making its answer more relevant to "does the wisp
+// plane hold rows with this status at all".
+func (c StatusNoticeContext) CountMatchingWisps(ctx context.Context, s WispSearcher, limit int) (int, error) {
+	if c.ready || len(c.selected) == 0 {
+		return 0, nil
+	}
+	if s == nil {
+		return 0, ErrNoWispSearcher
+	}
+	wisps, err := s.SearchIssues(ctx, "", WispStatusProbeFilter(c.selected, limit))
+	if err != nil {
+		return 0, err
+	}
+	return len(wisps), nil
 }
 
 // ErrNoStatusSearcher marks a probe that had no store to ask. It is an error,
