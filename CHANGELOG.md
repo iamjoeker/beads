@@ -9,6 +9,21 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- **`bd update --if-revision <n>` closes the compare-and-swap gap on the
+  hottest documents.** `--notes` only ever offered append-only or a blind
+  full-replace, so obeying "a retraction must edit the document in place"
+  meant read the whole field, edit it locally, write the whole field back —
+  and any edit another agent committed in that window was silently destroyed
+  (bd-0fn). The engine already stamped a `row_lock` token on every issue write
+  and exposed it as
+  `revision` in `bd show --json`; `--if-revision` is the missing CLI surface
+  for it: the update applies only if the issue's current revision still
+  matches, atomically with the write, so a concurrent writer's commit in the
+  gap makes the guarded write refuse (exit 13) instead of clobbering it. It is
+  the general precondition for a safe read-modify-write of any field, not
+  just notes, and — unlike `--if-assignee`/`--if-status` — composes with
+  `--claim`.
+
 - **`bd` bounds how many copies of itself run at once.** Sixteen may run
   concurrently; the seventeenth waits for a slot rather than starting. Every
   invocation costs about 93MB before it does anything, so the cost that matters

@@ -35,6 +35,10 @@ type updateInput struct {
 	// guard).
 	ifAssignee *string
 	ifStatus   *string
+	// ifRevision is the bd-0fn revision guard (--if-revision): non-nil only
+	// when explicitly passed. Unlike ifAssignee/ifStatus it is combinable
+	// with claim.
+	ifRevision *int64
 	// bd-98s5c: --force bypasses the live-claim reassign fence (mutually
 	// exclusive with --if-assignee at the flag-group level).
 	force bool
@@ -292,6 +296,10 @@ func gatherUpdateInput(ctx context.Context, cmd *cobra.Command) (*updateInput, e
 		}
 		in.ifStatus = &v
 	}
+	if cmd.Flags().Changed("if-revision") {
+		v, _ := cmd.Flags().GetInt64("if-revision")
+		in.ifRevision = &v
+	}
 	if in.ifAssignee != nil || in.ifStatus != nil {
 		if in.claim {
 			return nil, HandleErrorRespectJSON("cannot combine --if-assignee/--if-status with --claim (--claim is already an atomic compare-and-set)")
@@ -299,6 +307,10 @@ func gatherUpdateInput(ctx context.Context, cmd *cobra.Command) (*updateInput, e
 		if len(in.fields) == 0 && !in.hasAppendNotes && len(in.mergeMetadataIn) == 0 && len(in.setMetadata) == 0 && len(in.unsetMetadata) == 0 {
 			return nil, HandleErrorRespectJSON("--if-assignee/--if-status require at least one field update (e.g. -a, -s); label and parent edits are not covered by the guard")
 		}
+	}
+	if in.ifRevision != nil && !in.claim &&
+		len(in.fields) == 0 && !in.hasAppendNotes && len(in.mergeMetadataIn) == 0 && len(in.setMetadata) == 0 && len(in.unsetMetadata) == 0 {
+		return nil, HandleErrorRespectJSON("--if-revision requires at least one field update or --claim to ride on; label and parent edits are not covered by the guard")
 	}
 	return in, nil
 }

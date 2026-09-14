@@ -40,6 +40,13 @@ type commandUpdateMutation struct {
 	force            bool
 	expectedAssignee *string
 	expectedStatus   *issueops.Status
+	// expectedVersion is the bd-0fn revision guard (--if-revision): a
+	// read-modify-write over ANY field (notes included) applies only if the
+	// issue's row_lock token still equals the value the caller read via `bd
+	// show --json`'s "revision". Unlike expectedAssignee/expectedStatus it is
+	// NOT mutually exclusive with claim — issueops.UpdateRequest documents it
+	// as an independent precondition.
+	expectedVersion *int64
 	// provenance names the history entry the write records. Empty takes the
 	// backend's default, which is what the direct route wants; the proxied
 	// route spells the message it has always written.
@@ -58,6 +65,7 @@ func runCommandUpdateMutation(ctx context.Context, updater commandIssueUpdater, 
 		Claim:                 mutation.claim,
 		ForceAssigneeTransfer: mutation.force && mutation.patch.Assignee.Set,
 		ForceClosePolicy:      mutation.force,
+		ExpectedVersion:       mutation.expectedVersion,
 		ExpectedAssignee:      mutation.expectedAssignee,
 		ExpectedStatus:        mutation.expectedStatus,
 		Provenance:            mutation.provenance,
@@ -86,12 +94,24 @@ write is refused before anything is written; use --append-notes to add to
 them, or --replace-notes to discard them deliberately. --append-notes refuses
 an empty value, which could only ever append nothing — the shape a failed
 shell expansion takes. Both refusals exit nonzero rather than reporting a
-success the write did not achieve.
+success the write did not achieve. Neither guards against a CONCURRENT editor:
+a --replace-notes write you build from a local read-edit-write can still land
+after another actor's write in the gap and silently discard it. Use
+--if-revision (see below) to make that write conditional instead.
+
+--if-revision <n> makes the whole update a compare-and-set: it applies only if
+the issue's current revision (from bd show --json's "revision" field) still
+equals <n>, atomically with the write. This is the general precondition for a
+safe read-modify-write of ANY field, notes included — read the issue, compute
+your edit, then write it back with --if-revision set to the revision you read;
+a concurrent writer's commit in between changes the revision and the guarded
+write refuses instead of clobbering it. Unlike --if-assignee/--if-status it
+composes with --claim.
 
 Exit codes: 1 for general failures; 13 when every failure is a stale
---if-assignee/--if-status guard (the precondition no longer held, nothing was
-written — another actor won the race, so retrying the same guard is
-pointless).`,
+--if-assignee/--if-status/--if-revision guard (the precondition no longer
+held, nothing was written — another actor won the race, so retrying the same
+guard is pointless).`,
 	// The non-interactive no-ID refusal lives in argument validation, which
 	// cobra runs before root's PersistentPreRunE — so a scripted `bd update
 	// $ID ...` with an empty $ID fails fast, before the pre-run hooks can
@@ -427,11 +447,11 @@ pointless).`,
 			return nil
 		}
 
-		// Conditional-update guards (bd-wsqvw): validated against the same
-		// status set as --status, mutually exclusive with --claim (which is
-		// its own compare-and-set), and only meaningful with a field update
-		// to ride on.
-		ifAssignee, ifStatus, err := updateGuardsFromFlags(cmd, claimFlag, updates)
+		// Conditional-update guards (bd-wsqvw, bd-0fn): validated against the
+		// same status set as --status, mutually exclusive with --claim (which
+		// is its own compare-and-set) for --if-assignee/--if-status, and only
+		// meaningful with a field update (or --claim) to ride on.
+		ifAssignee, ifStatus, ifRevision, err := updateGuardsFromFlags(cmd, claimFlag, updates)
 		if err != nil {
 			return err
 		}
@@ -588,6 +608,7 @@ pointless).`,
 				force:            forceFlag,
 				expectedAssignee: ifAssignee,
 				expectedStatus:   expectedStatus,
+				expectedVersion:  ifRevision,
 			})
 			if updateErr != nil {
 				fmt.Fprintf(os.Stderr, "Error updating %s: %v\n", id, updateErr)
@@ -868,20 +889,21 @@ func warnNotesReplacement(id string) {
 }
 
 // ExitGuardMismatch is the exit code when a `bd update` run failed solely
-// because --if-assignee/--if-status guards did not match: the precondition no
-// longer held, nothing was written, and retrying is pointless — another actor
-// won the race. Scripts branch on it to tell "racer won, skip gracefully"
-// (13) from infra failure (1, retry/abort). Mixed batches — any failure that
-// is NOT a guard mismatch — exit 1, the conservative "something needs a
-// retry" verdict. The stderr line carries the machine-greppable sentinel
-// text ("assignee mismatch" / "status mismatch") either way.
+// because --if-assignee/--if-status/--if-revision guards did not match: the
+// precondition no longer held, nothing was written, and retrying is
+// pointless — another actor won the race. Scripts branch on it to tell
+// "racer won, skip gracefully" (13) from infra failure (1, retry/abort).
+// Mixed batches — any failure that is NOT a guard mismatch — exit 1, the
+// conservative "something needs a retry" verdict. The stderr line carries the
+// machine-greppable sentinel text ("assignee mismatch" / "status mismatch" /
+// "version mismatch") either way.
 const ExitGuardMismatch = 13
 
-// isGuardMismatch reports whether err is a bd-wsqvw conditional-update guard
-// refusal (stale --if-assignee/--if-status), the failure class that exits
-// ExitGuardMismatch instead of 1.
+// isGuardMismatch reports whether err is a conditional-update guard refusal
+// (stale --if-assignee/--if-status from bd-wsqvw, or stale --if-revision from
+// bd-0fn), the failure class that exits ExitGuardMismatch instead of 1.
 func isGuardMismatch(err error) bool {
-	return errors.Is(err, storage.ErrAssigneeMismatch) || errors.Is(err, storage.ErrStatusMismatch)
+	return errors.Is(err, storage.ErrAssigneeMismatch) || errors.Is(err, storage.ErrStatusMismatch) || errors.Is(err, storage.ErrVersionMismatch)
 }
 
 // updateIDFailure records one issue ID that could not be updated and why.
@@ -989,7 +1011,7 @@ func toJSONValue(s string) json.RawMessage {
 // parent edits run outside it and would not be guarded). An --if-status value
 // is validated against the same built-in + custom status set as --status, so a
 // typo fails fast instead of mismatching forever.
-func updateGuardsFromFlags(cmd *cobra.Command, claimFlag bool, updates map[string]interface{}) (ifAssignee, ifStatus *string, err error) {
+func updateGuardsFromFlags(cmd *cobra.Command, claimFlag bool, updates map[string]interface{}) (ifAssignee, ifStatus *string, ifRevision *int64, err error) {
 	if cmd.Flags().Changed("if-assignee") {
 		v, _ := cmd.Flags().GetString("if-assignee")
 		ifAssignee = &v
@@ -1003,15 +1025,23 @@ func updateGuardsFromFlags(cmd *cobra.Command, claimFlag bool, updates map[strin
 			}
 		}
 		if !types.Status(v).IsValidWithCustom(customStatuses) {
-			return nil, nil, HandleErrorRespectJSON("invalid --if-status %q (built-in: open, in_progress, blocked, deferred, closed, pinned, hooked; or configure custom statuses via 'bd config set status.custom')", v)
+			return nil, nil, nil, HandleErrorRespectJSON("invalid --if-status %q (built-in: open, in_progress, blocked, deferred, closed, pinned, hooked; or configure custom statuses via 'bd config set status.custom')", v)
 		}
 		ifStatus = &v
 	}
-	if ifAssignee == nil && ifStatus == nil {
-		return nil, nil, nil
+	if cmd.Flags().Changed("if-revision") {
+		v, _ := cmd.Flags().GetInt64("if-revision")
+		ifRevision = &v
 	}
-	if claimFlag {
-		return nil, nil, HandleErrorRespectJSON("cannot combine --if-assignee/--if-status with --claim (--claim is already an atomic compare-and-set)")
+	if ifAssignee == nil && ifStatus == nil && ifRevision == nil {
+		return nil, nil, nil, nil
+	}
+	// --if-revision (bd-0fn) is an independent precondition, unlike
+	// --if-assignee/--if-status: issueops.UpdateRequest documents it as
+	// combinable with Claim, so only the semantic-field guards are rejected
+	// alongside --claim here.
+	if claimFlag && (ifAssignee != nil || ifStatus != nil) {
+		return nil, nil, nil, HandleErrorRespectJSON("cannot combine --if-assignee/--if-status with --claim (--claim is already an atomic compare-and-set)")
 	}
 	hasFieldUpdate := false
 	for k := range updates {
@@ -1021,10 +1051,13 @@ func updateGuardsFromFlags(cmd *cobra.Command, claimFlag bool, updates map[strin
 			hasFieldUpdate = true
 		}
 	}
-	if !hasFieldUpdate {
-		return nil, nil, HandleErrorRespectJSON("--if-assignee/--if-status require at least one field update (e.g. -a, -s); label and parent edits are not covered by the guard")
+	if (ifAssignee != nil || ifStatus != nil) && !hasFieldUpdate {
+		return nil, nil, nil, HandleErrorRespectJSON("--if-assignee/--if-status require at least one field update (e.g. -a, -s); label and parent edits are not covered by the guard")
 	}
-	return ifAssignee, ifStatus, nil
+	if ifRevision != nil && !hasFieldUpdate && !claimFlag {
+		return nil, nil, nil, HandleErrorRespectJSON("--if-revision requires at least one field update or --claim to ride on; label and parent edits are not covered by the guard")
+	}
+	return ifAssignee, ifStatus, ifRevision, nil
 }
 
 func init() {
@@ -1050,6 +1083,7 @@ func init() {
 	// Conditional (compare-and-set) update guards (bd-wsqvw)
 	updateCmd.Flags().String("if-assignee", "", "Apply the update only if the current assignee equals this value (--if-assignee '' requires unassigned); a mismatch writes nothing and exits 13 (vs 1 for other failures). Requires a field update; cannot combine with --claim")
 	updateCmd.Flags().String("if-status", "", "Apply the update only if the current status equals this value; a mismatch writes nothing and exits 13 (vs 1 for other failures). Requires a field update; cannot combine with --claim")
+	updateCmd.Flags().Int64("if-revision", 0, "Apply the update only if the issue's current revision (from 'bd show --json' \"revision\") equals this value; a mismatch writes nothing and exits 13 (vs 1 for other failures). The general compare-and-swap for a safe read-modify-write of any field, e.g. notes. Requires a field update or --claim to ride on; composable with --claim (unlike --if-assignee/--if-status)")
 	// --force (unconditional bypass of the reassign fence) and --if-assignee
 	// (write only while a specific assignee still holds it) encode
 	// contradictory intent — same rationale as unclaim's pairing. Rejecting the
