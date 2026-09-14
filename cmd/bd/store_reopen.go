@@ -32,16 +32,23 @@ func openReadOnlyStoreForDBPath(ctx context.Context, dbPath string) (storage.Dol
 // resolveBeadsDirForDBPath maps a database path back to its owning .beads
 // directory when metadata.json is available. This is needed for repos that use
 // non-default dolt_database names or custom dolt_data_dir locations.
+//
+// Every match is passed through beads.FollowRedirect before returning. A rig
+// whose .beads holds BOTH a redirect file AND its own stale metadata.json /
+// embeddeddolt (e.g. left over from a prior server-to-embedded fallback)
+// would otherwise match on identity here and hand back the stale local dir
+// instead of the redirect target, silently opening the wrong store for an
+// explicit --db path (bd-ogf).
 func resolveBeadsDirForDBPath(dbPath string) string {
 	actualDBPath := utils.CanonicalizePath(dbPath)
 	if parent := filepath.Dir(dbPath); filepath.Base(parent) == ".beads" {
 		if _, err := os.Stat(filepath.Join(parent, "metadata.json")); err == nil {
-			return parent
+			return beads.FollowRedirect(parent)
 		}
 	}
 	if parent := filepath.Dir(actualDBPath); filepath.Base(parent) == ".beads" {
 		if _, err := os.Stat(filepath.Join(parent, "metadata.json")); err == nil {
-			return parent
+			return beads.FollowRedirect(parent)
 		}
 	}
 	seen := map[string]struct{}{}
@@ -94,7 +101,7 @@ func resolveBeadsDirForDBPath(dbPath string) string {
 			continue
 		}
 		if utils.PathsEqual(beadsDir, dbPath) || utils.PathsEqual(beadsDir, actualDBPath) {
-			return beadsDir
+			return beads.FollowRedirect(beadsDir)
 		}
 		// dbPath is the data directory living directly inside beadsDir
 		// (<beadsDir>/embeddeddolt for embedded, <beadsDir>/dolt for server).
@@ -102,10 +109,10 @@ func resolveBeadsDirForDBPath(dbPath string) string {
 		// stores regardless of the beads dir name; Config.DatabasePath alone
 		// returns the "dolt" name and misses embeddeddolt/ (GH#4574).
 		if utils.PathsEqual(filepath.Dir(dbPath), beadsDir) || utils.PathsEqual(filepath.Dir(actualDBPath), beadsDir) {
-			return beadsDir
+			return beads.FollowRedirect(beadsDir)
 		}
 		if utils.PathsEqual(cfg.DatabasePath(beadsDir), dbPath) || utils.PathsEqual(cfg.DatabasePath(beadsDir), actualDBPath) {
-			return beadsDir
+			return beads.FollowRedirect(beadsDir)
 		}
 	}
 

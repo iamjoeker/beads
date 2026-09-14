@@ -668,6 +668,14 @@ func refreshBoundCommandConfig(cmd *cobra.Command) {
 // resolveCommandBeadsDir maps a discovered Dolt data path back to the owning
 // .beads directory. filepath.Dir(dbPath) only works when the Dolt data lives
 // under .beads/dolt; custom dolt_data_dir values can place it elsewhere.
+//
+// Every return path is passed through beads.FollowRedirect before coming
+// back. Without this, an explicit `--db <rig>/.beads` on a rig whose .beads
+// holds BOTH a redirect file AND its own (stale) embeddeddolt/metadata.json
+// resolves straight to that local directory and opens the stale store
+// directly — silently returning a wrong, non-zero count with exit 0 and no
+// stderr, because the caller-facing FindBeadsDir()-based path (dbPath=="")
+// already follows redirects but this explicit-dbPath path never did (bd-ogf).
 func resolveCommandBeadsDir(dbPath string) string {
 	if dbPath == "" {
 		return ""
@@ -679,19 +687,19 @@ func resolveCommandBeadsDir(dbPath string) string {
 	// actually points to dbPath, preventing CWD discovery from overriding
 	// an explicit --db flag.
 	if beadsDir := resolveBeadsDirForDBPath(dbPath); beadsDir != "" {
-		return beadsDir
+		return beads.FollowRedirect(beadsDir)
 	}
 
 	for dir := filepath.Dir(dbPath); dir != "" && dir != filepath.Dir(dir); dir = filepath.Dir(dir) {
 		candidate := filepath.Join(dir, ".beads")
 		if info, err := os.Stat(candidate); err == nil && info.IsDir() {
-			return candidate
+			return beads.FollowRedirect(candidate)
 		}
 	}
 
 	// No candidate matched — fall back to parent directory of the db path.
 	// This handles bootstrap/init where no metadata.json exists yet.
-	return filepath.Dir(dbPath)
+	return beads.FollowRedirect(filepath.Dir(dbPath))
 }
 
 // resolveConfiguredActor returns the actor implied by env/config when no
