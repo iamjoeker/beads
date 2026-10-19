@@ -133,6 +133,11 @@ func TestDoltServerConfig_EnablesCLIAutoStartWithoutConfiguredPort(t *testing.T)
 	t.Setenv("BEADS_DOLT_AUTO_START", "")
 	t.Setenv("BEADS_DOLT_SERVER_MODE", "")
 	t.Setenv("BEADS_DOLT_SHARED_SERVER", "")
+	// The suite's own test container exports its port here; an ambient port
+	// var means "an external server is configured" (ResolveServerMode 2c),
+	// which is precisely what this test says is absent.
+	t.Setenv("BEADS_DOLT_SERVER_PORT", "")
+	t.Setenv("BEADS_DOLT_PORT", "")
 
 	tmpDir := t.TempDir()
 	beadsDir := filepath.Join(tmpDir, ".beads")
