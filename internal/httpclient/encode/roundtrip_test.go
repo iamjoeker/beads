@@ -288,8 +288,9 @@ func roundTripCases() []roundTripCase {
 		PriorityMin: &zero,
 		PriorityMax: &five,
 
-		Labels:    []string{"alpha", "beta"},
-		LabelsAny: []string{"gamma"},
+		Labels:        []string{"alpha", "beta"},
+		LabelsAny:     []string{"gamma"},
+		ExcludeLabels: []string{"delta", "epsilon"},
 
 		TitleSearch: "flaky",
 		// The role splits this string itself, so it has to arrive UNSPLIT —

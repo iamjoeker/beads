@@ -471,6 +471,7 @@ func (b *builder) countFilters(req issueops.CountRequest) {
 
 	b.list("label", req.Labels)
 	b.list("label_any", req.LabelsAny)
+	b.list("exclude_label", req.ExcludeLabels)
 
 	b.str("title", req.TitleSearch)
 	b.str("id", req.IDFilter)

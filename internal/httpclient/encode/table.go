@@ -486,6 +486,7 @@ func countTable() Table {
 
 			param("Labels", "label"),
 			param("LabelsAny", "label_any"),
+			paramTo("ExcludeLabels", "exclude_label", "ExcludeLabels"),
 
 			paramTo("TitleSearch", "title", "TitleSearch"),
 			// The comma-separated string, sent as the caller wrote it: the ROLE
