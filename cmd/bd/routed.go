@@ -6,17 +6,22 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"io/fs"
 	"os"
 	"path/filepath"
 	"strings"
 
 	"github.com/steveyegge/beads/internal/beads"
+	"github.com/steveyegge/beads/internal/configfile"
 	"github.com/steveyegge/beads/internal/debug"
 	"github.com/steveyegge/beads/internal/routing"
 	"github.com/steveyegge/beads/internal/storage"
+	"github.com/steveyegge/beads/internal/storage/embeddeddolt"
 	"github.com/steveyegge/beads/internal/types"
 	"github.com/steveyegge/beads/internal/utils"
 )
+
+var errRoutingUnavailable = errors.New("routing unavailable")
 
 // isNotFoundErr returns true if the error indicates the issue was not found.
 // This covers both storage.ErrNotFound (from GetIssue) and the plain error
@@ -29,6 +34,15 @@ func isNotFoundErr(err error) bool {
 		return true
 	}
 	return false
+}
+
+// isRoutingFailure reports whether a routed tier's error must reach the caller
+// instead of falling through to the next tier: anything but "this tier has no
+// route" (errRoutingUnavailable) or a plain not-found. An unreadable
+// routes.jsonl or a routed store that fails to open is why the lookup missed,
+// and returning the local not-found in its place would misstate the cause.
+func isRoutingFailure(err error) bool {
+	return err != nil && !errors.Is(err, errRoutingUnavailable) && !isNotFoundErr(err)
 }
 
 // RoutedResult contains the result of a routed issue lookup
@@ -44,31 +58,51 @@ type RoutedResult struct {
 func (r *RoutedResult) Close() {
 	if r.closeFn != nil {
 		r.closeFn()
+		r.closeFn = nil
 	}
+}
+
+// commitRoutedWrite commits what command wrote through result when result is
+// routed. The post-run auto-commit covers only the local store, so a command
+// that writes to a routed target commits that write itself, as bd update and
+// bd close do. An unrouted result is left to the post-run auto-commit.
+func commitRoutedWrite(ctx context.Context, result *RoutedResult, command string) error {
+	if !result.Routed {
+		return nil
+	}
+	return commitPendingIfEmbedded(ctx, result.Store, currentActor(), doltAutoCommitParams{
+		Command:  command,
+		IssueIDs: []string{result.ResolvedID},
+	})
 }
 
 // resolveAndGetIssueWithRouting resolves a partial ID and gets the issue.
 // Tries the local store first, then prefix-based routing via routes.jsonl,
-// then falls back to contributor auto-routing.
+// then falls back to auto-routing (routing.mode=auto). A routing failure, such
+// as an unreadable routes.jsonl or a routed store that fails to open, is
+// returned as itself rather than as the local not-found.
 //
 // Returns a RoutedResult containing the issue, resolved ID, and the store to use.
 // The caller MUST call result.Close() when done to release any routed storage.
 //
-// Prefix-routed target stores are opened read-only; mutating commands must use
-// resolveAndGetIssueForMutation instead so a routed read can never write
-// migrations or other open-time mutations into a foreign project (GH#3231, #4141).
+// Routed target stores, prefix and auto alike, are opened read-only; mutating
+// commands must use resolveAndGetIssueForMutation instead so a routed read can
+// never write migrations or other open-time mutations into a foreign project
+// (GH#3231, #4141).
 func resolveAndGetIssueWithRouting(ctx context.Context, localStore storage.DoltStorage, id string) (*RoutedResult, error) {
 	return resolveAndGetIssueWithRoutingAccess(ctx, localStore, id, false)
 }
 
 // resolveAndGetIssueForMutation resolves an issue like
-// resolveAndGetIssueWithRouting, but opens prefix-routed target stores in
-// writable mode so mutation commands can commit to the routed repository.
+// resolveAndGetIssueWithRouting, but opens the routed target store writable so
+// mutation commands commit to the repository that holds the issue: a
+// prefix-routed rig, or the target of any auto-route, a contributor's planning
+// repository included (openAutoRoutedStore).
 func resolveAndGetIssueForMutation(ctx context.Context, localStore storage.DoltStorage, id string) (*RoutedResult, error) {
 	return resolveAndGetIssueWithRoutingAccess(ctx, localStore, id, true)
 }
 
-func resolveAndGetIssueWithRoutingAccess(ctx context.Context, localStore storage.DoltStorage, id string, writablePrefixRoute bool) (*RoutedResult, error) {
+func resolveAndGetIssueWithRoutingAccess(ctx context.Context, localStore storage.DoltStorage, id string, writable bool) (*RoutedResult, error) {
 	// Try local store first.
 	result, err := resolveAndGetFromStore(ctx, localStore, id, false)
 	if err == nil {
@@ -80,23 +114,26 @@ func resolveAndGetIssueWithRoutingAccess(ctx context.Context, localStore storage
 	// database (e.g., hr-8wn.1 routes to the herald rig's database).
 	var prefixErr error
 	if isNotFoundErr(err) {
-		prefixResult, routeErr := resolveViaPrefixRoutingWithAccess(ctx, id, writablePrefixRoute)
+		prefixResult, routeErr := resolveViaPrefixRoutingWithAccess(ctx, id, writable, false)
 		if routeErr == nil {
 			return prefixResult, nil
+		} else if isRoutingFailure(routeErr) {
+			return nil, routeErr
 		}
 		prefixErr = routeErr
 	}
 
-	// If not found via prefix routing, try contributor auto-routing as fallback (GH#2345).
-	// Write-intent callers open the auto-routed target writable: an issue that exists
-	// only there is an issue the user can otherwise never close or update, and creates
-	// already land there. A read-intent caller keeps the read-only open that guarantees
-	// hydrating a foreign project cannot mutate it (GH#3231, bd-6dnrw.32).
+	// If not found via prefix routing, try auto-routing as fallback (GH#2345).
+	// The target reopens writable when the caller has write intent; a read-intent
+	// caller keeps the read-only open that guarantees hydrating a foreign project
+	// cannot mutate it (GH#3231, bd-6dnrw.32).
 	var autoErr error
 	if isNotFoundErr(err) {
-		autoResult, routeErr := resolveViaAutoRouting(ctx, localStore, id, writablePrefixRoute)
+		autoResult, routeErr := resolveViaAutoRoutingWithAccess(ctx, localStore, id, writable, false)
 		if routeErr == nil {
 			return autoResult, nil
+		} else if isRoutingFailure(routeErr) {
+			return nil, routeErr
 		}
 		autoErr = routeErr
 	}
@@ -104,10 +141,28 @@ func resolveAndGetIssueWithRoutingAccess(ctx context.Context, localStore storage
 	return nil, annotateLookupFailure(ctx, localStore, err, prefixErr, autoErr)
 }
 
+// idResolverFor is the store id resolution should ask. A backend that can only
+// look ids up exactly (utils.ExactIDLookupStore, the http backend) sits under
+// the decorator chain, which does not forward that capability, so the
+// resolver is handed the backend itself: resolution is a pure read, and the
+// decorators (hooks, the external-dependency policy, telemetry) decide
+// nothing about it. Every other store is resolved through s unchanged.
+func idResolverFor(s storage.DoltStorage) utils.PartialIDResolverStore {
+	if s == nil {
+		return s
+	}
+	if raw := storage.UnwrapStore(s); raw != nil {
+		if exact, ok := raw.(utils.ExactIDLookupStore); ok && exact.ExactIDLookupOnly() {
+			return raw
+		}
+	}
+	return s
+}
+
 // resolveAndGetFromStore resolves a partial ID and gets the issue from a specific store.
 func resolveAndGetFromStore(ctx context.Context, s storage.DoltStorage, id string, routed bool) (*RoutedResult, error) {
 	// First, resolve the partial ID
-	resolvedID, err := utils.ResolvePartialID(ctx, s, id)
+	resolvedID, err := utils.ResolvePartialID(ctx, idResolverFor(s), id)
 	if err != nil {
 		return nil, err
 	}
@@ -126,27 +181,122 @@ func resolveAndGetFromStore(ctx context.Context, s storage.DoltStorage, id strin
 	}, nil
 }
 
-// resolveViaAutoRouting attempts to find an issue using contributor auto-routing.
+// resolveAndGetFromStoreExact is resolveAndGetFromStore's exact-match sibling:
+// it requires utils.ResolvePartialIDExact instead of the default abbreviation-
+// tolerant resolver, so a non-exact candidate (e.g. a reserved word that
+// happens to be a leading-prefix abbreviation of some issue's hash) is
+// reported as "not found" rather than silently resolved.
+func resolveAndGetFromStoreExact(ctx context.Context, s storage.DoltStorage, id string, routed bool) (*RoutedResult, error) {
+	resolvedID, err := utils.ResolvePartialIDExact(ctx, idResolverFor(s), id)
+	if err != nil {
+		return nil, err
+	}
+
+	issue, err := s.GetIssue(ctx, resolvedID)
+	if err != nil {
+		return nil, err
+	}
+
+	return &RoutedResult{
+		Issue:      issue,
+		Store:      s,
+		Routed:     routed,
+		ResolvedID: resolvedID,
+	}, nil
+}
+
+// resolveAndGetIssueForMutationExact resolves an issue like
+// resolveAndGetIssueForMutation, but requires an EXACT id match against each
+// store it tries (no leading-prefix abbreviation matching) — see
+// utils.ResolvePartialIDExact. Cross-rig prefix routing and auto-routing are
+// still attempted as fallbacks exactly as before if the local store doesn't
+// have the issue at all; only the per-store resolution within each tier is
+// tightened. Used by write paths where an id argument
+// that doesn't exactly name a real issue must error out instead of silently
+// mutating whatever it fuzzy-matches (`bd comment list <id>`, a typo for
+// `bd comments list`, was silently resolving "list" to a wisp whose hash
+// happened to start with "list"). A routing failure is returned as itself, as
+// resolveAndGetIssueForMutation returns it.
+func resolveAndGetIssueForMutationExact(ctx context.Context, localStore storage.DoltStorage, id string) (*RoutedResult, error) {
+	result, err := resolveAndGetFromStoreExact(ctx, localStore, id, false)
+	if err == nil {
+		return result, nil
+	}
+	if !isNotFoundErr(err) {
+		return nil, err
+	}
+
+	// The routed tiers resolve with utils.ResolvePartialIDExact too, so each
+	// can mint utils.ErrAbbreviatedIDNotAllowed of its own — the abbreviation
+	// names a real issue in the routed rig rather than here — and both
+	// wrappers hand that error back unwrapped. Keep the first such refusal:
+	// the local error is only a plain not-found, and returning it would tell
+	// the caller no issue matches an id a routed store demonstrably holds,
+	// which is exactly the falsehood the sentinel exists to prevent. The
+	// refusal is checked before isRoutingFailure, which it would also satisfy,
+	// so the auto tier still gets its chance at an exact match.
+	var abbrevErr error
+	prefixResult, prefixErr := resolveViaPrefixRoutingWithAccess(ctx, id, true, true)
+	switch {
+	case prefixErr == nil:
+		return prefixResult, nil
+	case errors.Is(prefixErr, utils.ErrAbbreviatedIDNotAllowed):
+		abbrevErr = prefixErr
+	case isRoutingFailure(prefixErr):
+		return nil, prefixErr
+	}
+
+	// Write intent, as in resolveAndGetIssueForMutation: the auto-route opens
+	// writable so the write commits where the issue lives. The auto tier's own
+	// abbreviation refusal is a routing failure here, and is returned as one.
+	autoResult, autoErr := resolveViaAutoRoutingWithAccess(ctx, localStore, id, true, true)
+	switch {
+	case autoErr == nil:
+		return autoResult, nil
+	case abbrevErr != nil:
+		return nil, abbrevErr
+	case isRoutingFailure(autoErr):
+		return nil, autoErr
+	}
+
+	return nil, err
+}
+
+// resolveViaAutoRoutingWithAccess attempts to find an issue using auto-routing.
 // This is the fallback when the local store doesn't have the issue (GH#2345).
 // Returns a RoutedResult if the issue is found in the auto-routed store.
 //
-// writable opens the routed target writable so a mutation command can commit
-// there; false keeps the read-only open that guarantees a routed read cannot
-// mutate the target.
+// writable is the caller's write intent: the target opens writable for it,
+// whichever rule selected the target (openAutoRoutedStore).
 //
-// Failures come back as *autoRouteFailure so the caller can disclose the routed
-// store in the not-found message. bd list already names it unprompted; the
-// lookup path knew it too and used to throw it away (bd-1uu).
-func resolveViaAutoRouting(ctx context.Context, localStore storage.DoltStorage, id string, writable bool) (*RoutedResult, error) {
+// exact selects utils.ResolvePartialIDExact over the default abbreviation-
+// tolerant resolver for the auto-routed store lookup, mirroring the local-store
+// distinction in resolveAndGetFromStore vs resolveAndGetFromStoreExact.
+//
+// Not-found and unavailable outcomes come back as *autoRouteFailure so the
+// caller can disclose the routed store in the not-found message. bd list
+// already names it unprompted; the lookup path knew it too and used to throw it
+// away (bd-1uu). The failure wraps the underlying error, so isRoutingFailure and
+// errors.Is see through it.
+func resolveViaAutoRoutingWithAccess(ctx context.Context, localStore storage.DoltStorage, id string, writable bool, exact bool) (*RoutedResult, error) {
 	routedStore, target, err := openRoutedStoreTarget(ctx, localStore, writable)
 	if target == nil {
-		return nil, newAutoRouteFailure(ctx, nil, nil, errors.New("no auto-routed store configured"))
+		if err != nil {
+			return nil, err
+		}
+		return nil, newAutoRouteFailure(ctx, nil, nil, fmt.Errorf("%w: no auto-routed store available", errRoutingUnavailable))
 	}
 	if err != nil {
 		return nil, newAutoRouteFailure(ctx, target, nil, err)
 	}
 
-	result, resolveErr := resolveAndGetFromStore(ctx, routedStore, id, true)
+	var result *RoutedResult
+	var resolveErr error
+	if exact {
+		result, resolveErr = resolveAndGetFromStoreExact(ctx, routedStore, id, true)
+	} else {
+		result, resolveErr = resolveAndGetFromStore(ctx, routedStore, id, true)
+	}
 	if resolveErr != nil {
 		// Build the failure before closing: the differential count can only be
 		// read from a store that is still open.
@@ -385,99 +535,63 @@ type prefixRoute struct {
 // The read-only open guarantees a routed read cannot mutate the target; mutation
 // commands must route through resolveViaPrefixRoutingWithAccess with writable=true.
 func resolveViaPrefixRouting(ctx context.Context, id string) (*RoutedResult, error) {
-	return resolveViaPrefixRoutingWithAccess(ctx, id, false)
+	return resolveViaPrefixRoutingWithAccess(ctx, id, false, false)
 }
 
 // resolveViaPrefixRoutingWithAccess is the shared implementation that selects the
 // store-open mode. writable opens the routed target writable, behaving like running
 // the command inside that rig; false keeps the read-only open that guarantees a
-// routed read cannot mutate the target (bd-6dnrw.32).
-func resolveViaPrefixRoutingWithAccess(ctx context.Context, id string, writable bool) (*RoutedResult, error) {
-	// Extract prefix from the bead ID (e.g., "hr-" from "hr-8wn.1")
-	prefix := extractBeadPrefix(id)
-	if prefix == "" {
-		return nil, fmt.Errorf("no prefix in ID %q", id)
+// routed read cannot mutate the target (bd-6dnrw.32). exact selects
+// utils.ResolvePartialIDExact over the default abbreviation-tolerant resolver for
+// the routed store lookup, mirroring resolveAndGetFromStore vs
+// resolveAndGetFromStoreExact.
+//
+// Every failure that is not a bare "no route to follow" comes back as a
+// *prefixRouteFailure wrapping the underlying error, so a not-found can name the
+// database it addressed (bd-4sw, bd-1uu) while isRoutingFailure and errors.Is
+// still see the underlying error.
+func resolveViaPrefixRoutingWithAccess(ctx context.Context, id string, writable bool, exact bool) (*RoutedResult, error) {
+	matchedRoute, targetBeadsDir, src, err := lookupPrefixRoute(id)
+	if err != nil {
+		return nil, err
 	}
+	prefix := matchedRoute.Prefix
 
-	// The beads directory this command resolved to. It is the town's own
-	// .beads only when cwd happens to sit at the town root; everywhere else it
-	// is a rig's (often redirected) .beads.
-	currentBeadsDir := resolveCommandBeadsDir(dbPath)
-
-	// Locate routes.jsonl by search rather than assuming it sits in the
-	// resolved beads directory (bd-4sw).
-	src := findPrefixRoutesSource(currentBeadsDir)
-	if src == nil {
-		return nil, &prefixRouteFailure{
-			Prefix: prefix,
-			Count:  unknownIssueCount,
-			Err:    errors.New("no routes.jsonl found"),
-		}
+	// Check that the target has a different dolt_database
+	targetDB, err := loadDoltDatabase(targetBeadsDir)
+	if err == nil && targetDB == "" {
+		err = fmt.Errorf("%s has no dolt_database field", filepath.Join(targetBeadsDir, "metadata.json"))
 	}
-
-	// Find matching route for this prefix
-	var matchedRoute *prefixRoute
-	for i, r := range src.Routes {
-		if r.Prefix == prefix {
-			matchedRoute = &src.Routes[i]
-			break
-		}
-	}
-	if matchedRoute == nil {
-		return nil, &prefixRouteFailure{
-			Prefix:     prefix,
-			RoutesFile: src.File,
-			Count:      unknownIssueCount,
-			Err:        fmt.Errorf("no route for prefix %q", prefix),
-		}
-	}
-
-	// Resolve the target rig's .beads directory. Path "." is the town itself,
-	// which filepath.Join resolves to the town root.
-	rigDir := filepath.Join(src.TownRoot, matchedRoute.Path)
-	targetBeadsDir := beads.FollowRedirect(filepath.Join(rigDir, ".beads"))
-
-	// A route resolving back to the database this command already searched has
-	// nothing to add. Compare the resolved directories instead of skipping the
-	// town route ("." ) outright: from a rig context the town database is a
-	// genuinely different database and must be followed (bd-4sw).
-	if sameResolvedDir(targetBeadsDir, currentBeadsDir) {
-		return nil, &prefixRouteFailure{
-			Prefix:      prefix,
-			RoutesFile:  src.File,
-			RoutePath:   matchedRoute.Path,
-			SameAsLocal: true,
-			Count:       unknownIssueCount,
-			Err:         errors.New("route points to the database already searched"),
-		}
-	}
-
-	// Check that the target declares a dolt_database, then open it.
-	targetStore, targetDB, openErr := openStoreAtBeadsDir(ctx, targetBeadsDir, writable)
-	if targetDB == "" {
+	if err != nil {
 		return nil, &prefixRouteFailure{
 			Prefix:     prefix,
 			RoutesFile: src.File,
 			RoutePath:  matchedRoute.Path,
 			Count:      unknownIssueCount,
-			Err:        fmt.Errorf("target rig %s has no dolt_database configured", targetBeadsDir),
+			Err:        fmt.Errorf("prefix route %q to %s: target rig has no dolt_database configured: %w", matchedRoute.Prefix, matchedRoute.Path, err),
 		}
 	}
 
-	debug.Logf("[routing] Prefix %q matched route to %s (database: %s)\n", prefix, matchedRoute.Path, targetDB)
+	debug.Logf("[routing] Prefix %q matched route to %s (database: %s)\n", matchedRoute.Prefix, matchedRoute.Path, targetDB)
 
-	if openErr != nil {
+	targetStore, err := openRoutedTargetStore(ctx, targetBeadsDir, targetDB, writable)
+	if err != nil {
 		return nil, &prefixRouteFailure{
 			Prefix:     prefix,
 			RoutesFile: src.File,
 			RoutePath:  matchedRoute.Path,
 			TargetDB:   targetDB,
 			Count:      unknownIssueCount,
-			Err:        fmt.Errorf("opening routed store for %s: %w", matchedRoute.Path, openErr),
+			Err:        fmt.Errorf("opening routed store for %s: %w", matchedRoute.Path, err),
 		}
 	}
 
-	result, err := resolveAndGetFromStore(ctx, targetStore, id, true)
+	var result *RoutedResult
+	if exact {
+		result, err = resolveAndGetFromStoreExact(ctx, targetStore, id, true)
+	} else {
+		result, err = resolveAndGetFromStore(ctx, targetStore, id, true)
+	}
 	if err != nil {
 		failure := &prefixRouteFailure{
 			Prefix:     prefix,
@@ -506,17 +620,125 @@ func resolveViaPrefixRoutingWithAccess(ctx context.Context, id string, writable 
 	return result, nil
 }
 
-// extractBeadPrefix extracts the prefix from a bead ID.
-// For example, "hr-8wn.1" returns "hr-", "hq-cv-abc" returns "hq-".
-func extractBeadPrefix(beadID string) string {
-	if beadID == "" {
-		return ""
+// lookupPrefixRoute finds the routes.jsonl route for id and returns it with
+// the target rig's .beads directory and the routes file it came from. Having no
+// route to follow (no prefix in the ID, no routes, no matching route, or a route
+// back to the database already searched) wraps errRoutingUnavailable; an
+// unreadable routes.jsonl does not, so callers report it instead of falling
+// through.
+//
+// routes.jsonl is located by search rather than assumed to sit in the resolved
+// beads directory (bd-4sw), and the most specific matching prefix wins
+// (GH#5048).
+func lookupPrefixRoute(id string) (*prefixRoute, string, *prefixRoutesSource, error) {
+	prefix := extractBeadPrefix(id)
+	if strings.Index(id, "-") <= 0 || prefix == "" {
+		return nil, "", nil, fmt.Errorf("%w: no prefix in ID %q", errRoutingUnavailable, id)
 	}
-	idx := strings.Index(beadID, "-")
-	if idx <= 0 {
-		return ""
+
+	// The beads directory this command resolved to. It is the town's own
+	// .beads only when cwd happens to sit at the town root; everywhere else it
+	// is a rig's (often redirected) .beads.
+	currentBeadsDir := resolveCommandBeadsDir(dbPath)
+
+	src, err := findPrefixRoutesSourceErr(currentBeadsDir)
+	if err != nil {
+		return nil, "", nil, fmt.Errorf("loading routes: %w", err)
 	}
-	return beadID[:idx+1]
+	if src == nil {
+		return nil, "", nil, &prefixRouteFailure{
+			Prefix: prefix,
+			Count:  unknownIssueCount,
+			Err:    fmt.Errorf("%w: no routes available", errRoutingUnavailable),
+		}
+	}
+
+	// Find the most specific route for this ID
+	matchedRoute := matchPrefixRoute(src.Routes, id)
+	if matchedRoute == nil {
+		return nil, "", nil, &prefixRouteFailure{
+			Prefix:     prefix,
+			RoutesFile: src.File,
+			Count:      unknownIssueCount,
+			Err:        fmt.Errorf("%w: no route for ID %q", errRoutingUnavailable, id),
+		}
+	}
+
+	// Resolve the target rig's .beads directory. Path "." is the town itself,
+	// which filepath.Join resolves to the town root.
+	rigDir := filepath.Join(src.TownRoot, matchedRoute.Path)
+	targetBeadsDir := beads.FollowRedirect(filepath.Join(rigDir, ".beads"))
+
+	// A route resolving back to the database this command already searched has
+	// nothing to add. Compare the resolved directories instead of skipping the
+	// town route ("." ) outright: from a rig context the town database is a
+	// genuinely different database and must be followed (bd-4sw).
+	if sameResolvedDir(targetBeadsDir, currentBeadsDir) {
+		return nil, "", nil, &prefixRouteFailure{
+			Prefix:      matchedRoute.Prefix,
+			RoutesFile:  src.File,
+			RoutePath:   matchedRoute.Path,
+			SameAsLocal: true,
+			Count:       unknownIssueCount,
+			Err:         fmt.Errorf("%w: route points to the database already searched", errRoutingUnavailable),
+		}
+	}
+	return matchedRoute, targetBeadsDir, src, nil
+}
+
+// openRoutedTargetStore opens the store of a routed target, prefix or auto,
+// writable or read-only. BEADS_DOLT_SERVER_DATABASE outranks the target's
+// metadata.json when a store resolves its database name, and it names the
+// launching workspace's database (set by the user, or by
+// preserveRedirectSourceDatabase after a redirect), so while the target opens
+// it is pointed at database, the target's own dolt_database. Otherwise a
+// server-mode open would connect to the launcher's database on the shared
+// server, and an embedded writable open would create or migrate a wrongly
+// named database under the target. An empty database leaves the environment
+// as it is: the target names no database of its own to prefer.
+//
+// A writable open never creates the target's database
+// (newExistingDoltStoreFromConfig): the open runs before the lookup it serves,
+// so an id that misses must leave a repository that has not been bootstrapped
+// yet as it found it. A target that has been bootstrapped does run its
+// open-time schema migrations on such a miss, as any bd command run in that
+// repository would; they bring it to the schema this bd writes, not to
+// anything the missed id asked for.
+func openRoutedTargetStore(ctx context.Context, beadsDir, database string, writable bool) (storage.DoltStorage, error) {
+	if database != "" {
+		origDB := os.Getenv("BEADS_DOLT_SERVER_DATABASE")
+		_ = os.Setenv("BEADS_DOLT_SERVER_DATABASE", database)
+		defer func() {
+			// Restore the original env var
+			if origDB != "" {
+				_ = os.Setenv("BEADS_DOLT_SERVER_DATABASE", origDB)
+			} else {
+				_ = os.Unsetenv("BEADS_DOLT_SERVER_DATABASE")
+			}
+		}()
+	}
+	if writable {
+		return newExistingDoltStoreFromConfig(ctx, beadsDir)
+	}
+	return newReadOnlyStoreFromConfig(ctx, beadsDir)
+}
+
+// matchPrefixRoute returns the route whose prefix is the longest leading match
+// for beadID, or nil if none matches. Route prefixes end in "-", so a
+// multi-hyphen prefix such as "claude-os-" matches "claude-os-76l", and with
+// both "hq-" and "hq-cv-" configured, "hq-cv-abc" takes the "hq-cv-" route
+// (GH#5048).
+func matchPrefixRoute(routes []prefixRoute, beadID string) *prefixRoute {
+	var best *prefixRoute
+	for i, r := range routes {
+		if !strings.HasSuffix(r.Prefix, "-") || !strings.HasPrefix(beadID, r.Prefix) {
+			continue
+		}
+		if best == nil || len(r.Prefix) > len(best.Prefix) {
+			best = &routes[i]
+		}
+	}
+	return best
 }
 
 // prefixRoutesSource is a routes.jsonl located for prefix routing, together
@@ -542,6 +764,14 @@ type prefixRoutesSource struct {
 // and from the resolved beads directory. The town root is derived from where
 // routes.jsonl actually was, never assumed.
 func findPrefixRoutesSource(currentBeadsDir string) *prefixRoutesSource {
+	src, _ := findPrefixRoutesSourceErr(currentBeadsDir)
+	return src
+}
+
+// findPrefixRoutesSourceErr is findPrefixRoutesSource that also reports a
+// routes.jsonl that exists but could not be read, when no readable one was
+// found. A missing file is not an error: it is the ordinary single-repo case.
+func findPrefixRoutesSourceErr(currentBeadsDir string) (*prefixRoutesSource, error) {
 	var candidates []string
 	if currentBeadsDir != "" {
 		candidates = append(candidates, filepath.Join(currentBeadsDir, "routes.jsonl"))
@@ -553,6 +783,7 @@ func findPrefixRoutesSource(currentBeadsDir string) *prefixRoutesSource {
 		candidates = append(candidates, routesFilesAbove(filepath.Dir(currentBeadsDir))...)
 	}
 
+	var readErr error
 	seen := make(map[string]bool, len(candidates))
 	for _, path := range candidates {
 		if seen[path] {
@@ -560,7 +791,13 @@ func findPrefixRoutesSource(currentBeadsDir string) *prefixRoutesSource {
 		}
 		seen[path] = true
 		routes, err := loadPrefixRoutesFile(path)
-		if err != nil || len(routes) == 0 {
+		if err != nil {
+			if !errors.Is(err, fs.ErrNotExist) && readErr == nil {
+				readErr = err
+			}
+			continue
+		}
+		if len(routes) == 0 {
 			continue
 		}
 		debug.Logf("[routing] Loaded %d prefix route(s) from %s\n", len(routes), path)
@@ -569,9 +806,9 @@ func findPrefixRoutesSource(currentBeadsDir string) *prefixRoutesSource {
 			// <town>/.beads/routes.jsonl -> <town>
 			TownRoot: filepath.Dir(filepath.Dir(path)),
 			Routes:   routes,
-		}
+		}, nil
 	}
-	return nil
+	return nil, readErr
 }
 
 // routesFilesAbove returns candidate routes.jsonl paths for dir and each of its
@@ -610,6 +847,34 @@ func sameResolvedDir(a, b string) bool {
 	return resolvedA == resolvedB
 }
 
+// extractBeadPrefix extracts the prefix from a bead ID.
+// For example, "hr-8wn.1" returns "hr-", "hq-cv-abc" returns "hq-".
+func extractBeadPrefix(beadID string) string {
+	if beadID == "" {
+		return ""
+	}
+	idx := strings.Index(beadID, "-")
+	if idx <= 0 {
+		return ""
+	}
+	return beadID[:idx+1]
+}
+
+// readDoltDatabase reads the dolt_database field from a .beads/metadata.json
+// file, or "" when it cannot be read.
+func readDoltDatabase(beadsDir string) string {
+	database, err := loadDoltDatabase(beadsDir)
+	if err != nil {
+		return ""
+	}
+	return database
+}
+
+// loadPrefixRoutes loads prefix-to-path routes from routes.jsonl in the beads directory.
+func loadPrefixRoutes(beadsDir string) ([]prefixRoute, error) {
+	return loadPrefixRoutesFile(filepath.Join(beadsDir, "routes.jsonl"))
+}
+
 // loadPrefixRoutesFile loads prefix-to-path routes from a routes.jsonl file.
 func loadPrefixRoutesFile(routesPath string) ([]prefixRoute, error) {
 	file, err := os.Open(routesPath) //nolint:gosec // G304: path is constructed from trusted beads directory
@@ -636,20 +901,22 @@ func loadPrefixRoutesFile(routesPath string) ([]prefixRoute, error) {
 	return routes, scanner.Err()
 }
 
-// readDoltDatabase reads the dolt_database field from a .beads/metadata.json file.
-func readDoltDatabase(beadsDir string) string {
+// loadDoltDatabase reads the dolt_database field from a .beads/metadata.json
+// file, and reports a metadata.json it cannot read or parse; a file without the
+// field returns "" and no error.
+func loadDoltDatabase(beadsDir string) (string, error) {
 	metadataPath := filepath.Join(beadsDir, "metadata.json")
 	data, err := os.ReadFile(metadataPath) //nolint:gosec // G304: path is constructed from trusted beads directory
 	if err != nil {
-		return ""
+		return "", err
 	}
 	var meta struct {
 		DoltDatabase string `json:"dolt_database"`
 	}
-	if json.Unmarshal(data, &meta) != nil {
-		return ""
+	if err := json.Unmarshal(data, &meta); err != nil {
+		return "", fmt.Errorf("parsing %s: %w", metadataPath, err)
 	}
-	return meta.DoltDatabase
+	return meta.DoltDatabase, nil
 }
 
 // openStoreAtBeadsDir opens the store that beadsDir declares, and reports which
@@ -729,6 +996,8 @@ func getIssueWithRouting(ctx context.Context, localStore storage.DoltStorage, id
 		prefixResult, routeErr := resolveViaPrefixRouting(ctx, id)
 		if routeErr == nil {
 			return prefixResult, nil
+		} else if isRoutingFailure(routeErr) {
+			return nil, routeErr
 		}
 		prefixErr = routeErr
 	}
@@ -738,12 +1007,51 @@ func getIssueWithRouting(ctx context.Context, localStore storage.DoltStorage, id
 	// read-only here; mutation commands go through resolveAndGetIssueForMutation.
 	var autoErr error
 	if isNotFoundErr(err) {
-		autoResult, routeErr := resolveViaAutoRouting(ctx, localStore, id, false)
+		autoResult, routeErr := resolveViaAutoRoutingWithAccess(ctx, localStore, id, false, false)
 		if routeErr == nil {
 			return autoResult, nil
+		} else if isRoutingFailure(routeErr) {
+			return nil, routeErr
 		}
 		autoErr = routeErr
 	}
 
 	return nil, annotateLookupFailure(ctx, localStore, err, prefixErr, autoErr)
+}
+
+// autoRouteTargetDatabase is the dolt_database an auto-routed open points its
+// target at (openRoutedTargetStore). A read stays tolerant: a metadata.json
+// that is unreadable or names no database yields "", and the target's own open
+// decides. A write refuses both, as a prefix route does,
+// because the launcher's BEADS_DOLT_SERVER_DATABASE would then pick the
+// database, and an embedded writable open creates the database it is given
+// when the target holds any other (newExistingDoltStoreFromConfig refuses only
+// a target that holds none).
+//
+// A target with no metadata.json at all is still opened, read or written. That
+// is the planning repository contributor setup creates (runContributorWizard,
+// autoConfigureForkContributor) until the first routed bd create writes one
+// (ensureBeadsDirForPath). Setup names its database as any workspace without
+// metadata.json does, after the variable when it is set and the default
+// database otherwise, so the open is pointed at the only embedded database the
+// target holds, or at the default database when it holds none or several.
+// Resolving the name again at use would follow the launcher's variable, which
+// need not be the one setup ran with: a read would then miss the database
+// setup created, and a write would create another beside it.
+func autoRouteTargetDatabase(beadsDir string, writable bool) (string, error) {
+	database, err := loadDoltDatabase(beadsDir)
+	switch {
+	case errors.Is(err, fs.ErrNotExist):
+		if databases := embeddeddolt.Databases(beadsDir); len(databases) == 1 {
+			return databases[0], nil
+		}
+		return configfile.DefaultDoltDatabase, nil
+	case !writable:
+		return database, nil
+	case err != nil:
+		return "", err
+	case database == "":
+		return "", fmt.Errorf("%s has no dolt_database field", filepath.Join(beadsDir, "metadata.json"))
+	}
+	return database, nil
 }

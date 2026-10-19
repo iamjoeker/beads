@@ -2,8 +2,10 @@ package issueops
 
 import (
 	"context"
+	"errors"
 	"fmt"
 
+	"github.com/steveyegge/beads/internal/storage"
 	"github.com/steveyegge/beads/internal/types"
 )
 
@@ -11,15 +13,42 @@ import (
 type PersistenceMoveResult struct {
 	Changed       bool
 	ChangedTables map[string]bool
+	// EnteredIssuesPlane reports that the move took the row out of the wisps
+	// table into issues. The issues row is new and a wisp never declares
+	// participation, so the record's next version is its first and must be
+	// minted create-shaped (design §16.2b). A same-plane repair does not set
+	// it: that row keeps its own participation. A caller that mints for the
+	// move itself, as ExecuteUpdate does, reads this to pick the entry point.
+	EnteredIssuesPlane bool
 }
 
-// MoveIssuePersistenceInTx moves a complete issue aggregate to the requested persistence mode.
+// MoveIssuePersistenceInTx moves a complete issue aggregate to the requested
+// persistence mode. A move that lands (or normalizes) the row on the issues
+// plane mints a version row once the target row and its auxiliary copies
+// exist; a move whose target is the wisp plane mints nothing (wisps are never
+// versioned).
 func MoveIssuePersistenceInTx(ctx context.Context, tx DBTX, current *types.Issue, mode types.PersistenceMode, actor string) (PersistenceMoveResult, error) {
+	return moveIssuePersistenceInTx(ctx, tx, current, mode, actor, true)
+}
+
+// moveIssuePersistenceInTx is the body of MoveIssuePersistenceInTx.
+// mintVersion controls whether the move mints its own version row: the
+// exported entry point always does, while ExecuteUpdate applies the
+// persistence patch last and mints once for the whole guarded update.
+func moveIssuePersistenceInTx(ctx context.Context, tx DBTX, current *types.Issue, mode types.PersistenceMode, actor string, mintVersion bool) (PersistenceMoveResult, error) {
 	if tx == nil || current == nil || current.ID == "" {
 		return PersistenceMoveResult{}, fmt.Errorf("move issue persistence: issue and transaction are required")
 	}
 	ephemeral, noHistory, storageClass, err := types.NormalizePersistenceMode(*current, mode)
 	if err != nil {
+		// The unversioned refusal is the request's: the row is sound and the
+		// move it asks for is one its class never makes. The other errors
+		// describe a row that breaks its own persistence invariants, so they
+		// stay unclassified; an invalid mode is refused before any update
+		// path gets here (ValidateUpdateRequest).
+		if errors.Is(err, types.ErrUnversionedWispMove) {
+			return PersistenceMoveResult{}, fmt.Errorf("%w: %w", storage.ErrValidation, err)
+		}
 		return PersistenceMoveResult{}, err
 	}
 	sourceWisp, err := isActiveWispForPersistenceMove(ctx, tx, current.ID)
@@ -57,6 +86,17 @@ func MoveIssuePersistenceInTx(ctx context.Context, tx DBTX, current *types.Issue
 		// an update. The no-change early return above emits nothing.
 		if err := RecordEventInTx(ctx, tx, EventUpdate, current.ID, actor); err != nil {
 			return PersistenceMoveResult{}, err
+		}
+		// Versioned only on the issues plane; a wisp-plane normalize keeps
+		// the wisp exclusion. Unlike a move, this mint stays update-shaped
+		// (design §16.2b): the row already lives on the issues plane and
+		// keeps its own participation_generation. A row created with the flag
+		// on proceeds; a legacy row stays legacy, since a repair is an
+		// ordinary write and must not promote it (R2.3).
+		if mintVersion && !targetWisp {
+			if err := RecordVersionInTx(ctx, tx, current.ID, actor); err != nil {
+				return PersistenceMoveResult{}, err
+			}
 		}
 		return result, nil
 	}
@@ -124,9 +164,20 @@ func MoveIssuePersistenceInTx(ctx context.Context, tx DBTX, current *types.Issue
 	result.ChangedTables[persistenceIssueTable(targetWisp)] = true
 	// The bead keeps its ID across a plane move; only where it is stored
 	// changes. Journal one update carrying the moved snapshot, after derived
-	// blocked-state maintenance has settled.
+	// blocked-state maintenance has settled. A move INTO the issues plane
+	// then mints the row's first version there, after its auxiliary copies
+	// and retargeted edges exist; a move into the wisp plane mints nothing.
+	// That first mint is create-shaped (design §16.2b): the issues row was
+	// inserted above without participation_generation, which a wisp never
+	// declares, so the update-shaped entry would fence it as legacy.
 	if err := RecordEventInTx(ctx, tx, EventUpdate, current.ID, actor); err != nil {
 		return PersistenceMoveResult{}, err
+	}
+	result.EnteredIssuesPlane = !targetWisp
+	if mintVersion && !targetWisp {
+		if err := RecordVersionForCreateInTx(ctx, tx, current.ID, actor); err != nil {
+			return PersistenceMoveResult{}, err
+		}
 	}
 	return result, nil
 }
@@ -138,6 +189,9 @@ func persistenceIssueTable(wisp bool) string {
 	return "issues"
 }
 
+// rejectPersistenceDemotion refuses a durable-to-wisp move of a row that has
+// retained snapshots. The refusal is the request's (ErrValidation); a failed
+// count is not.
 func rejectPersistenceDemotion(ctx context.Context, tx DBTX, id string) error {
 	for _, table := range []string{"issue_snapshots", "compaction_snapshots"} {
 		var count int
@@ -145,7 +199,7 @@ func rejectPersistenceDemotion(ctx context.Context, tx DBTX, id string) error {
 			return fmt.Errorf("check retained snapshots in %s: %w", table, err)
 		}
 		if count > 0 {
-			return fmt.Errorf("cannot demote issue %s with retained snapshots", id)
+			return fmt.Errorf("%w: cannot demote issue %s with retained snapshots", storage.ErrValidation, id)
 		}
 	}
 	return nil

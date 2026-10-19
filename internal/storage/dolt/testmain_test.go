@@ -10,8 +10,10 @@ import (
 	"testing"
 
 	"github.com/steveyegge/beads/internal/doltserver"
+	"github.com/steveyegge/beads/internal/storage/schema"
 	"github.com/steveyegge/beads/internal/testenv"
 	"github.com/steveyegge/beads/internal/testutil"
+	"github.com/steveyegge/beads/internal/testutil/credentialcmd"
 )
 
 // testServerPort is the port of the shared test Dolt server (0 = not running).
@@ -50,10 +52,23 @@ func TestMain(m *testing.M) {
 	// port before anything in this package can resolve one. Helpers that
 	// start a server publish their own port and must run after this.
 	testenv.GuardProductionDolt()
-	os.Exit(testMainInner(m))
+	if code, ok := credentialcmd.Dispatch(); ok {
+		os.Exit(code)
+	}
+	code := testMainInner(m)
+	if err := credentialcmd.Cleanup(); err != nil {
+		fmt.Fprintf(os.Stderr, "credential command fixture cleanup: %v\n", err)
+		code = 1
+	}
+	os.Exit(code)
 }
 
 func testMainInner(m *testing.M) int {
+	// Package-wide migration consent: these tests exercise the machinery that
+	// runs BELOW the consent gate (migrate_consent.go), exactly as production
+	// does once an operator has consented. Gate-behavior tests manage the
+	// consent state themselves.
+	schema.SetLocalMigrateConsent(true)
 	os.Setenv("BEADS_TEST_MODE", "1")
 	// BEADS_TEST_PDEATHSIG=1 protects TestMultiProcessSchemaInit_DoltVerify
 	// (initschema_multiprocess_test.go), which calls doltserver.Start
@@ -62,22 +77,6 @@ func testMainInner(m *testing.M) int {
 	// internal/doltserver/procattr_linux.go for why this is a narrower,
 	// separate flag from BEADS_TEST_MODE.
 	os.Setenv("BEADS_TEST_PDEATHSIG", "1")
-
-	// Suite-owned root for the orphan-server sweep below. Must never be a
-	// shared/global temp dir (see SweepOrphanedTestServers) — this one is
-	// unique to this test run and removed when it exits.
-	suiteTempRoot, tempRootErr := os.MkdirTemp("", "beads-storage-dolt-tests-*")
-	if tempRootErr != nil {
-		fmt.Fprintf(os.Stderr, "FATAL: failed to create suite temp root: %v\n", tempRootErr)
-		return 1
-	} else {
-		defer os.RemoveAll(suiteTempRoot)
-		if err := os.Setenv(testCircuitBreakerDirEnv, filepath.Join(suiteTempRoot, "circuit")); err != nil {
-			fmt.Fprintf(os.Stderr, "FATAL: failed to isolate circuit state: %v\n", err)
-			return 1
-		}
-		defer os.Unsetenv(testCircuitBreakerDirEnv)
-	}
 
 	// AD-01 (be-c5p): the test/bench harness opens a process-local dolt
 	// sql-server (testcontainer or external port). The new database-name
@@ -93,10 +92,70 @@ func testMainInner(m *testing.M) int {
 		// which skips the deferred TerminateDoltContainer below and leaks the
 		// container. That load is what pushed the contended GET_LOCK past its
 		// 5s wait in CI shard 3.
+		//
+		// It returns BEFORE the suite temp root below for the same reason:
+		// eight concurrent helpers would each run the dead-root sweep and each
+		// claim a root of its own, and os.Exit would abandon every one of
+		// them. A helper needs neither: it starts no server, so it has no
+		// orphans to sweep and nothing for a later run to reap.
+		//
+		// It DOES still need its own circuit-breaker directory. That state is
+		// one file keyed host:port:db, read-modify-written, and the parent's
+		// BEADS_TEST_CIRCUIT_DIR reaches every helper through the BEADS_
+		// allowlist in integration.FilterEnv — so inheriting it would put all
+		// eight of TestMultiProcessSchemaInit's helpers on ONE file at once,
+		// against the same host:port:db. Each helper used to get a fresh
+		// directory under a suite root of its own; this keeps that isolation
+		// without the root, the sweep, or the marker.
+		circuitDir, circuitErr := os.MkdirTemp("", "beads-dolt-helper-circuit-*")
+		if circuitErr != nil {
+			fmt.Fprintf(os.Stderr, "FATAL: failed to isolate helper circuit state: %v\n", circuitErr)
+			return 1
+		}
+		// A helper commonly exits through os.Exit (see above), which skips
+		// this defer. The directory holds a few bytes of circuit state and
+		// never a server, and it carries no owner marker, so no sweep will
+		// ever look at it: the occasional leftover is accepted rather than
+		// given machinery of its own.
+		defer os.RemoveAll(circuitDir)
+		if err := os.Setenv(testCircuitBreakerDirEnv, circuitDir); err != nil {
+			fmt.Fprintf(os.Stderr, "FATAL: failed to isolate helper circuit state: %v\n", err)
+			return 1
+		}
+		defer os.Unsetenv(testCircuitBreakerDirEnv)
 		return m.Run()
 	}
+
+	// Suite-owned root for the orphan-server sweep below. Must never be a
+	// shared/global temp dir (see SweepSuiteTestServers) — this one is
+	// unique to this test run and removed when it exits.
+	//
+	// Before claiming one, clear out the roots of earlier runs of this suite
+	// whose process is gone: a `go test -timeout` panic skips both the defer
+	// below and the post-Run sweep, so those runs' servers outlive every
+	// cleanup installed here (wy-j2zc8q). Unclaimed roots, and roots whose
+	// owner is still running, are left untouched.
+	doltserver.SweepDeadSuiteRoots(os.TempDir(), suiteRootPrefix)
+
+	suiteTempRoot, tempRootErr := testutil.PinSuiteTempRoot(suiteRootPrefix + "*")
+	if tempRootErr != nil {
+		fmt.Fprintf(os.Stderr, "FATAL: failed to create suite temp root: %v\n", tempRootErr)
+		return 1
+	} else {
+		defer os.RemoveAll(suiteTempRoot)
+		if err := doltserver.WriteSuiteOwnerMarker(suiteTempRoot); err != nil {
+			fmt.Fprintf(os.Stderr, "Warning: could not claim suite temp root %s: %v\n", suiteTempRoot, err)
+		}
+		if err := os.Setenv(testCircuitBreakerDirEnv, filepath.Join(suiteTempRoot, "circuit")); err != nil {
+			fmt.Fprintf(os.Stderr, "FATAL: failed to isolate circuit state: %v\n", err)
+			return 1
+		}
+		defer os.Unsetenv(testCircuitBreakerDirEnv)
+	}
 	if err := testutil.EnsureDoltContainerForTestMain(); err != nil {
-		fmt.Fprintf(os.Stderr, "WARN: %v, skipping Dolt tests\n", err)
+		if testutil.DoltUnavailableForTestMain(err) {
+			return 1
+		}
 	} else {
 		defer testutil.TerminateDoltContainer()
 
@@ -164,7 +223,8 @@ func testMainInner(m *testing.M) int {
 	// suite's own temp root (e.g. a SIGKILLed run of the multiprocess
 	// schema init tests, which call doltserver.Start directly) — see
 	// gastownhall/beads mybd-q6cz.
-	doltserver.SweepOrphanedTestServers(suiteTempRoot)
+	swept := doltserver.SweepSuiteTestServers(suiteTempRoot)
+	code = doltserver.ApplyLeakPolicy("internal/storage/dolt", code, swept)
 
 	testServerPort = 0
 	os.Unsetenv("BEADS_DOLT_PORT")
@@ -172,6 +232,10 @@ func testMainInner(m *testing.M) int {
 	os.Unsetenv("BEADS_TEST_PDEATHSIG")
 	return code
 }
+
+// suiteRootPrefix is testMainInner's PinSuiteTempRoot pattern without its random
+// tail. It is what SweepDeadSuiteRoots globs for, so the two must not drift.
+const suiteRootPrefix = "beads-storage-dolt-tests-"
 
 // initSharedSchema creates a store on the shared DB, sets config, and commits
 // so that branches inherit the full schema.

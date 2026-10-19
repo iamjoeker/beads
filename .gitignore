@@ -261,3 +261,8 @@ tmp/docs/CLI_REFERENCE.md
 CLAUDE.md
 CLAUDE.local.md
 GEMINI.md
+# Bazel: output symlinks and machine-local rc files (remote executor endpoint,
+# TLS credentials). Never commit these.
+/bazel-*
+/.bazelrc.local
+/user.bazelrc

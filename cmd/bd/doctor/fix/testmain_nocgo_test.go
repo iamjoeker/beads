@@ -4,6 +4,7 @@ package fix
 
 import (
 	"fmt"
+	"github.com/steveyegge/beads/internal/testenv"
 	"os"
 	"testing"
 
@@ -15,11 +16,31 @@ import (
 // Without it, FixMissingMetadata AutoStart leaves detached sql-servers
 // running after t.TempDir() cleanup (gastownhall/beads#5631).
 func TestMain(m *testing.M) {
+	// First statement in TestMain: point every Dolt port variable at a dead
+	// port before anything in this package can resolve one. Helpers that
+	// start a server publish their own port and must run after this.
+	testenv.GuardProductionDolt()
 	os.Exit(testMainInner(m))
 }
 
 func testMainInner(m *testing.M) int {
-	root, err := testutil.PinSuiteTempRoot("beads-fix-tests-*")
+	// A GIT_DIR/GIT_WORK_TREE leaked in from the invoking shell or a git hook
+	// would route the fixture `git init`/`git config` writes in this suite
+	// into that repository: the host checkout in the r880 clobber (wy-qlvlmf).
+	if err := testutil.UnsetGitRepoLocationEnv(); err != nil {
+		fmt.Fprintf(os.Stderr, "FATAL: %v\n", err)
+		return 1
+	}
+
+	// Clear out the roots of earlier runs of this suite whose process is
+	// gone, before claiming one of our own. A `go test -timeout` panic skips
+	// every defer here AND the post-run sweep, so the servers such a run
+	// started outlive every cleanup this process installs and nothing ever
+	// looks at that run's tree again (wy-j2zc8q). Roots with no owner marker,
+	// and roots whose owner is still running, are left untouched.
+	doltserver.SweepDeadSuiteRoots(os.TempDir(), suiteRootPrefix)
+
+	root, err := testutil.PinSuiteTempRoot(suiteRootPrefix + "*")
 	if err != nil {
 		fmt.Fprintf(os.Stderr, "FATAL: suite temp root: %v\n", err)
 		return 1
@@ -27,7 +48,14 @@ func testMainInner(m *testing.M) int {
 	suiteTempRoot = root
 	defer os.RemoveAll(root)
 
+	// Claim the root for this process so the NEXT run can tell our debris
+	// from a concurrent run's live tree.
+	if err := doltserver.WriteSuiteOwnerMarker(root); err != nil {
+		fmt.Fprintf(os.Stderr, "Warning: could not claim suite temp root %s: %v\n", root, err)
+	}
+
 	code := m.Run()
-	doltserver.SweepOrphanedTestServers(root)
+	swept := doltserver.SweepSuiteTestServers(root)
+	code = doltserver.ApplyLeakPolicy("cmd/bd/doctor/fix", code, swept)
 	return code
 }

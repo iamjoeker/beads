@@ -190,11 +190,15 @@ func TestCreateForwardsEveryDocumentedMember(t *testing.T) {
 		t.Errorf("the handler put edges or comments on the issue (%d/%d); they belong to the request's own members",
 			len(issue.Dependencies), len(issue.Comments))
 	}
-	// created_at/created_by are unpublished, so a fresh row must reach the role
-	// with both zero and take the implementation's own values.
-	if !issue.CreatedAt.IsZero() || issue.CreatedBy != "" {
-		t.Errorf("the handler set created_at/created_by (%v/%q); neither is published on this operation",
-			issue.CreatedAt, issue.CreatedBy)
+	// created_at and created_by are unpublished, so a fresh row reaches the
+	// role with both zero: the implementation stamps created_at, and the role
+	// defaults created_by to the request's actor (the lifecycle-create
+	// contract in backend/conformance pins that half), as for every caller.
+	if !issue.CreatedAt.IsZero() {
+		t.Errorf("the handler set created_at (%v); it is not published on this operation", issue.CreatedAt)
+	}
+	if issue.CreatedBy != "" {
+		t.Errorf("created_by = %q, want it left to the role", issue.CreatedBy)
 	}
 
 	if len(req.Dependencies) != 2 {
@@ -277,6 +281,51 @@ func TestCreateAnswersTheStoredRow(t *testing.T) {
 	}
 	if body["created_at"] == nil || body["updated_at"] == nil {
 		t.Errorf("the response omitted the persisted timestamps: %v", body)
+	}
+}
+
+// TestCreateEchoesSubSecondTimestamps pins that the create response carries the
+// role's timestamps at FULL precision, as the text a consumer parses.
+//
+// The role's snapshot is where the sub-second stamp comes from — that is the
+// storage-side contract RunLifecycleCreateEchoesSubSecondTimestamps holds — and
+// this is the half that says the wire does not round it away on the way out. A
+// handler that re-rendered the time through a second-granular layout would print
+// the same instant with the fraction gone, and every same-second create through
+// POST /v0/beads/issues would tie.
+func TestCreateEchoesSubSecondTimestamps(t *testing.T) {
+	stored := createdIssue("bd-nano")
+	stored.CreatedAt = time.Date(2026, 8, 1, 9, 0, 0, 123456789, time.UTC)
+	stored.UpdatedAt = time.Date(2026, 8, 1, 9, 0, 1, 987654321, time.UTC)
+	lifecycle := &roleLifecycle{createResult: issueops.CreateResult{Issue: stored}}
+	ts := newCreateServer(t, lifecycle)
+
+	resp := ts.createIssue(t, `{"actor":"alice","title":"as sent"}`)
+	if resp.StatusCode != http.StatusOK {
+		t.Fatalf("status = %d, want 200: %s", resp.StatusCode, readAll(t, resp))
+	}
+	body := decodeBody(t, resp)
+	for _, member := range []struct {
+		name string
+		want time.Time
+	}{
+		{"created_at", stored.CreatedAt},
+		{"updated_at", stored.UpdatedAt},
+	} {
+		text, ok := body[member.name].(string)
+		if !ok {
+			t.Errorf("%s = %v, want an RFC3339 string", member.name, body[member.name])
+			continue
+		}
+		got, err := time.Parse(time.RFC3339Nano, text)
+		if err != nil {
+			t.Errorf("%s = %q, which does not parse as RFC3339Nano: %v", member.name, text, err)
+			continue
+		}
+		if !got.Equal(member.want) {
+			t.Errorf("%s = %q, want %v exactly — the fraction the role stored must survive the wire",
+				member.name, text, member.want)
+		}
 	}
 }
 

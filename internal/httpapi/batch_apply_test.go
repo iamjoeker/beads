@@ -74,17 +74,17 @@ func TestApplyBatchForwardsEveryLevelOfTheDocumentedBody(t *testing.T) {
 			{"kind":"update","update":{
 				"target":{"key":"root"},
 				"expected_status":"open","expected_assignee":"bob",
-				"force_close_policy":true,"force_assignee_transfer":true,
-				"patch":{"title":"renamed","status":"closed","assignee":"dave","owner":"erin",
+				"force_close_policy":true,"force_assignee_transfer":true,"force_notes_overwrite":true,
+				"patch":{"title":"renamed","status":"closed","assignee":"dave","owner":"erin","notes":"replacement",
 					"labels":{"replace":["a"],"add":["b"],"remove":["c"]},
 					"metadata":{"set":{"k":null},"unset":["old"]},
 					"estimated_minutes":null}}},
 			{"kind":"close","close":{
 				"target":{"id":"bd-7"},"reason":"done","session":"s-1","force":true,
-				"expected_version":42}},
+				"expected_version":"42"}},
 			{"kind":"dep_add","dep_add":{
 				"source":{"key":"root"},"target":{"id":"bd-7"},"type":"waits-for",
-				"metadata":{"gate":"any-children"}}}
+				"metadata":{"gate":"any-children"},"has_spawner":true,"thread_id":"th-plan"}}
 		]
 	}`)
 	if resp.StatusCode != http.StatusOK {
@@ -144,6 +144,12 @@ func TestApplyBatchForwardsEveryLevelOfTheDocumentedBody(t *testing.T) {
 	if create.Issue.Priority != 1 {
 		t.Errorf("create.priority = %d, want 1", create.Issue.Priority)
 	}
+	// created_by is not the handler's to stamp: the item reaches the role
+	// without one, and the role defaults it to the request's actor
+	// (backend/conformance's batch-apply contract pins that half).
+	if create.Issue.CreatedBy != "" {
+		t.Errorf("create.created_by = %q, want it left to the role", create.Issue.CreatedBy)
+	}
 	if create.Issue.EstimatedMinutes == nil || *create.Issue.EstimatedMinutes != 30 {
 		t.Errorf("create.estimated_minutes = %v, want 30", create.Issue.EstimatedMinutes)
 	}
@@ -179,8 +185,12 @@ func TestApplyBatchForwardsEveryLevelOfTheDocumentedBody(t *testing.T) {
 	if update.ExpectedAssignee == nil || *update.ExpectedAssignee != "bob" {
 		t.Errorf("update.expected_assignee = %v, want bob", update.ExpectedAssignee)
 	}
-	if !update.ForceClosePolicy || !update.ForceAssigneeTransfer {
-		t.Errorf("update force flags = %v/%v, want both true", update.ForceClosePolicy, update.ForceAssigneeTransfer)
+	if !update.ForceClosePolicy || !update.ForceAssigneeTransfer || !update.ForceNotesOverwrite {
+		t.Errorf("update force flags = %v/%v/%v, want all three true",
+			update.ForceClosePolicy, update.ForceAssigneeTransfer, update.ForceNotesOverwrite)
+	}
+	if !update.Patch.Notes.Set || update.Patch.Notes.Value != "replacement" {
+		t.Errorf("update.patch.notes = %+v, want replacement", update.Patch.Notes)
 	}
 	if !update.Patch.Status.Set || string(update.Patch.Status.Value) != "closed" {
 		t.Errorf("update.patch.status = %+v, want the crossing status this operation publishes", update.Patch.Status)
@@ -231,6 +241,11 @@ func TestApplyBatchForwardsEveryLevelOfTheDocumentedBody(t *testing.T) {
 	if depAdd.Metadata != `{"gate":"any-children"}` {
 		t.Errorf("dep_add.metadata = %q, want the caller's bytes unaltered", depAdd.Metadata)
 	}
+	// The lineage members reach the role as sent: issues.batchApply.depAddLineage
+	// gates whether a CLIENT sends them, and this server always reads them.
+	if !depAdd.HasSpawner || depAdd.ThreadID != "th-plan" {
+		t.Errorf("dep_add.has_spawner/thread_id = %v/%q, want true/%q", depAdd.HasSpawner, depAdd.ThreadID, "th-plan")
+	}
 }
 
 // TestApplyBatchAnswersWithTheLeanResult pins the response side: ids, a
@@ -265,8 +280,8 @@ func TestApplyBatchAnswersWithTheLeanResult(t *testing.T) {
 	if first["kind"] != "create" || first["issue_id"] != "bd-1" || first["changed"] != true {
 		t.Errorf("items[0] = %v, want the item's kind, id and changed flag", first)
 	}
-	if first["revision"] != float64(77) {
-		t.Errorf("items[0].revision = %v, want the row's token under the already-committed spelling", first["revision"])
+	if first["revision"] != "77" {
+		t.Errorf("items[0].revision = %v, want the row's token as a decimal string", first["revision"])
 	}
 	if _, present := first["issue"]; present {
 		t.Error("items[0] carries a hydrated issue; the wire result is lean and the snapshot stops at the library boundary")
@@ -280,8 +295,8 @@ func TestApplyBatchAnswersWithTheLeanResult(t *testing.T) {
 	}
 	// 0 is a real value — a legacy row, and every dep_add — so the member is
 	// emitted rather than omitted, or a client could not tell the two apart.
-	if second["revision"] != float64(0) {
-		t.Errorf("items[1].revision = %v, want 0 emitted rather than omitted", second["revision"])
+	if second["revision"] != "0" {
+		t.Errorf("items[1].revision = %v, want \"0\" emitted rather than omitted", second["revision"])
 	}
 }
 
@@ -511,6 +526,29 @@ func TestApplyBatchRejectsTheShapesTheDocumentRefuses(t *testing.T) {
 	}
 }
 
+// TestApplyBatchRefusesAnEmptyThreadID pins the document's minLength: 1 on a
+// dep_add item's thread_id. An absent member already names no thread, so an
+// empty one is refused by name rather than read as a second spelling of it.
+// The client never sends one (setItemString omits an empty value), so only a
+// direct-wire caller reaches this.
+func TestApplyBatchRefusesAnEmptyThreadID(t *testing.T) {
+	applier := &roleBatchApplier{}
+	ts := newApplyBatchServer(t, applier)
+
+	resp := ts.claim(t, batchApplyPath, `{"actor":"alice","items":[{"kind":"dep_add","dep_add":{
+		"source":{"id":"a"},"target":{"id":"b"},"type":"blocks","thread_id":""}}]}`)
+	if resp.StatusCode != http.StatusBadRequest {
+		t.Fatalf("status = %d, want 400: %s", resp.StatusCode, readAll(t, resp))
+	}
+	body := decodeBody(t, resp)
+	if body["param"] != "items[0].dep_add.thread_id" || body["reason"] != "invalid_value" {
+		t.Errorf("param/reason = %v/%v, want items[0].dep_add.thread_id/invalid_value", body["param"], body["reason"])
+	}
+	if len(applier.requests()) != 0 {
+		t.Errorf("the role was called for a refused request; nothing may reach it")
+	}
+}
+
 // TestApplyBatchRefusesMoreItemsThanTheRoleAccepts pins the cap at the edge, so
 // an over-long plan costs no database work. The number is the role's own
 // constant rather than a second copy of it.
@@ -639,8 +677,8 @@ func TestApplyBatchReportsAPreconditionMissAsAConflict(t *testing.T) {
 			err:       itemErr(1, issueops.ItemUpdate, "root", "bd-1", issueops.ErrVersionMismatch),
 			wantParam: "items[1].update.expected_version",
 			assert: func(t *testing.T, body map[string]any) {
-				if body["expected_version"] != float64(42) {
-					t.Errorf("expected_version = %v, want the guard the request sent", body["expected_version"])
+				if body["expected_version"] != "42" {
+					t.Errorf("expected_version = %v, want the guard the request sent, echoed as the string it arrived as", body["expected_version"])
 				}
 			},
 		},
@@ -672,7 +710,7 @@ func TestApplyBatchReportsAPreconditionMissAsAConflict(t *testing.T) {
 			resp := ts.claim(t, batchApplyPath, `{"actor":"alice","items":[
 				{"kind":"create","create":{"key":"root","title":"one"}},
 				{"kind":"update","update":{"target":{"id":"bd-1"},
-					"expected_version":42,"expected_status":"open","expected_assignee":"bob",
+					"expected_version":"42","expected_status":"open","expected_assignee":"bob",
 					"patch":{"title":"x"}}}
 			]}`)
 			if resp.StatusCode != http.StatusConflict {
@@ -709,6 +747,66 @@ func TestApplyBatchReportsAPreconditionMissAsAConflict(t *testing.T) {
 				}
 			}
 			test.assert(t, body)
+		})
+	}
+}
+
+// TestApplyBatchRefusesANumericVersionGuard pins the one spelling of the guard
+// on the batch surface, on BOTH item kinds that carry it.
+//
+// `expected_version` is a decimal string, and a bare number is refused rather
+// than coerced. There is no transitional number-or-string acceptance on purpose:
+// a number is the shape a double-based client has ALREADY rounded by the time it
+// leaves the client, so taking it would mean guarding on a token the server
+// never minted and refusing a row nobody touched — the exact failure the string
+// exists to remove. The update arm also pins the ORDER: the guard is read before
+// the item's typed decode, so a mistyped token earns a 400 naming the member
+// instead of the item-level "wrong JSON type".
+func TestApplyBatchRefusesANumericVersionGuard(t *testing.T) {
+	for _, test := range []struct {
+		name      string
+		item      string
+		wantParam string
+	}{
+		{
+			name:      "update",
+			item:      `{"kind":"update","update":{"target":{"id":"bd-1"},"expected_version":42,"patch":{"title":"x"}}}`,
+			wantParam: "items[0].update.expected_version",
+		},
+		{
+			name:      "update past 2^53",
+			item:      `{"kind":"update","update":{"target":{"id":"bd-1"},"expected_version":9007199254740993,"patch":{"title":"x"}}}`,
+			wantParam: "items[0].update.expected_version",
+		},
+		{
+			name:      "close",
+			item:      `{"kind":"close","close":{"target":{"id":"bd-1"},"expected_version":42}}`,
+			wantParam: "items[0].close.expected_version",
+		},
+		{
+			name:      "a string that is not a decimal token",
+			item:      `{"kind":"update","update":{"target":{"id":"bd-1"},"expected_version":"forty-two","patch":{"title":"x"}}}`,
+			wantParam: "items[0].update.expected_version",
+		},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			applier := &roleBatchApplier{}
+			ts := newApplyBatchServer(t, applier)
+
+			resp := ts.claim(t, batchApplyPath, `{"actor":"alice","items":[`+test.item+`]}`)
+			if resp.StatusCode != http.StatusBadRequest {
+				t.Fatalf("status = %d, want 400: %s", resp.StatusCode, readAll(t, resp))
+			}
+			body := decodeBody(t, resp)
+			if body["code"] != string(CodeInvalidArgument) {
+				t.Errorf("code = %v, want %s", body["code"], CodeInvalidArgument)
+			}
+			if body["param"] != test.wantParam {
+				t.Errorf("param = %v, want %q — the refusal must name the member, not the item", body["param"], test.wantParam)
+			}
+			if calls := applier.requests(); len(calls) != 0 {
+				t.Errorf("%d batches reached the role; a malformed guard is refused before any database work", len(calls))
+			}
 		})
 	}
 }
@@ -793,6 +891,19 @@ func TestApplyBatchMapsTheRolesTypedRefusalsOntoTheDocumentedCodes(t *testing.T)
 			wantCode:   "not_found",
 		},
 		{
+			// The dotted-id hierarchy rule is request validation (it unwraps to
+			// ErrValidation), never the hierarchy CONFLICT's dependency_cycle:
+			// it is decided from the two resolved ids, ahead of every check that
+			// reads the stored graph, so even a child whose parent-child edge IS
+			// stored gets this 400, with no hierarchy members to describe.
+			name: "a dotted child gated on its own parent",
+			err: itemErr(0, issueops.ItemDepAdd, "", "bd-1.1",
+				&issueops.DottedChildDependencyError{IssueID: "bd-1.1", DependsOnID: "bd-1", Type: issueops.DepBlocks}),
+			wantStatus: http.StatusBadRequest,
+			wantCode:   "invalid_argument",
+			wantParam:  "items",
+		},
+		{
 			name:       "the workspace's own validation",
 			err:        itemErr(0, issueops.ItemCreate, "", "", storage.ErrValidation),
 			wantStatus: http.StatusBadRequest,
@@ -832,6 +943,31 @@ func TestApplyBatchMapsTheRolesTypedRefusalsOntoTheDocumentedCodes(t *testing.T)
 // errUnmapped stands in for a refusal the mapping does not know, so the default
 // branch is driven rather than assumed.
 var errUnmapped = fmt.Errorf("a failure this mapping has never seen")
+
+// TestApplyBatchNamesTheBlockersOfARefusedClose: the all-or-nothing plan has no
+// per-item result array to carry the refusal in, so the problem document names
+// the offending item AND its blockers, from the same typed list the single
+// close publishes.
+func TestApplyBatchNamesTheBlockersOfARefusedClose(t *testing.T) {
+	applier := &roleBatchApplier{err: itemErr(0, issueops.ItemClose, "", "bd-1", blockedCloseFixture())}
+	ts := newApplyBatchServer(t, applier)
+
+	resp := ts.claim(t, batchApplyPath, `{"actor":"alice","items":[{"kind":"create","create":{"title":"one"}}]}`)
+	if resp.StatusCode != http.StatusConflict {
+		t.Fatalf("status = %d, want 409: %s", resp.StatusCode, readAll(t, resp))
+	}
+	body := decodeBody(t, resp)
+	if body["code"] != string(CodeNotClosable) {
+		t.Errorf("code = %v, want %s", body["code"], CodeNotClosable)
+	}
+	if body["item_index"] != float64(0) {
+		t.Errorf("item_index = %v, want 0", body["item_index"])
+	}
+	assertBlockersMember(t, "problem", body["blockers"])
+	if want := blockedCloseSentence + "; clear the blocker, or send the item's force flag"; body["detail"] != want {
+		t.Errorf("detail = %q, want %q", body["detail"], want)
+	}
+}
 
 // TestApplyBatchCarriesTheHierarchyMembersOnlyOnTheHierarchyRefusal pins the
 // discriminator inside `dependency_cycle`: member PRESENCE tells a plain

@@ -100,6 +100,7 @@ GO_TEST_PARALLEL="${GO_TEST_PARALLEL:-4}"
 SKIP_PATTERN=$(build_skip_pattern)
 VERBOSE="${TEST_VERBOSE:-}"
 RUN_PATTERN="${TEST_RUN:-}"
+COUNT="${TEST_COUNT:-}"
 COVERAGE="${TEST_COVER:-}"
 COVERPROFILE="${TEST_COVERPROFILE:-/tmp/beads.coverage.out}"
 COVERPKG="${TEST_COVERPKG:-}"
@@ -133,6 +134,19 @@ while [[ $# -gt 0 ]]; do
             fi
             NARROWED_BY_CALLER=1
             shift 2
+            ;;
+        -count)
+            COUNT="$2"
+            shift 2
+            ;;
+        -count=*)
+            # Explicit case (rather than falling into the package catch-all
+            # below): BEADS_TEST_PREBUILT_TEST_BINARY mode requires PACKAGES
+            # to hold exactly the real package, and `go test` itself only
+            # tolerates "-count=1" landing after the package list by
+            # accident of its own permissive flag scanning.
+            COUNT="${1#-count=}"
+            shift
             ;;
         *)
             PACKAGES+=("$1")
@@ -381,19 +395,15 @@ census_run() {
 }
 
 # Optional: start a single shared Dolt test server for all packages.
-# When BEADS_TEST_SHARED_SERVER=1, we start one dolt sql-server and export the
-# port so every test package reuses it instead of spawning its own. This
-# reduces 8-16+ concurrent dolt processes down to 1.
-#
-# Both port vars are read here and written below. bd resolves
-# BEADS_DOLT_SERVER_PORT before the legacy BEADS_DOLT_PORT, so naming only the
-# legacy one leaves whichever value the other holds in charge — the shape that
-# made a poisoned test-isolation guard inert (bd-4xn) and, before that, hid a
-# test container behind an ambient production port (bd-799). Since the
-# production-Dolt guard pins an unset BEADS_DOLT_SERVER_PORT to its dead port
-# at TestMain time, a half publish here now points the whole lane at that dead
-# port while a healthy shared server sits unused. Either var being set already
-# means someone else has chosen the server for this run.
+# When BEADS_TEST_SHARED_SERVER=1, we start one dolt sql-server and export
+# BEADS_DOLT_PORT (plus BEADS_TEST_SHARED_DOLT_SERVER set to that same port,
+# which marks it as ours rather than inherited) so every test package reuses it
+# instead of spawning its own. This reduces 8-16+ concurrent dolt processes down
+# to 1. Packages whose TestMain can start a Dolt container still prefer the
+# container: it overwrites both port variables on success. Nothing starts when
+# either port variable is already set: a port someone else named is not ours to
+# vouch for. beads_test_env_enter cleared both above, so one can only still be
+# set here when that isolation was skipped (e.g. BEADS_TEST_ENV_DISABLE=1).
 if [[ "${BEADS_TEST_SHARED_SERVER:-}" == "1" && -z "${BEADS_DOLT_PORT:-}" && -z "${BEADS_DOLT_SERVER_PORT:-}" ]]; then
     if command -v dolt &>/dev/null; then
         SHARED_DOLT_DIR=$(mktemp -d /tmp/beads-shared-test-dolt-XXXXXX)
@@ -426,6 +436,19 @@ if [[ "${BEADS_TEST_SHARED_SERVER:-}" == "1" && -z "${BEADS_DOLT_PORT:-}" && -z 
             # Every var bd consults for the port, not just the legacy one.
             export BEADS_DOLT_PORT="$SHARED_PORT"
             export BEADS_DOLT_SERVER_PORT="$SHARED_PORT"
+            # Mark the port as harness-provisioned. testutil's
+            # EnsureDoltContainerForTestMain clears an ambient BEADS_DOLT_PORT
+            # whenever it is left without a container (gm-2g3g5r: an inherited
+            # port can be a production server), which would erase the server we
+            # just started on any host without Docker -- this flow's primary
+            # audience. The marker is what distinguishes "a test server we
+            # allocated" from "whatever the environment happened to name". Its
+            # value is the port it vouches for, so it covers the BEADS_DOLT_PORT
+            # exported above and no other variable; it is exported only here,
+            # only after the server answered, and only for a port this script
+            # allocated itself (the guard above requires both port variables to
+            # have been unset).
+            export BEADS_TEST_SHARED_DOLT_SERVER="$SHARED_PORT"
             export BEADS_TEST_MODE=1
             echo "Shared test Dolt server started on port $SHARED_PORT (PID $SHARED_DOLT_PID)" >&2
             # Picked up by test_sh_cleanup, which is already trapped on EXIT.
@@ -443,6 +466,52 @@ if [[ "${BEADS_TEST_SHARED_SERVER:-}" == "1" && -z "${BEADS_DOLT_PORT:-}" && -z 
             rm -rf "$SHARED_DOLT_DIR"
         fi
     fi
+elif [[ "${BEADS_TEST_SHARED_SERVER:-}" == "1" ]]; then
+    echo "WARN: BEADS_TEST_SHARED_SERVER=1 ignored: BEADS_DOLT_PORT or BEADS_DOLT_SERVER_PORT is already set, so no shared server was started" >&2
+fi
+
+# BEADS_TEST_PREBUILT_TEST_BINARY short-circuits straight to a `go test -c`
+# binary (for example one cross-compiled on a different host; see
+# scripts/ci/run-go-test-binary.sh) instead of invoking `go test`. It still
+# gets test.sh's env isolation (beads_test_env_enter above), the .test-skip
+# pattern, and the -p/-parallel/-timeout defaults -- only the final
+# build-or-run step differs. Exactly one package is required: a prebuilt
+# binary is compiled from one package, so "./..." or a multi-package list has
+# no single binary to run.
+if [[ -n "${BEADS_TEST_PREBUILT_TEST_BINARY:-}" ]]; then
+    if [[ ${#PACKAGES[@]} -ne 1 ]]; then
+        echo "BEADS_TEST_PREBUILT_TEST_BINARY requires exactly one package, got: ${PACKAGES[*]:-<none>}" >&2
+        exit 2
+    fi
+
+    RUN_ARGS=("$BEADS_TEST_PREBUILT_TEST_BINARY" "${PACKAGES[0]}")
+    RUN_ARGS+=(-timeout "$TIMEOUT" -parallel "$GO_TEST_PARALLEL")
+    if [[ -n "$VERBOSE" ]]; then
+        RUN_ARGS+=(-v)
+    fi
+    if [[ -n "$SKIP_PATTERN" ]]; then
+        RUN_ARGS+=(-skip "$SKIP_PATTERN")
+    fi
+    if [[ -n "$RUN_PATTERN" ]]; then
+        RUN_ARGS+=(-run "$RUN_PATTERN")
+    fi
+    if [[ -n "$COUNT" ]]; then
+        RUN_ARGS+=(-count "$COUNT")
+    fi
+
+    echo "Running (prebuilt binary): ${RUN_ARGS[*]}" >&2
+    echo "Skipping: $SKIP_PATTERN" >&2
+    echo "" >&2
+    # Run as a child, not `exec`: `exec` would replace this shell's image
+    # before the EXIT trap armed above (cleanup_shared_server,
+    # beads_test_env_cleanup via beads_test_env_enter) ever runs, leaking
+    # the per-run BEADS_TEST_ENV_ROOT temp dir and, with
+    # BEADS_TEST_SHARED_SERVER=1, orphaning the shared dolt sql-server
+    # process. Capturing and re-exiting the status preserves the same exit
+    # code `exec` would have, with the trap still firing on the way out.
+    "$REPO_ROOT/scripts/ci/run-go-test-binary.sh" "${RUN_ARGS[@]}"
+    status=$?
+    exit $status
 fi
 
 # Build go test command. -json goes in only when the census is on; it is the
@@ -461,6 +530,10 @@ fi
 
 if [[ -n "$RUN_PATTERN" ]]; then
     CMD+=(-run "$RUN_PATTERN")
+fi
+
+if [[ -n "$COUNT" ]]; then
+    CMD+=(-count "$COUNT")
 fi
 
 if [[ -n "$COVERAGE" ]]; then

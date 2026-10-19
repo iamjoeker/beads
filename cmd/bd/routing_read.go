@@ -31,12 +31,30 @@ func resolveRoutingConfigValue(key string, dbValues map[string]string) string {
 	return strings.TrimSpace(dbValues[key])
 }
 
+// routingSettingsStore is the store whose settings document may supply the
+// routing.* and contributor.* keys, or nil when none may.
+//
+// A remote backend's settings are one document shared by every client of the
+// server, and the routing targets are LOCAL filesystem paths, which such a
+// document cannot name for every machine reading it. Contributor routing for a
+// remote workspace is therefore configured locally (config.yaml / env) only:
+// `bd create`'s routing decision and the lookup fallback a missing id takes
+// read the same local-only answer, and neither pays a settings round trip to
+// learn it (S6b).
+func routingSettingsStore(store storage.DoltStorage) storage.DoltStorage {
+	if store == nil || storeIsRemoteBackend(store) {
+		return nil
+	}
+	return store
+}
+
 func getRoutingConfigValue(ctx context.Context, store storage.DoltStorage, key string) string {
 	if src := config.GetValueSource(key); src != config.SourceDefault {
 		if value := strings.TrimSpace(config.GetString(key)); value != "" {
 			return value
 		}
 	}
+	store = routingSettingsStore(store)
 	if store == nil {
 		return ""
 	}
@@ -49,13 +67,9 @@ func getRoutingConfigValue(ctx context.Context, store storage.DoltStorage, key s
 }
 
 func determineAutoRoutedRepoPath(ctx context.Context, store storage.DoltStorage) (string, routing.RoutingRule) {
-	userRole, err := routing.DetectUserRole(".")
-	if err != nil {
-		debug.Logf("Warning: failed to detect user role: %v\n", err)
-	}
-
 	var dbValues map[string]string
-	if store != nil {
+	// Local-only for a remote backend: see routingSettingsStore.
+	if store = routingSettingsStore(store); store != nil {
 		all, allErr := store.GetAllConfig(ctx)
 		if allErr != nil {
 			debug.Logf("DEBUG: failed to read config from store: %v\n", allErr)
@@ -89,6 +103,7 @@ func determineAutoRoutedRepoPath(ctx context.Context, store storage.DoltStorage)
 		ExplicitOverride: "",
 	}
 
+	userRole := detectUserRoleForRouting(routingConfig)
 	return routing.DetermineTargetRepoWithRule(routingConfig, userRole, ".")
 }
 
@@ -176,29 +191,27 @@ func printContributorRoutingNotice(ctx context.Context, localStore storage.DoltS
 // returned routing.RoutingRule identifies which rule matched, for callers
 // that print a routing notice.
 func openRoutedReadStore(ctx context.Context, store storage.DoltStorage) (storage.DoltStorage, bool, routing.RoutingRule, error) {
-	return openRoutedStore(ctx, store, false)
+	return openAutoRoutedStore(ctx, store, false)
 }
 
 // openRoutedWriteStore is openRoutedReadStore for a mutation command acting on
 // an issue that lives in the auto-routed store. It opens the target writable so
 // the mutation the user explicitly asked for can commit there.
-//
-// `bd create` has always written to the auto-routed target (that is the whole
-// point of contributor routing: the planning store is where the issues live),
-// so a read-only open here made the store append-only — every close, update,
-// assign and note on a routed issue failed with embeddeddolt's ErrReadOnly
-// while creates succeeded. Merge-request wisps are the visible casualty, since
-// they are created in the routed store and must later be retired there.
-//
-// This mirrors what prefix routing already does for write intent (#4141). It
-// does not weaken GH#3231/bd-6dnrw.32: those protect a *read* from incidentally
-// mutating a foreign project at open time (migrations, schema init, metadata
-// writes), and reads still take the read-only path above.
 func openRoutedWriteStore(ctx context.Context, store storage.DoltStorage) (storage.DoltStorage, bool, routing.RoutingRule, error) {
-	return openRoutedStore(ctx, store, true)
+	return openAutoRoutedStore(ctx, store, true)
 }
 
-func openRoutedStore(ctx context.Context, store storage.DoltStorage, writable bool) (storage.DoltStorage, bool, routing.RoutingRule, error) {
+// openAutoRoutedStore opens the target selected by auto-routing. Every rule,
+// maintainer, contributor and default alike, opens writable when writable is
+// set, for write-intent callers (resolveAndGetIssueForMutation and its exact
+// twin, bd close target resolution) that commit the change where the issue
+// lives. A contributor's target is their own planning repository, the one bd
+// create already writes to, so a planning issue is claimed, commented on and
+// closed there (GH#2345, beads-0km). Reads stay read-only.
+//
+// The target opens its own dolt_database, as a prefix route does
+// (openRoutedTargetStore, autoRouteTargetDatabase).
+func openAutoRoutedStore(ctx context.Context, store storage.DoltStorage, writable bool) (storage.DoltStorage, bool, routing.RoutingRule, error) {
 	targetStore, target, err := openRoutedStoreTarget(ctx, store, writable)
 	if target == nil {
 		return nil, false, routing.RuleNone, err
@@ -236,11 +249,11 @@ func openRoutedStoreTarget(ctx context.Context, store storage.DoltStorage, writa
 		RepoPath: targetRepoPath,
 		BeadsDir: filepath.Join(targetRepoPath, ".beads"),
 	}
-	open := newReadOnlyStoreFromConfig
-	if writable {
-		open = newDoltStoreFromConfig
+	database, err := autoRouteTargetDatabase(target.BeadsDir, writable)
+	if err != nil {
+		return nil, target, fmt.Errorf("failed to open routed store at %s: target has no dolt_database configured: %w", targetRepoPath, err)
 	}
-	targetStore, err := open(ctx, target.BeadsDir)
+	targetStore, err := openRoutedTargetStore(ctx, target.BeadsDir, database, writable)
 	if err != nil {
 		return nil, target, fmt.Errorf("failed to open routed store at %s: %w", target.RepoPath, err)
 	}

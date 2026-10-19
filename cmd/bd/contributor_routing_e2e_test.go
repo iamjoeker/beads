@@ -100,7 +100,7 @@ func TestContributorRoutingTracer(t *testing.T) {
 		ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
 		defer cancel()
 
-		projectStore := newTestStoreIsolatedDB(t, projectDBPath, "proj")
+		projectStore := newTestStoreIsolatedDB(t, projectDBPath, "test")
 
 		// Set routing config in project store (canonical keys)
 		if err := projectStore.SetConfig(ctx, "routing.mode", "auto"); err != nil {
@@ -147,12 +147,7 @@ func TestContributorRoutingTracer(t *testing.T) {
 
 		// Initialize planning database and verify we can create issues there
 		planningDBPath := filepath.Join(planningBeadsDir, "beads.db")
-		planningStore := newTestStoreIsolatedDB(t, planningDBPath, "plan")
-
-		// Initialize planning store with required config
-		if err := planningStore.SetConfig(ctx, "issue_prefix", "plan-"); err != nil {
-			t.Fatalf("failed to set issue_prefix in planning store: %v", err)
-		}
+		planningStore := newTestStoreIsolatedDB(t, planningDBPath, "plan-")
 
 		// Create a test issue in planning store (simulating what Phase 2 will do)
 		issue := &types.Issue{
@@ -197,7 +192,7 @@ func TestBackwardCompatContributorConfig(t *testing.T) {
 	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
 	defer cancel()
 
-	store := newTestStoreIsolatedDB(t, dbPath, "compat")
+	store := newTestStoreIsolatedDB(t, dbPath, "test")
 
 	// Set LEGACY contributor.* keys (what old versions of bd init --contributor would set)
 	if err := store.SetConfig(ctx, "contributor.auto_route", "true"); err != nil {
@@ -327,7 +322,7 @@ func (env *contributorRoutingEnv) cleanup() {
 func (env *contributorRoutingEnv) initProjectStore(syncMode string) *dolt.DoltStore {
 	env.t.Helper()
 	projectDBPath := filepath.Join(env.projectDir, ".beads", "beads.db")
-	store := newTestStoreIsolatedDB(env.t, projectDBPath, "proj")
+	store := newTestStoreIsolatedDB(env.t, projectDBPath, "proj-")
 
 	// Set routing config
 	if err := store.SetConfig(env.ctx, "routing.mode", "auto"); err != nil {
@@ -335,9 +330,6 @@ func (env *contributorRoutingEnv) initProjectStore(syncMode string) *dolt.DoltSt
 	}
 	if err := store.SetConfig(env.ctx, "routing.contributor", env.planningDir); err != nil {
 		env.t.Fatalf("failed to set routing.contributor: %v", err)
-	}
-	if err := store.SetConfig(env.ctx, "issue_prefix", "proj-"); err != nil {
-		env.t.Fatalf("failed to set issue_prefix: %v", err)
 	}
 
 	// Set sync mode-specific config
@@ -365,11 +357,7 @@ func (env *contributorRoutingEnv) initProjectStore(syncMode string) *dolt.DoltSt
 func (env *contributorRoutingEnv) initPlanningStore() *dolt.DoltStore {
 	env.t.Helper()
 	planningDBPath := filepath.Join(env.planningDir, ".beads", "beads.db")
-	store := newTestStoreIsolatedDB(env.t, planningDBPath, "plan")
-
-	if err := store.SetConfig(env.ctx, "issue_prefix", "plan-"); err != nil {
-		env.t.Fatalf("failed to set issue_prefix in planning store: %v", err)
-	}
+	store := newTestStoreIsolatedDB(env.t, planningDBPath, "plan-")
 
 	return store
 }
@@ -675,11 +663,7 @@ func TestExplicitRepoOverride(t *testing.T) {
 	}
 
 	overrideDBPath := filepath.Join(overrideBeadsDir, "beads.db")
-	overrideStore := newTestStoreIsolatedDB(t, overrideDBPath, "over")
-
-	if err := overrideStore.SetConfig(env.ctx, "issue_prefix", "over-"); err != nil {
-		t.Fatalf("failed to set issue_prefix in override store: %v", err)
-	}
+	overrideStore := newTestStoreIsolatedDB(t, overrideDBPath, "over-")
 
 	// Build routing config WITH explicit override
 	mode, _ := projectStore.GetConfig(env.ctx, "routing.mode")
@@ -746,11 +730,7 @@ func TestBEADS_DIRPrecedence(t *testing.T) {
 	}
 
 	externalDBPath := filepath.Join(externalBeadsDir, "beads.db")
-	externalStore := newTestStoreIsolatedDB(t, externalDBPath, "ext")
-
-	if err := externalStore.SetConfig(env.ctx, "issue_prefix", "ext-"); err != nil {
-		t.Fatalf("failed to set issue_prefix in external store: %v", err)
-	}
+	externalStore := newTestStoreIsolatedDB(t, externalDBPath, "ext-")
 
 	// Set BEADS_DIR to external directory
 	t.Setenv("BEADS_DIR", externalBeadsDir)

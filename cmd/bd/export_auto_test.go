@@ -53,7 +53,7 @@ func TestGitAddFile_InWorktreeHook_StagesCorrectPath(t *testing.T) {
 	}
 	runGit := func(dir string, args ...string) {
 		t.Helper()
-		c := exec.Command("git", args...)
+		c := gitCommand(args...)
 		c.Dir = dir
 		if out, err := c.CombinedOutput(); err != nil {
 			t.Fatalf("git %v in %s failed: %v\n%s", args, dir, err, out)
@@ -71,7 +71,7 @@ func TestGitAddFile_InWorktreeHook_StagesCorrectPath(t *testing.T) {
 	worktree := filepath.Join(tmpDir, "wt")
 	runGit(mainRepo, "worktree", "add", worktree, "-b", "feat")
 	t.Cleanup(func() {
-		c := exec.Command("git", "worktree", "remove", "--force", worktree)
+		c := gitCommand("worktree", "remove", "--force", worktree)
 		c.Dir = mainRepo
 		_ = c.Run()
 	})
@@ -87,7 +87,7 @@ func TestGitAddFile_InWorktreeHook_StagesCorrectPath(t *testing.T) {
 
 	// Simulate the environment inside a git pre-commit hook: GIT_DIR points
 	// at the worktree's per-worktree gitdir.
-	out, err := exec.Command("git", "-C", worktree, "rev-parse", "--git-dir").Output()
+	out, err := gitCommand("-C", worktree, "rev-parse", "--git-dir").Output()
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -111,7 +111,7 @@ func TestGitAddFile_InWorktreeHook_StagesCorrectPath(t *testing.T) {
 
 	// Inspect the worktree's index: the staged path must be ".beads/issues.jsonl",
 	// NOT bare "issues.jsonl" at repo root.
-	lsFiles := exec.Command("git", "ls-files", "--stage")
+	lsFiles := gitCommand("ls-files", "--stage")
 	lsFiles.Dir = worktree
 	data, err := lsFiles.CombinedOutput()
 	if err != nil {
@@ -312,6 +312,18 @@ func (s *spyDiffStore) GetStateHash(ctx context.Context) (string, error) {
 		return s.DoltStorage.GetCurrentCommit(ctx)
 	}
 	return sh.GetStateHash(ctx)
+}
+
+// Forwarded for the same reason as the two above: the spy hides the concrete
+// store from UnwrapStore, so any capability it does not re-declare simply
+// vanishes from the guard's point of view. Without this the orphan guard's
+// history proof silently degrades to "unproven" under the spy (GH#5896).
+func (s *spyDiffStore) HistoricalIssueIDs(ctx context.Context, ids []string) (map[string]struct{}, error) {
+	hp, ok := storage.UnwrapStore(s.DoltStorage).(storage.HistoryPresence)
+	if !ok {
+		return nil, fmt.Errorf("spyDiffStore: wrapped store does not implement HistoryPresence")
+	}
+	return hp.HistoricalIssueIDs(ctx, ids)
 }
 
 func autoExportTestDir(t *testing.T) string {
@@ -680,7 +692,7 @@ func TestGitAddFile_NonHookContext_GuardDoesNotFire(t *testing.T) {
 	}
 	runGit := func(args ...string) {
 		t.Helper()
-		c := exec.Command("git", args...)
+		c := gitCommand(args...)
 		c.Dir = repo
 		if out, err := c.CombinedOutput(); err != nil {
 			t.Fatalf("git %v: %v\n%s", args, err, out)
@@ -706,7 +718,7 @@ func TestGitAddFile_NonHookContext_GuardDoesNotFire(t *testing.T) {
 		t.Fatalf("gitAddFile: %v", err)
 	}
 
-	c := exec.Command("git", "ls-files", "--stage")
+	c := gitCommand("ls-files", "--stage")
 	c.Dir = repo
 	data, err := c.CombinedOutput()
 	if err != nil {
@@ -744,7 +756,7 @@ func TestGitAddFile_RelativePathDoesNotDoubleRoot(t *testing.T) {
 	}
 	runGit := func(args ...string) {
 		t.Helper()
-		c := exec.Command("git", args...)
+		c := gitCommand(args...)
 		c.Dir = repo
 		if out, err := c.CombinedOutput(); err != nil {
 			t.Fatalf("git %v: %v\n%s", args, err, out)
@@ -776,7 +788,7 @@ func TestGitAddFile_RelativePathDoesNotDoubleRoot(t *testing.T) {
 		t.Fatalf("gitAddFile(%q): %v", relPath, err)
 	}
 
-	c := exec.Command("git", "diff", "--cached", "--name-only")
+	c := gitCommand("diff", "--cached", "--name-only")
 	c.Dir = repo
 	data, err := c.CombinedOutput()
 	if err != nil {
@@ -813,7 +825,7 @@ func TestGitAddFile_CapturesStderrOnFailure(t *testing.T) {
 	}
 	runGit := func(args ...string) {
 		t.Helper()
-		c := exec.Command("git", args...)
+		c := gitCommand(args...)
 		c.Dir = repo
 		if out, err := c.CombinedOutput(); err != nil {
 			t.Fatalf("git %v: %v\n%s", args, err, out)
@@ -878,7 +890,7 @@ func TestGitAddFile_CapturesLockedIndexFailure(t *testing.T) {
 	}
 	runGit := func(args ...string) {
 		t.Helper()
-		c := exec.Command("git", args...)
+		c := gitCommand(args...)
 		c.Dir = repo
 		if out, err := c.CombinedOutput(); err != nil {
 			t.Fatalf("git %v: %v\n%s", args, err, out)
@@ -914,7 +926,7 @@ func TestGitAddFile_CapturesLockedIndexFailure(t *testing.T) {
 		t.Fatalf("expected index.lock error, got: %q", msg)
 	}
 
-	c := exec.Command("git", "ls-files", "--stage")
+	c := gitCommand("ls-files", "--stage")
 	c.Dir = repo
 	data, err := c.CombinedOutput()
 	if err != nil {
@@ -936,7 +948,7 @@ func TestAutoExportGitAddFailureExitsNonZero(t *testing.T) {
 
 	runGit := func(args ...string) {
 		t.Helper()
-		c := exec.Command("git", args...)
+		c := gitCommand(args...)
 		c.Dir = dir
 		if out, err := c.CombinedOutput(); err != nil {
 			t.Fatalf("git %v: %v\n%s", args, err, out)
@@ -1014,7 +1026,7 @@ func TestGitAddFile_RedirectCase_DoesNotStageInMainRepo(t *testing.T) {
 	}
 	runGit := func(dir string, args ...string) {
 		t.Helper()
-		c := exec.Command("git", args...)
+		c := gitCommand(args...)
 		c.Dir = dir
 		if out, err := c.CombinedOutput(); err != nil {
 			t.Fatalf("git %v in %s failed: %v\n%s", args, dir, err, out)
@@ -1044,12 +1056,12 @@ func TestGitAddFile_RedirectCase_DoesNotStageInMainRepo(t *testing.T) {
 	worktree := filepath.Join(tmpDir, "wt")
 	runGit(mainRepo, "worktree", "add", worktree, "-b", "feat")
 	t.Cleanup(func() {
-		c := exec.Command("git", "worktree", "remove", "--force", worktree)
+		c := gitCommand("worktree", "remove", "--force", worktree)
 		c.Dir = mainRepo
 		_ = c.Run()
 	})
 
-	out, err := exec.Command("git", "-C", worktree, "rev-parse", "--git-dir").Output()
+	out, err := gitCommand("-C", worktree, "rev-parse", "--git-dir").Output()
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -1072,7 +1084,7 @@ func TestGitAddFile_RedirectCase_DoesNotStageInMainRepo(t *testing.T) {
 	// staging entry from the worktree's hook firing.
 	checkNoStage := func(label, repoDir string) {
 		t.Helper()
-		c := exec.Command("git", "ls-files", "--stage")
+		c := gitCommand("ls-files", "--stage")
 		c.Dir = repoDir
 		data, err := c.CombinedOutput()
 		if err != nil {
@@ -1122,7 +1134,7 @@ func TestPreCommitHasStagedBeadsFiles(t *testing.T) {
 	}
 	runGit := func(args ...string) {
 		t.Helper()
-		c := exec.Command("git", args...)
+		c := gitCommand(args...)
 		c.Dir = repo
 		if out, err := c.CombinedOutput(); err != nil {
 			t.Fatalf("git %v: %v\n%s", args, err, out)
@@ -1222,7 +1234,11 @@ func TestShouldExport(t *testing.T) {
 	}
 }
 
-func TestCountIssueRecordsInJSONL(t *testing.T) {
+// TestIssueRecordsInJSONL_CountsAndOrdersInScopeIDs pins the parse the
+// pre-export guards read: exactly one record per id, memories and tombstones
+// and id-less lines skipped, sorted by id. Both guards now take their counts
+// and their candidate list from this one call.
+func TestIssueRecordsInJSONL_CountsAndOrdersInScopeIDs(t *testing.T) {
 	tmpDir := t.TempDir()
 	path := filepath.Join(tmpDir, "issues.jsonl")
 	data := strings.Join([]string{
@@ -1238,20 +1254,19 @@ func TestCountIssueRecordsInJSONL(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	got, err := countIssueRecordsInJSONL(path)
+	records, err := issueRecordsInJSONL(path)
 	if err != nil {
-		t.Fatalf("countIssueRecordsInJSONL: %v", err)
+		t.Fatalf("issueRecordsInJSONL: %v", err)
 	}
-	if got != 2 {
-		t.Fatalf("countIssueRecordsInJSONL = %d, want 2", got)
+	if len(records) != 2 {
+		t.Fatalf("issueRecordsInJSONL returned %d records, want 2: %v", len(records), records)
 	}
-
-	ids, err := issueIDsInJSONL(path)
-	if err != nil {
-		t.Fatalf("issueIDsInJSONL: %v", err)
+	ids := make([]string, len(records))
+	for i, rec := range records {
+		ids[i] = rec.ID
 	}
 	if got := strings.Join(ids, ","); got != "bd-1,bd-2" {
-		t.Fatalf("issueIDsInJSONL = %q, want bd-1,bd-2", got)
+		t.Fatalf("issueRecordsInJSONL ids = %q, want bd-1,bd-2", got)
 	}
 }
 
@@ -1686,7 +1701,7 @@ func TestTryIncrementalExport_PatchesChangedIssuesAndDropsRemoved(t *testing.T) 
 	}
 	c2 := h.mustCommit(t, ctx, "mutate")
 
-	issueCount, memoryCount, _, didIncremental, err := tryIncrementalExport(ctx, exportPath, c1, c2, nil)
+	issueCount, memoryCount, _, didIncremental, err := tryIncrementalExport(ctx, exportPath, c1, c2, nil, nil)
 	if err != nil {
 		t.Fatalf("tryIncrementalExport returned error: %v", err)
 	}
@@ -1742,7 +1757,7 @@ func TestTryIncrementalExport_DropsIssueWhenFlippedToTemplate(t *testing.T) {
 	}
 	c2 := h.mustCommit(t, ctx, "promote to template")
 
-	_, _, _, didIncremental, err := tryIncrementalExport(ctx, exportPath, c1, c2, nil)
+	_, _, _, didIncremental, err := tryIncrementalExport(ctx, exportPath, c1, c2, nil, nil)
 	if err != nil {
 		t.Fatalf("tryIncrementalExport: %v", err)
 	}
@@ -1770,7 +1785,7 @@ func TestTryIncrementalExport_FallsBackWhenFileMissing(t *testing.T) {
 	// No existing file → must return didIncremental=false and leave the
 	// disk untouched so the caller falls back to the full-export path.
 	exportPath := filepath.Join(h.beadsDir, "issues.jsonl")
-	issueCount, _, _, didIncremental, err := tryIncrementalExport(ctx, exportPath, c1, c2, nil)
+	issueCount, _, _, didIncremental, err := tryIncrementalExport(ctx, exportPath, c1, c2, nil, nil)
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
@@ -1786,6 +1801,14 @@ func TestTryIncrementalExport_FallsBackWhenFileMissing(t *testing.T) {
 }
 
 func TestTryIncrementalExport_ThresholdExceededFallsBack(t *testing.T) {
+	// The behavior under test is "more changes than the threshold -> full
+	// export fallback", not the production value: seeding 5001 issues took
+	// minutes (per-issue statements, under -race). Not parallel, so no other
+	// test reads the threshold meanwhile.
+	origThreshold := incrementalExportThreshold
+	incrementalExportThreshold = 20
+	t.Cleanup(func() { incrementalExportThreshold = origThreshold })
+
 	h, ctx := setupIncrementalExportTestWithReadTimeout(t, bulkSeedPoolReadTimeout)
 
 	// Seed one issue so the file exists; baseline commit.
@@ -1810,7 +1833,7 @@ func TestTryIncrementalExport_ThresholdExceededFallsBack(t *testing.T) {
 	h.mustCreateBatch(t, ctx, incrementalExportThreshold+1, "thr-")
 	c2 := h.mustCommit(t, ctx, "flood")
 
-	_, _, _, didIncremental, err := tryIncrementalExport(ctx, exportPath, c1, c2, nil)
+	_, _, _, didIncremental, err := tryIncrementalExport(ctx, exportPath, c1, c2, nil, nil)
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
@@ -1875,7 +1898,7 @@ func TestMaybeAutoExport_SecondRunTakesIncrementalPath_ServerMode(t *testing.T) 
 	}
 
 	// Both ChangedIssueIDs call sites must have fired: the orphan guard's
-	// proof-of-deletion probe (missingJSONLIssueIDsInStore, which runs
+	// proof-of-deletion probe (reconcileAutoExportJSONL, which runs
 	// because deleting e2e-b leaves it JSONL-only) and tryIncrementalExport's
 	// own diff. A bare "called at least once" check is NOT sufficient and was
 	// the PR #5806 round-5 review finding: the guard's own call satisfies it
@@ -2055,7 +2078,7 @@ func TestTryIncrementalExport_NeverLeaksMemoriesIntoAutoExport(t *testing.T) {
 	}
 	c2 := h.mustCommit(t, ctx, "mutate")
 
-	_, memCount, _, didIncremental, err := tryIncrementalExport(ctx, exportPath, c1, c2, nil)
+	_, memCount, _, didIncremental, err := tryIncrementalExport(ctx, exportPath, c1, c2, nil, nil)
 	if err != nil {
 		t.Fatalf("tryIncrementalExport: %v", err)
 	}
@@ -2105,7 +2128,7 @@ func TestTryIncrementalExport_PreservesPreExistingMemoryAcrossPatch(t *testing.T
 	}
 	c2 := h.mustCommit(t, ctx, "mutate")
 
-	_, _, _, didIncremental, err := tryIncrementalExport(ctx, exportPath, c1, c2, nil)
+	_, _, _, didIncremental, err := tryIncrementalExport(ctx, exportPath, c1, c2, nil, nil)
 	if err != nil {
 		t.Fatalf("tryIncrementalExport: %v", err)
 	}
@@ -2206,7 +2229,7 @@ func TestTryIncrementalExport_ExcludesConfiguredOwnerFromPatchedIssues(t *testin
 	}
 	c2 := h.mustCommit(t, ctx, "mutate")
 
-	_, _, _, didIncremental, err := tryIncrementalExport(ctx, exportPath, c1, c2, nil)
+	_, _, _, didIncremental, err := tryIncrementalExport(ctx, exportPath, c1, c2, nil, nil)
 	if err != nil {
 		t.Fatalf("tryIncrementalExport: %v", err)
 	}
@@ -2239,7 +2262,7 @@ func TestTryIncrementalExport_PatchedLinesIncludeTypeField(t *testing.T) {
 	}
 	c2 := h.mustCommit(t, ctx, "mutate")
 
-	_, _, _, didIncremental, err := tryIncrementalExport(ctx, exportPath, c1, c2, nil)
+	_, _, _, didIncremental, err := tryIncrementalExport(ctx, exportPath, c1, c2, nil, nil)
 	if err != nil {
 		t.Fatalf("tryIncrementalExport: %v", err)
 	}

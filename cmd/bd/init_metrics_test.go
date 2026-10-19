@@ -107,6 +107,16 @@ func runBdInitForMetrics(t *testing.T, home string, extraEnv []string, args ...s
 	}
 	initGitRepoAt(t, repo)
 
+	// `bd init --shared-server` daemonizes a dolt sql-server under
+	// <home>/.beads/shared-server — <home> being the HOME this fixture gives
+	// ONLY to the subprocess, so the in-process SharedServerPath would look in
+	// the wrong tree — and `--proxied-server` leaves a proxy plus its backend
+	// server under <repo>/.beads/dolt. Neither was ever stopped; the post-run
+	// sweep named this fixture by both cwds (wy-j2zc8q). Registered before
+	// the subprocess so the t.Fatalf paths are covered too.
+	stopDoltServerCleanup(t, filepath.Join(home, ".beads", "shared-server"))
+	stopProxiedServerCleanup(t, filepath.Join(repo, ".beads", "dolt"))
+
 	full := append([]string{"init", "--non-interactive", "--quiet"}, args...)
 	cmd := exec.Command(bd, full...)
 	cmd.Dir = repo
@@ -171,6 +181,7 @@ func TestInitMetricsEmittedPerDoltMode(t *testing.T) {
 		extraArgs       []string
 		extraEnv        func(t *testing.T) []string
 		expectedCommand string
+		freeServerPort  bool
 	}{
 		{
 			name:            "embedded_default",
@@ -186,6 +197,11 @@ func TestInitMetricsEmittedPerDoltMode(t *testing.T) {
 			extraArgs:       []string{"--shared-server"},
 			extraEnv:        isolatedSharedServerEnv,
 			expectedCommand: "init-shared-server",
+			// The shared server binds the default port unless told
+			// otherwise; on a box where 3308 is already someone's dolt the
+			// init fails before it starts anything, and this case would
+			// silently stop exercising the shared path.
+			freeServerPort: true,
 		},
 		{
 			name:            "proxied_server_via_flag",
@@ -201,11 +217,18 @@ func TestInitMetricsEmittedPerDoltMode(t *testing.T) {
 			if err != nil {
 				t.Fatalf("temp home: %v", err)
 			}
-			var extraEnv []string
+			var env []string
 			if tc.extraEnv != nil {
-				extraEnv = tc.extraEnv(t)
+				env = tc.extraEnv(t)
 			}
-			runBdInitForMetrics(t, home, extraEnv, tc.extraArgs...)
+			if tc.freeServerPort {
+				port, err := testutil.FindFreePort()
+				if err != nil {
+					t.Fatalf("find free port: %v", err)
+				}
+				env = append(env, "BEADS_DOLT_SERVER_PORT="+strconv.Itoa(port))
+			}
+			runBdInitForMetrics(t, home, env, tc.extraArgs...)
 			evt := readInitEvent(t, home, tc.expectedCommand)
 
 			if evt.AppName != "beads" {

@@ -110,7 +110,7 @@ func runHistory(ctx context.Context, backend historyBackend, issueID string, lim
 
 	for i, entry := range history {
 		fmt.Printf("%s %s\n",
-			ui.RenderMuted(entry.CommitHash[:8]),
+			ui.RenderMuted(entry.CommitHash),
 			ui.RenderMuted(entry.CommitDate.Format("2006-01-02 15:04:05")))
 		// Committer, not "Author": this is who committed the enclosing Dolt
 		// commit, not necessarily who edited this issue (bd-rwd). Use

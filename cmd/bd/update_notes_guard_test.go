@@ -41,96 +41,6 @@ func TestErrEmptyAppendNotes(t *testing.T) {
 	}
 }
 
-// TestErrNotesReplacementRefused covers manifestations 1 and 2: a --notes
-// write silently replacing accumulated notes, and a --notes "" from a failed
-// expansion wiping the field. Both reported success and exit 0 before this.
-func TestErrNotesReplacementRefused(t *testing.T) {
-	tests := []struct {
-		name         string
-		existing     string
-		updates      map[string]any
-		replaceNotes bool
-		wantErr      bool
-		wantPhrase   string
-	}{
-		{
-			name:       "replacing existing notes is refused",
-			existing:   "three sessions of findings",
-			updates:    map[string]any{"notes": "FOURTH NOTE"},
-			wantErr:    true,
-			wantPhrase: "--append-notes",
-		},
-		{
-			name:       "empty value over existing notes is refused as an erase",
-			existing:   "three sessions of findings",
-			updates:    map[string]any{"notes": ""},
-			wantErr:    true,
-			wantPhrase: "erase",
-		},
-		{
-			name:       "whitespace-only value is still an erase",
-			existing:   "three sessions of findings",
-			updates:    map[string]any{"notes": "\n"},
-			wantErr:    true,
-			wantPhrase: "erase",
-		},
-		{
-			name:         "--replace-notes is the opt-in",
-			existing:     "three sessions of findings",
-			updates:      map[string]any{"notes": "deliberate reset"},
-			replaceNotes: true,
-			wantErr:      false,
-		},
-		{
-			name:     "nothing to destroy on an issue with no notes",
-			existing: "",
-			updates:  map[string]any{"notes": "first note"},
-			wantErr:  false,
-		},
-		{
-			name:     "rewriting the identical value destroys nothing",
-			existing: "unchanged",
-			updates:  map[string]any{"notes": "unchanged"},
-			wantErr:  false,
-		},
-		{
-			name:     "--append-notes is never destructive",
-			existing: "three sessions of findings",
-			updates:  map[string]any{storageissueops.OpAppendNotes: "a fourth"},
-			wantErr:  false,
-		},
-	}
-
-	for _, tt := range tests {
-		t.Run(tt.name, func(t *testing.T) {
-			err := errNotesReplacementRefused(tt.existing, tt.updates, tt.replaceNotes)
-			if tt.wantErr != (err != nil) {
-				t.Fatalf("errNotesReplacementRefused(%q, %#v, %t) error = %v, want error: %t",
-					tt.existing, tt.updates, tt.replaceNotes, err, tt.wantErr)
-			}
-			if !tt.wantErr {
-				return
-			}
-			// The message has to carry the escape hatch and say that nothing
-			// was written, because the whole complaint in bd-2mx is that the
-			// old report arrived after the data was already gone. The issue id
-			// is deliberately absent: the caller prefixes it.
-			if strings.Contains(err.Error(), "tc-1") {
-				t.Errorf("refusal %q spells the issue id, which its callers already print", err.Error())
-			}
-			for _, want := range []string{"nothing was written", "--replace-notes", tt.wantPhrase} {
-				if !strings.Contains(err.Error(), want) {
-					t.Errorf("refusal %q is missing %q", err.Error(), want)
-				}
-			}
-		})
-	}
-}
-
-// TestErrNotesWriteNotLanded is the post-condition half: a write whose effect
-// is absent from the stored row must report failure rather than print the
-// success line. It is deliberately fed a post-state that DISAGREES with the
-// request — the disagreement is the whole subject.
 func TestErrNotesWriteNotLanded(t *testing.T) {
 	tests := []struct {
 		name       string
@@ -237,5 +147,39 @@ func TestNotesIntentFromUpdates(t *testing.T) {
 				t.Errorf("notesIntentFromUpdates(%#v) = %#v, want %#v", tt.updates, got, tt.want)
 			}
 		})
+	}
+}
+
+// TestValidateNotesUpdateRejectsInlineEmpty pins the deliberate contrast with
+// the description guard: an inline empty value IS refused here, because a
+// dead command substitution reaches the flag layer as exactly that (GH#6021)
+// and notes has no stdin/file input to scope the guard to. The refusal must
+// name the verb that clears deliberately.
+func TestValidateNotesUpdateRejectsInlineEmpty(t *testing.T) {
+	err := validateNotesUpdate("")
+	if err == nil {
+		t.Fatal("expected inline empty notes to be rejected")
+	}
+	if !strings.Contains(err.Error(), "--clear-notes") {
+		t.Fatalf("expected refusal to name --clear-notes, got: %v", err)
+	}
+}
+
+func TestValidateNotesUpdateAllowsNonEmpty(t *testing.T) {
+	if err := validateNotesUpdate("handoff context"); err != nil {
+		t.Fatalf("expected non-empty notes to succeed, got: %v", err)
+	}
+}
+
+// TestUpdateRegistersClearNotes guards the wiring: the update command must
+// carry the verb the guard's refusal advertises. create does not register it
+// — a new issue has no notes to wipe, so `bd create --notes ""` is not the
+// GH#6021 hazard.
+func TestUpdateRegistersClearNotes(t *testing.T) {
+	if updateCmd.Flags().Lookup("clear-notes") == nil {
+		t.Fatal("expected update to register --clear-notes")
+	}
+	if createCmd.Flags().Lookup("clear-notes") != nil {
+		t.Fatal("create registers --clear-notes but has no wipe hazard; move the guard if this is now intended")
 	}
 }

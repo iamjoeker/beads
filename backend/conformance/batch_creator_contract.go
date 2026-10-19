@@ -5,6 +5,7 @@ import (
 	"errors"
 	"reflect"
 	"testing"
+	"time"
 
 	"github.com/steveyegge/beads/internal/storage"
 	"github.com/steveyegge/beads/internal/types"
@@ -96,6 +97,14 @@ func RunBatchCreatorCreatesEveryItemAsOneAct(t *testing.T, ctx context.Context, 
 		}
 		seen[issue.ID] = true
 		assertBatchCreatorRowCount(t, ctx, fixture, "issues", issue.ID, 1)
+		// No item names a creator, so each defaults to the batch's actor.
+		var createdBy string
+		if err := fixture.QueryScalar(ctx, "SELECT COALESCE(created_by, '') FROM issues WHERE id = ?", []any{issue.ID}, &createdBy); err != nil {
+			t.Fatalf("read created_by for %s: %v", issue.ID, err)
+		}
+		if createdBy != request.Actor || issue.CreatedBy != request.Actor {
+			t.Errorf("item %d created_by = %q (result %q), want the request's actor %q", i, createdBy, issue.CreatedBy, request.Actor)
+		}
 	}
 	if labels := result.Issues[0].Labels; len(labels) != 1 || labels[0] != "alpha" {
 		t.Errorf("result issue 0 labels = %v, want [alpha]: the snapshot is promised hydrated with labels", labels)
@@ -539,6 +548,46 @@ func RunBatchCreatorDoesNotMutateTheCallerRequest(t *testing.T, ctx context.Cont
 	}
 }
 
+// RunBatchCreatorEchoesSubSecondTimestamps is the batch half of
+// RunLifecycleCreateEchoesSubSecondTimestamps: every entry of a batch result
+// carries the timestamps its write sent, at full precision, not the whole
+// seconds the DATETIME(0) columns answer a re-read with.
+//
+// PER ITEM, because both bodies build the result one snapshot at a time and a
+// fix applied to the first item only would still pass a check on result[0].
+func RunBatchCreatorEchoesSubSecondTimestamps(t *testing.T, ctx context.Context, fixture BatchCreatorFixture) {
+	t.Helper()
+	first := time.Date(2019, 3, 4, 5, 6, 7, 123456789, time.UTC)
+	second := time.Date(2020, 4, 5, 6, 7, 8, 246813579, time.UTC)
+	request := publicops.CreateBatchRequest{
+		Actor: "batch-writer",
+		Items: []publicops.BatchCreateItem{
+			batchCreatorItem(&types.Issue{Title: "nano first", Priority: 2, IssueType: types.TypeTask, CreatedAt: first, UpdatedAt: first}),
+			batchCreatorItem(&types.Issue{Title: "nano second", Priority: 2, IssueType: types.TypeTask, CreatedAt: second, UpdatedAt: second}),
+		},
+	}
+	want := []time.Time{first, second}
+	result, err := fixture.BatchCreator.CreateBatch(ctx, request)
+	if err != nil {
+		t.Fatalf("CreateBatch with sub-second timestamps: %v", err)
+	}
+	if len(result.Issues) != len(want) {
+		t.Fatalf("CreateBatch returned %d issues for %d items", len(result.Issues), len(want))
+	}
+	for i, issue := range result.Issues {
+		if issue == nil {
+			t.Fatalf("CreateBatch result issue %d is nil", i)
+		}
+		if !issue.CreatedAt.Equal(want[i]) {
+			t.Errorf("result issue %d created_at = %v, want %v exactly — a batch echo rounded to the second cannot order same-second creates",
+				i, issue.CreatedAt.UTC(), want[i])
+		}
+		if !issue.UpdatedAt.Equal(want[i]) {
+			t.Errorf("result issue %d updated_at = %v, want %v exactly", i, issue.UpdatedAt.UTC(), want[i])
+		}
+	}
+}
+
 // batchCreatorItem is the item every case builds, so a case names only the
 // fields it is about.
 func batchCreatorItem(issue *types.Issue) publicops.BatchCreateItem {
@@ -647,4 +696,64 @@ func batchCreatorHistoryCount(t *testing.T, ctx context.Context, fixture BatchCr
 		t.Fatalf("count history entries: %v", err)
 	}
 	return entries
+}
+
+// RunBatchCreatorAppliesTheDefaultPriority pins BatchCreateItem.DefaultPriority:
+// an item that asks for the default stores publicops.DefaultCreatePriority, and
+// an item naming priority 0 stores P0 in the same batch. The default is
+// Lifecycle.Create's, applied in the shared preparation, so an HTTP
+// batchCreate without `priority` and a `bd create --file` template without one
+// land the same row. An item asking for the default while naming a priority is
+// ErrValidation and writes nothing, as it is for Lifecycle.Create.
+func RunBatchCreatorAppliesTheDefaultPriority(t *testing.T, ctx context.Context, fixture BatchCreatorFixture) {
+	t.Helper()
+	// Minted ids and an unset status, so the case asks nothing of the items
+	// but their priority — the http wire's batch item has no id or status slot.
+	unset := &types.Issue{Title: fixture.IssuePrefix + " defaulted", IssueType: types.TypeTask}
+	zero := &types.Issue{Title: fixture.IssuePrefix + " critical", IssueType: types.TypeTask}
+
+	result, err := fixture.BatchCreator.CreateBatch(ctx, publicops.CreateBatchRequest{
+		Actor: "batch-writer",
+		Items: []publicops.BatchCreateItem{
+			{Issue: unset, DefaultPriority: true},
+			{Issue: zero},
+		},
+	})
+	if err != nil {
+		t.Fatalf("CreateBatch: %v", err)
+	}
+	if len(result.Issues) != 2 || result.Issues[0] == nil || result.Issues[1] == nil {
+		t.Fatalf("result = %v, want two created issues", result.Issues)
+	}
+	for i, want := range []int{publicops.DefaultCreatePriority, 0} {
+		created := result.Issues[i]
+		if created.Priority != want {
+			t.Errorf("item %d result priority = %d, want %d", i, created.Priority, want)
+		}
+		var got int
+		if err := fixture.QueryScalar(ctx, "SELECT priority FROM issues WHERE id = ?", []any{created.ID}, &got); err != nil {
+			t.Fatalf("read priority of %s: %v", created.ID, err)
+		}
+		if got != want {
+			t.Errorf("item %d stored priority = %d, want %d", i, got, want)
+		}
+	}
+
+	conflict := fixture.IssuePrefix + " conflicting"
+	_, err = fixture.BatchCreator.CreateBatch(ctx, publicops.CreateBatchRequest{
+		Actor: "batch-writer",
+		Items: []publicops.BatchCreateItem{
+			{Issue: &types.Issue{Title: conflict, Priority: 3, IssueType: types.TypeTask}, DefaultPriority: true},
+		},
+	})
+	if !errors.Is(err, storage.ErrValidation) {
+		t.Fatalf("DefaultPriority with priority 3: err = %v, want ErrValidation", err)
+	}
+	var stored int
+	if err := fixture.QueryScalar(ctx, "SELECT COUNT(*) FROM issues WHERE title = ?", []any{conflict}, &stored); err != nil {
+		t.Fatalf("count issues titled %q: %v", conflict, err)
+	}
+	if stored != 0 {
+		t.Errorf("issues titled %q after the conflicting priority batch = %d, want 0", conflict, stored)
+	}
 }

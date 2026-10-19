@@ -4,6 +4,7 @@ import (
 	"fmt"
 	"strings"
 
+	"github.com/spf13/cobra"
 	storageissueops "github.com/steveyegge/beads/internal/storage/issueops"
 	"github.com/steveyegge/beads/internal/types"
 )
@@ -75,42 +76,6 @@ func notesIntentFromUpdates(updates map[string]any) notesIntent {
 	return intent
 }
 
-// errNotesReplacementRefused refuses, before the write, a --notes value that
-// would destroy notes the issue already carries.
-//
-// Two shapes reach here and the message separates them, because the operator
-// error behind each one is different:
-//
-//   - an empty value wipes the field, and the overwhelmingly likely cause is a
-//     shell expansion that produced nothing rather than a deliberate erase;
-//   - a non-empty value replaces the accumulated notes with just this one,
-//     which is the documented behavior of --notes but almost never what a
-//     caller chaining `bd update` calls intends.
-//
-// Callers that genuinely mean to discard what is there say so with
-// --replace-notes. An issue whose notes are empty, or a value identical to
-// what is already stored, destroys nothing and is not refused —
-// replacesExistingNotes decides that, so the refusal and the surviving
-// post-write warning agree on what "destructive" means by construction.
-//
-// The message carries no issue id: every caller prints it behind the command's
-// standard "Error updating <id>: " prefix and records it against the id in the
-// batch failure summary, so spelling it here doubled it in both.
-func errNotesReplacementRefused(existing string, updates map[string]any, replaceNotes bool) error {
-	if replaceNotes || !replacesExistingNotes(existing, updates) {
-		return nil
-	}
-	newNotes, _ := updates["notes"].(string)
-	if strings.TrimSpace(newNotes) == "" {
-		return fmt.Errorf("--notes was given an empty value and the issue has %d characters of notes, "+
-			"which this would erase; nothing was written. If the value came from a shell expansion it did not "+
-			"survive it. To erase the notes deliberately, pass --replace-notes", len(existing))
-	}
-	return fmt.Errorf("--notes replaces the notes field and the issue already has %d characters of notes, "+
-		"which this would discard; nothing was written. Use --append-notes to add to them, or --replace-notes "+
-		"to discard them deliberately", len(existing))
-}
-
 // errNotesWriteNotLanded compares the mutation's own post-state row against
 // what the caller asked to write, and reports a failure when the notes edit is
 // not in it.
@@ -146,4 +111,32 @@ func errNotesWriteNotLanded(intent notesIntent, after *types.Issue) error {
 			"notes (appended %d characters, stored row has %d)", len(intent.appended), len(after.Notes))
 	}
 	return nil
+}
+
+// validateNotesUpdate is the GH#6021 guard: `--notes ""` erases the whole
+// notes field, and the empty string is exactly what a dead command
+// substitution (`--notes "$(cat missing.txt)"`) collapses to — at the flag
+// layer the accident and the deliberate clear are the same bytes, so the
+// empty value is refused outright and the deliberate clear gets its own verb,
+// --clear-notes. That differs from the description guard twice over:
+// validateDescriptionUpdate guards only stdin/file input (where emptiness is
+// an input-plumbing property and --allow-empty-description unblocks the same
+// content flag), while notes has no file/stdin variant — inline is the only
+// path, clearing already-empty notes is a no-op, and what needs authorizing
+// is an intent, not a pipe. The notes-overwrite fence
+// (issueops.NotesReplacement) exempts clears by design and --force does not
+// reach here. Called only when --notes was explicitly passed.
+func validateNotesUpdate(notes string) error {
+	if notes != "" {
+		return nil
+	}
+	return fmt.Errorf(`--notes "" would clear the notes field (an empty command substitution is the usual accident); use --clear-notes to clear it deliberately`)
+}
+
+// clearNotesRequested reports whether --clear-notes asked for the deliberate
+// erase. Combining it with --notes or --append-notes is contradictory and
+// refused by cobra's mutual-exclusion registration on the update command.
+func clearNotesRequested(cmd *cobra.Command) bool {
+	clear, _ := cmd.Flags().GetBool("clear-notes")
+	return clear
 }

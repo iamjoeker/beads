@@ -130,7 +130,9 @@ func TestRecordingIssueUseCaseCoversItsSurface(t *testing.T) {
 		"has no name for a deletion and the row is gone (hook_deleter.go, hookTrackingTransaction.DeleteIssue)"
 	leases := "lease and claim bookkeeping the DoltStorage plumbing fires no hook for: " +
 		"HookFiringStore overrides neither UnclaimIssue, UnclaimIssueIfAssignee, HeartbeatIssue nor " +
-		"ReclaimExpiredLeases, so `bd unclaim` and `bd heartbeat` run no script on either plumbing"
+		"ReclaimExpiredLeases, so `bd unclaim` runs no script on either plumbing, and neither does a " +
+		"heartbeat through these doors (`bd heartbeat` takes the Heartbeater role, whose re-arm records " +
+		"an update through RenewLease)"
 
 	assertPartition(t, "IssueUseCase", interfaceMethods(reflect.TypeOf((*domain.IssueUseCase)(nil)).Elem()),
 		reflect.TypeOf((*recordingIssueUC)(nil)), map[string]string{
@@ -145,6 +147,7 @@ func TestRecordingIssueUseCaseCoversItsSurface(t *testing.T) {
 			"GetEpicsEligibleForClosure":   reads,
 			"GetIssue":                     reads,
 			"GetIssuesByIDs":               reads,
+			"GetMany":                      reads,
 			"GetNewlyUnblockedByClose":     reads,
 			"GetNewlyUnblockedByCloseWisp": reads,
 			"GetReadyWork":                 reads,
@@ -159,6 +162,7 @@ func TestRecordingIssueUseCaseCoversItsSurface(t *testing.T) {
 			"PreviewDeleteWisp":            reads,
 			"SearchIssueIDs":               reads,
 			"SearchIssues":                 reads,
+			"SearchWispsPlane":             reads,
 			"SearchIssuesWithCounts":       reads,
 			"DeleteIssue":                  deletes,
 			"DeleteIssues":                 deletes,
@@ -170,8 +174,9 @@ func TestRecordingIssueUseCaseCoversItsSurface(t *testing.T) {
 			"ReclaimExpiredLeases":         leases,
 			"WakeExpiredDefers": "the deferred-work sweep is a clock crossing rather than a user's " +
 				"mutation, and the DoltStorage plumbing fires nothing for it",
-			"PromoteWisp": "moves a row between planes without changing the bead; the DoltStorage " +
-				"plumbing has no promote hook either",
+			"PromoteWisp": "no route calls it: bd promote moves the row with ApplyUpdate's " +
+				"persistence spec, which records the update, and its DoltStorage twin, " +
+				"PromoteFromEphemeral, fires no hook either",
 		})
 }
 
@@ -200,6 +205,7 @@ func TestRecordingDependencyUseCaseCoversItsSurface(t *testing.T) {
 			"GetIssueDependencyRecords":            reads,
 			"GetWispDependencyRecords":             reads,
 			"IsBlocked":                            reads,
+			"IsBlockedBatch":                       reads,
 			"IsWispBlocked":                        reads,
 			"IterWispWithIssueMetadata":            reads,
 			"IterWithIssueMetadata":                reads,
@@ -294,11 +300,13 @@ func TestNotifyingProviderBuildsRolesOnItself(t *testing.T) {
 		"RunNonTx":      true,
 		"SetPoolLimits": true,
 		"Unwrap":        true,
-		// Events-journal capability plumbing: activation binds on the inner
-		// provider's transactions, and a retention pass writes no bead. Neither
-		// builds a role, so neither can build one "on itself".
-		"SetEventsJournalEnabled": true,
-		"RunEventsMaintenanceTx":  true,
+		// Events-journal and versioned-history capability plumbing: activation
+		// for both binds on the inner provider's transactions, and a retention
+		// pass writes no bead. None of these build a role, so none of them can
+		// build one "on itself".
+		"SetEventsJournalEnabled":    true,
+		"RunEventsMaintenanceTx":     true,
+		"SetVersionedHistoryEnabled": true,
 	}
 
 	var checked int

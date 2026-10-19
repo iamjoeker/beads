@@ -245,9 +245,10 @@ func runWispCreateCore(cmd *cobra.Command, args []string) error {
 	if err == nil {
 		subgraph = sg
 		protoID = sg.Root.ID
-	} else if errors.Is(err, formula.ErrVarValidation) {
-		// args[0] IS a formula; the --var values it was given fail
-		// enum/pattern/required-empty constraints. Report that directly
+	} else if errors.Is(err, formula.ErrVarValidation) || errors.Is(err, formula.ErrValidation) {
+		// args[0] IS a formula; either the formula itself does not
+		// validate, or the --var values it was given fail enum/pattern/
+		// required-empty constraints. Report that directly
 		// instead of falling through to the legacy proto-ID lookup below,
 		// which would otherwise mask this as "not found as formula or proto".
 		return HandleError("%v", err)
@@ -304,7 +305,7 @@ func runWispCreateCore(cmd *cobra.Command, args []string) error {
 	vars = applyVariableDefaults(vars, subgraph)
 
 	if err := checkRequiredVars(subgraph, vars); err != nil {
-		return HandleErrorWithHint(err.Error(), fmt.Sprintf("Provide them with: --var %s=<value>", firstMissingVar(subgraph, vars)))
+		return handleVarErrorWithHint(err, firstMissingVar(subgraph, vars))
 	}
 
 	wispType, err := resolveWispType(in.wispType, in.wispTypeSet, vars)
@@ -319,7 +320,7 @@ func runWispCreateCore(cmd *cobra.Command, args []string) error {
 
 	result, err := spawnMoleculeWithOptions(ctx, store, subgraph, CloneOptions{
 		Vars:      vars,
-		Actor:     actor,
+		Actor:     currentActor(),
 		Ephemeral: true,
 		WispType:  wispType,
 		Prefix:    types.IDPrefixWisp,
@@ -342,7 +343,7 @@ func checkRequiredVars(subgraph *TemplateSubgraph, vars map[string]string) error
 	if len(missingVars) > 0 {
 		return fmt.Errorf("missing required variables: %s", strings.Join(missingVars, ", "))
 	}
-	return nil
+	return checkUnknownVars(subgraph, nil, vars)
 }
 
 func firstMissingVar(subgraph *TemplateSubgraph, vars map[string]string) string {
@@ -885,6 +886,12 @@ A wisp is considered abandoned if:
         escalation is an unresolved incident and wisps have no restore path.
     No flag overrides either — delete one deliberately with 'bd delete'.
 
+Wisps that depend on an abandoned wisp are deleted with it, closed ones
+included even without --all, but only if they too haven't been updated in
+--age duration and are not live work. A dependent that is too young is
+spared and loses its edge to the deleted wisp: an open one is collected once
+it ages out, a closed one only by --all, --closed or 'bd purge'.
+
 Abandoned wisps are deleted without creating a digest. Use 'bd mol squash'
 if you want to preserve a summary before garbage collection.
 
@@ -1091,17 +1098,42 @@ func runWispGC(cmd *cobra.Command, args []string) error {
 		ids[i] = issue.ID
 	}
 	// Cascade must stay OFF here too. findAbandonedWisps has already expanded
-	// dependents and kept only the unprotected ones, so a deleteBatch cascade
-	// would re-expand from that set to ALL transitive dependents — including
-	// blocked/in-progress steps that isProtectedWisp just excluded (GH#4394's
-	// protection is only enforced in the pre-filter; cascade bypasses it).
+	// dependents and kept only the unprotected ones that meet --age, so a
+	// deleteBatch cascade would re-expand from that set to ALL transitive
+	// dependents — including blocked/in-progress steps that isProtectedWisp
+	// just excluded (GH#4394's protection is only enforced in the pre-filter;
+	// cascade bypasses it) and fresh steps the --age check just spared.
 	// Without cascade the list is deleted exactly as filtered and live
 	// dependents are orphaned (edges dropped, is_blocked recomputed).
-	if err := deleteBatch(nil, ids, true, false, false, jsonOutput, false, "wisp gc"); err != nil {
+	if err := deleteBatch(nil, ids, true, false, false, jsonOutput, false, nil, "wisp gc"); err != nil {
 		return HandleError("%v", err)
 	}
 	return nil
 }
+
+// wispIsAbandoned reports whether a wisp counts as abandoned for GC
+// purposes: it has not been updated within ageThreshold of now.
+//
+// ageThreshold <= 0 (--age 0s and below) always reports true, bypassing
+// the clock comparison entirely — this matches the GC's own documented
+// contract ("hasn't been updated in --age duration"): nothing has been
+// updated in the last zero seconds. It also matters for a reason the
+// comparison alone does not handle: Dolt's DATETIME(0) column rounds
+// fractional seconds half-up on write rather than truncating (#7236), so
+// a wisp created in the second half of a wall-clock second can read back
+// with updatedAt up to 0.5s in the future. now.Sub(updatedAt) is then
+// negative, failing a strict > comparison for a wisp that is, by
+// definition, not yet one second old — exactly what --age 0s's "every
+// wisp qualifies" contract exists to avoid depending on in the first
+// place.
+func wispIsAbandoned(now, updatedAt time.Time, ageThreshold time.Duration) bool {
+	return ageThreshold <= 0 || now.Sub(updatedAt) > ageThreshold
+}
+
+// wispGCNow is the clock seam for findAbandonedWisps' age check, swappable in
+// tests. Both gc routes read it, so a test that swaps it must not call
+// t.Parallel().
+var wispGCNow = time.Now
 
 // findAbandonedWisps returns the age-reclaimable wisps and, separately, how
 // many candidates the GC protection held back — a protected label or a
@@ -1136,7 +1168,7 @@ func findAbandonedWisps(ctx context.Context, r molReader, cleanAll bool, ageThre
 	}
 	protectedLabels := resolveGCProtectedLabels(ctx, r)
 
-	now := time.Now()
+	now := wispGCNow()
 	// Counted as a SET, not a counter: the cascade pass below re-examines
 	// wisps the first pass already ruled on, and a protection reported twice
 	// for one bead reads as two records saved.
@@ -1154,12 +1186,12 @@ func findAbandonedWisps(ctx context.Context, r molReader, cleanAll bool, ageThre
 			// taken: a label-protected wisp younger than the threshold was
 			// never a candidate, and reporting it would make the protection
 			// look like it fired on every run.
-			if protectedLabels.Protects(issue) && now.Sub(issue.UpdatedAt) > ageThreshold {
+			if protectedLabels.Protects(issue) && wispIsAbandoned(now, issue.UpdatedAt, ageThreshold) {
 				labelProtected[issue.ID] = true
 			}
 			continue
 		}
-		if now.Sub(issue.UpdatedAt) > ageThreshold {
+		if wispIsAbandoned(now, issue.UpdatedAt, ageThreshold) {
 			abandoned = append(abandoned, issue)
 		}
 	}
@@ -1178,12 +1210,18 @@ func findAbandonedWisps(ctx context.Context, r molReader, cleanAll bool, ageThre
 		for id := range childIDs {
 			childIDSlice = append(childIDSlice, id)
 		}
+		// TODO(batchgetter): unbounded id list; see issueops.BatchGetter's doc
+		// and the importIssueLookup TODO in import_shared.go for why this is
+		// not yet routed through the role.
 		childIssues, fetchErr := r.GetIssuesByIDs(ctx, childIDSlice)
 		if fetchErr == nil {
 			abandonedSet := make(map[string]bool, len(abandoned))
 			for _, issue := range abandoned {
 				abandonedSet[issue.ID] = true
 			}
+			// Dependents skip the parent scan's not-closed clause: an
+			// abandoned molecule's finished steps go with it, even without
+			// --all.
 			for _, child := range childIssues {
 				if abandonedSet[child.ID] {
 					continue
@@ -1195,6 +1233,12 @@ func findAbandonedWisps(ctx context.Context, r molReader, cleanAll bool, ageThre
 					if protectedLabels.Protects(child) {
 						labelProtected[child.ID] = true
 					}
+					continue
+				}
+				// Children are held to the same --age contract as parents. One
+				// spared here is detached when its parent is deleted, so a
+				// closed one is left for --all, --closed or bd purge.
+				if !wispIsAbandoned(now, child.UpdatedAt, ageThreshold) {
 					continue
 				}
 				abandoned = append(abandoned, child)
@@ -1339,7 +1383,7 @@ func runWispPurgeClosed(ctx context.Context, dryRun bool, force bool, excludeTyp
 	// Without cascade, closed wisps are deleted and live dependents are
 	// orphaned (edges dropped, is_blocked recomputed) — the same semantics as
 	// a plain `bd delete`.
-	if err := deleteBatch(nil, ids, force, dryRun, false, jsonOutput, false, "wisp gc --closed"); err != nil {
+	if err := deleteBatch(nil, ids, force, dryRun, false, jsonOutput, false, nil, "wisp gc --closed"); err != nil {
 		return HandleError("%v", err)
 	}
 
@@ -1351,13 +1395,13 @@ func runWispPurgeClosed(ctx context.Context, dryRun bool, force bool, excludeTyp
 
 func init() {
 	// Wisp command flags (for direct create: bd mol wisp <proto>)
-	wispCmd.Flags().StringArray("var", []string{}, "Variable substitution (key=value)")
+	wispCmd.Flags().StringArray("var", []string{}, "Variable substitution (key=value); a name the proto cannot consume is an error")
 	wispCmd.Flags().Bool("dry-run", false, "Preview what would be created")
 	wispCmd.Flags().Bool("root-only", false, "Create only the root issue (no child step issues)")
 	wispCmd.Flags().String("wisp-type", "", wispTypeFlagUsage)
 
 	// Wisp create command flags (kept for backwards compat: bd mol wisp create <proto>)
-	wispCreateCmd.Flags().StringArray("var", []string{}, "Variable substitution (key=value)")
+	wispCreateCmd.Flags().StringArray("var", []string{}, "Variable substitution (key=value); a name the proto cannot consume is an error")
 	wispCreateCmd.Flags().Bool("dry-run", false, "Preview what would be created")
 	wispCreateCmd.Flags().Bool("root-only", false, "Create only the root issue (no child step issues)")
 	wispCreateCmd.Flags().String("wisp-type", "", wispTypeFlagUsage)

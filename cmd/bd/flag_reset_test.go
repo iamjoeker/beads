@@ -383,7 +383,7 @@ func TestResetCommandTreeFlagStateReplacesSliceValues(t *testing.T) {
 	root.AddCommand(child)
 
 	findAndParse(t, root, "list", "--label", "alpha")
-	if got := []string{"alpha"}; !equalStrings(labels, got) {
+	if got := []string{"alpha"}; !equalFlagStrings(labels, got) {
 		t.Fatalf("first parse: labels = %v, want %v", labels, got)
 	}
 
@@ -393,7 +393,7 @@ func TestResetCommandTreeFlagStateReplacesSliceValues(t *testing.T) {
 	}
 
 	findAndParse(t, root, "list", "--label", "beta")
-	if got := []string{"beta"}; !equalStrings(labels, got) {
+	if got := []string{"beta"}; !equalFlagStrings(labels, got) {
 		t.Fatalf("second parse: labels = %v, want %v — the first command's value survived the reset", labels, got)
 	}
 }
@@ -459,12 +459,12 @@ func TestSnapshotCommandTreeFlagStateRoundTrips(t *testing.T) {
 	if !actorFlag.Changed {
 		t.Error("--actor Changed = false, want true")
 	}
-	if want := []string{"kept"}; !equalStrings(labels, want) {
+	if want := []string{"kept"}; !equalFlagStrings(labels, want) {
 		t.Errorf("--label = %v, want %v", labels, want)
 	}
 }
 
-func equalStrings(got, want []string) bool {
+func equalFlagStrings(got, want []string) bool {
 	if len(got) != len(want) {
 		return false
 	}

@@ -166,8 +166,8 @@ func TestZeroRemoteStoreNeverReachesSmartRouter(t *testing.T) {
 			mock.ExpectQuery(`SELECT COUNT\(\*\) FROM dolt_remotes`).
 				WillReturnRows(sqlmock.NewRows([]string{"count"}).AddRow(0))
 
-			err := CheckRemoteMigrateGateForRemoteWithRemoteCheck(
-				context.Background(), db, "upstream", tc.extraHasRemote)
+			err := CheckRemoteMigrateGateForRemoteWithRemoteCheckAndAdopt(
+				context.Background(), db, "upstream", tc.extraHasRemote, nil)
 			if err != nil {
 				t.Fatalf("a database with no remotes has no cross-clone fork risk "+
 					"and must not be gated, got %v", err)
@@ -204,8 +204,8 @@ func TestSmartGateDoesNotBlockOnMismatchedRemoteName(t *testing.T) {
 	// Configured sync remote is "upstream"; the only real remote is "origin".
 	expectSmartReadResolving(mock, []string{"origin"}, "origin", hashes, hashes)
 
-	err := CheckRemoteMigrateGateForRemoteWithRemoteCheck(
-		context.Background(), db, "upstream", func() bool { return true })
+	err := CheckRemoteMigrateGateForRemoteWithRemoteCheckAndAdopt(
+		context.Background(), db, "upstream", func() bool { return true }, nil)
 	if err != nil {
 		t.Fatalf("gate must resolve the remote name and allow the first-mover migrate, got %v", err)
 	}
@@ -230,8 +230,8 @@ func TestSmartGateStillBlocksOnGenuineForkSkew(t *testing.T) {
 	remote := map[int]string{floor - 1: "h1", floor: "DIVERGED"}
 	expectSmartReadResolving(mock, []string{"origin"}, "origin", local, remote)
 
-	err := CheckRemoteMigrateGateForRemoteWithRemoteCheck(
-		context.Background(), db, "upstream", func() bool { return true })
+	err := CheckRemoteMigrateGateForRemoteWithRemoteCheckAndAdopt(
+		context.Background(), db, "upstream", func() bool { return true }, nil)
 	var gateErr *RemoteMigrateGateError
 	if !errors.As(err, &gateErr) {
 		t.Fatalf("a genuine fork must still be blocked, got %v", err)

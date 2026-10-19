@@ -27,6 +27,7 @@ import (
 
 	"github.com/steveyegge/beads/internal/testenv"
 	"github.com/steveyegge/beads/internal/testutil"
+	"github.com/steveyegge/beads/internal/testutil/bazeltest"
 )
 
 // ---------------------------------------------------------------------------
@@ -57,7 +58,9 @@ func testMainInner(m *testing.M) int {
 	// AD-01 (be-c5p): allow protocol tests to connect to the spawned test server.
 	os.Setenv("BEADS_TEST_SERVER", "1")
 	if err := testutil.EnsureDoltContainerForTestMain(); err != nil {
-		fmt.Fprintf(os.Stderr, "WARN: %v, skipping Dolt tests\n", err)
+		if testutil.DoltUnavailableForTestMain(err) {
+			return 1
+		}
 	} else {
 		defer testutil.TerminateDoltContainer()
 		testDoltPort = testutil.DoltContainerPortInt()
@@ -105,6 +108,12 @@ func requireDoltStore(t *testing.T, what string) {
 func buildBD(t *testing.T) string {
 	t.Helper()
 	bdOnce.Do(func() {
+		// Under Bazel the binary is injected (//cmd/bd:bd_for_tests); there is
+		// no toolchain or module tree to build from. Plain go test is unchanged.
+		if bazeltest.IsBazel() {
+			bdPath, bdErr = bazeltest.PrebuiltBD()
+			return
+		}
 		bin := "bd-protocol"
 		if runtime.GOOS == "windows" {
 			bin += ".exe"
@@ -127,6 +136,9 @@ func buildBD(t *testing.T) string {
 			bdErr = fmt.Errorf("go build: %w\n%s", err, out)
 		}
 	})
+	if bdErr != nil && bazeltest.IsBazel() {
+		t.Fatalf("bd binary for tests: %v", bdErr) // a wiring bug, never a skip
+	}
 	if bdErr != nil {
 		t.Skipf("skipping: failed to build bd: %v", bdErr)
 	}

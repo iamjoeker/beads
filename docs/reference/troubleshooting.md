@@ -471,6 +471,18 @@ don't know", not "this is definitely broken". A genuinely missing or
 broken `dolt` binary (not found, not executable, or the probe itself
 fails/times out) is a hard error, not a warning.
 
+### Prefix routing: "proxy server store needs to be uow provider"
+
+A lookup routed through the orchestrator's `routes.jsonl` prefix routes
+fails with this error when the rig that owns the prefix is itself running in
+proxied-server mode — routed reads cannot open a proxied-server rig. In an
+all-proxied shared-server topology that applies to every routed target, so
+cross-rig bead gates and a plain `bd show <routed-id>` both dead-end here.
+
+Run the command from the owning rig's own workspace instead, where the ID
+resolves locally rather than through a route. Tracked in
+[#5861](https://github.com/gastownhall/beads/issues/5861).
+
 ## Sync Issues
 
 ### Changes not syncing
@@ -550,16 +562,20 @@ export BEADS_HOOK_TIMEOUT=600  # 10 minutes (in seconds)
 
 The value must be a positive whole number of seconds. Invalid values and zero
 warn and fall back to 300 seconds. Beads accepts `timeout` or `gtimeout` only
-when a successful version probe identifies GNU coreutils; native Windows
-`timeout.exe` is not compatible. If neither GNU timeout nor Perl is available,
-the hook warns that it is running directly without a deadline.
+when a successful version probe identifies GNU coreutils or uutils coreutils;
+native Windows `timeout.exe` is not compatible. If neither a coreutils timeout
+nor Perl is available, the hook warns that it is running directly without a
+deadline.
 
-GNU timeout sends `TERM`; on POSIX hosts, Perl's alarm applies to the direct
-`bd` process. Git for Windows Perl does not guarantee that alarm across
-`exec`, so GNU coreutils is preferred there. TERM-resistant work and
-descendant processes are not guaranteed to stop. After upgrading from a
-version with the name-only timeout check, run `bd hooks install` once to
-refresh existing canonical sections.
+The coreutils helper sends `TERM`; on POSIX hosts, Perl's alarm applies to the
+direct `bd` process. Git for Windows Perl does not guarantee that alarm across
+`exec`, so a coreutils `timeout` (GNU or uutils) is preferred there.
+TERM-resistant work and descendant processes are not guaranteed to stop.
+
+Already-installed hook sections are not refreshed automatically. After upgrading
+to a version that changed the timeout probe — the name-only check, or the uutils
+coreutils banner — run `bd hooks install` once to refresh existing canonical
+sections.
 
 ### Permission denied on git hooks
 

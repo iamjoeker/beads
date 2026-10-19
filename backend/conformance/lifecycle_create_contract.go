@@ -490,6 +490,12 @@ func RunLifecycleCreateWritesEveryScalarField(t *testing.T, ctx context.Context,
 		t.Errorf("%s created_at = %v after a create that named none, want a stamp between %v and %v — a bare non-empty check would accept the zero time",
 			stamped, autoStamp, lower, upper)
 	}
+	// And no created_by: the request's actor is the creator (CreateRequest.Issue),
+	// stamped by the role itself, so a library caller and every front door store
+	// the same value for the same request.
+	if got := lifecycleCreateRow(t, ctx, fixture, stamped).CreatedBy; got != "writer" {
+		t.Errorf("%s created_by = %q after a create that named none, want the request's actor %q", stamped, got, "writer")
+	}
 
 	want := []lifecycleCreateMember{
 		{"title", "created title"},
@@ -562,6 +568,79 @@ func assertLifecycleCreateMembers(t *testing.T, id, label string, issue *types.I
 		if got[i].value != member.value {
 			t.Errorf("%s %s %s = %q, want %q", id, label, member.name, got[i].value, member.value)
 		}
+	}
+}
+
+// RunLifecycleCreateEchoesSubSecondTimestamps pins that a create RESULT carries
+// the timestamps the write actually sent, at full precision, rather than the
+// whole seconds a read of the row answers with.
+//
+// created_at/updated_at are DATETIME(0) columns, so any snapshot built by
+// re-reading the row it just wrote comes back rounded. That is fine for every
+// read verb — show and list have always answered whole seconds — but create is
+// different: its echo is the ONLY record a caller has of the instant the row was
+// written, and agents order same-second creates by it. A backend that hydrates
+// its create result and stops there silently loses that ordering, which is
+// exactly the regression this case exists for.
+//
+// THE PRECISION PIN IS THE EXPLICIT ARM, not the auto-stamped one. A create that
+// names no time is stamped from the clock, and whether that stamp happens to
+// carry a non-zero fraction is not something a test can require without being
+// flaky by a billionth; a caller-supplied time with nanoseconds in it is
+// deterministic, and PrepareIssueForInsert preserves a non-zero input. The
+// auto-stamp arm is kept as a bounded smoke check that the overlay did not
+// replace the stamp with something unrelated.
+//
+// The stored ROW is deliberately NOT asserted here. What it rounds to is the
+// column's business, and a later widening to DATETIME(6) must not have to edit
+// this case.
+func RunLifecycleCreateEchoesSubSecondTimestamps(t *testing.T, ctx context.Context, fixture LifecycleCreateFixture) {
+	t.Helper()
+
+	id := fixture.IssuePrefix + "-lcc-nanoecho"
+	createdAt := time.Date(2019, 3, 4, 5, 6, 7, 123456789, time.UTC)
+	updatedAt := time.Date(2019, 3, 4, 5, 6, 8, 987654321, time.UTC)
+	created, err := fixture.Lifecycle.Create(ctx, publicops.CreateRequest{
+		Actor:         "writer",
+		ForceIDPrefix: true,
+		Issue: &types.Issue{
+			ID: id, Title: "sub-second echo", Status: types.StatusOpen, Priority: 2, IssueType: types.TypeTask,
+			CreatedAt: createdAt, UpdatedAt: updatedAt,
+		},
+	})
+	if err != nil {
+		t.Fatalf("create %s with sub-second timestamps: %v", id, err)
+	}
+	if created.Issue == nil {
+		t.Fatalf("create %s returned no issue", id)
+	}
+	if !created.Issue.CreatedAt.Equal(createdAt) {
+		t.Errorf("%s create result created_at = %v, want %v exactly — the echo is the caller's only record of when the row was written, and rounding it to the second makes same-second creates unorderable",
+			id, created.Issue.CreatedAt.UTC(), createdAt)
+	}
+	if !created.Issue.UpdatedAt.Equal(updatedAt) {
+		t.Errorf("%s create result updated_at = %v, want %v exactly", id, created.Issue.UpdatedAt.UTC(), updatedAt)
+	}
+
+	// The auto-stamped arm: no precision requirement, only that the overlay
+	// still hands back a stamp from this call rather than a stale or zero one.
+	stamped := fixture.IssuePrefix + "-lcc-nanoauto"
+	lower := time.Now().UTC().Add(-lifecycleCreateClockSlack)
+	auto, err := fixture.Lifecycle.Create(ctx, publicops.CreateRequest{
+		Actor:         "writer",
+		ForceIDPrefix: true,
+		Issue:         lifecycleCreateIssue(stamped),
+	})
+	if err != nil {
+		t.Fatalf("create %s without timestamps: %v", stamped, err)
+	}
+	upper := time.Now().UTC().Add(lifecycleCreateClockSlack)
+	if auto.Issue == nil {
+		t.Fatalf("create %s returned no issue", stamped)
+	}
+	echoed := auto.Issue.CreatedAt.UTC()
+	if echoed.Before(lower) || echoed.After(upper) {
+		t.Errorf("%s create result created_at = %v, want a stamp from this call between %v and %v", stamped, echoed, lower, upper)
 	}
 }
 
@@ -730,4 +809,55 @@ func lifecycleCreatePlaneName(ephemeral bool) string {
 		return "ephemeral"
 	}
 	return "durable"
+}
+
+// RunLifecycleCreateAppliesTheDefaultPriority pins
+// CreateRequest.DefaultPriority: a create that asks for the default stores
+// publicops.DefaultCreatePriority, and one that names priority 0 stores P0 —
+// the zero value is a real priority, never "absent". Asking for the default
+// while naming a priority is ErrValidation and writes nothing.
+//
+// It is the one place the default lives: `bd create` without --priority and an
+// HTTP create without `priority` both reach it through this flag, so a backend
+// that dropped it would store P0 (critical) for every such create.
+func RunLifecycleCreateAppliesTheDefaultPriority(t *testing.T, ctx context.Context, fixture LifecycleCreateFixture) {
+	t.Helper()
+	defaulted := fixture.IssuePrefix + "-prio-default"
+	critical := fixture.IssuePrefix + "-prio-zero"
+	conflict := fixture.IssuePrefix + "-prio-conflict"
+
+	for _, tc := range []struct {
+		id         string
+		priority   int
+		useDefault bool
+		want       int
+	}{
+		{id: defaulted, useDefault: true, want: publicops.DefaultCreatePriority},
+		{id: critical, priority: 0, want: 0},
+	} {
+		created, err := fixture.Lifecycle.Create(ctx, publicops.CreateRequest{
+			Actor:           "writer",
+			DefaultPriority: tc.useDefault,
+			Issue:           &types.Issue{ID: tc.id, Title: tc.id, Priority: tc.priority, IssueType: types.TypeTask},
+		})
+		if err != nil {
+			t.Fatalf("create %s: %v", tc.id, err)
+		}
+		if created.Issue.Priority != tc.want {
+			t.Errorf("create %s result priority = %d, want %d", tc.id, created.Issue.Priority, tc.want)
+		}
+		if got := lifecycleCreateRow(t, ctx, fixture, tc.id).Priority; got != tc.want {
+			t.Errorf("stored %s priority = %d, want %d", tc.id, got, tc.want)
+		}
+	}
+
+	_, err := fixture.Lifecycle.Create(ctx, publicops.CreateRequest{
+		Actor:           "writer",
+		DefaultPriority: true,
+		Issue:           &types.Issue{ID: conflict, Title: conflict, Priority: 3, IssueType: types.TypeTask},
+	})
+	if !errors.Is(err, storage.ErrValidation) {
+		t.Fatalf("DefaultPriority with priority 3: err = %v, want ErrValidation", err)
+	}
+	assertLifecycleCreateAbsent(t, ctx, fixture, conflict, "after the conflicting priority create")
 }

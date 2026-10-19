@@ -8,16 +8,16 @@ import (
 	"github.com/steveyegge/beads/internal/types"
 )
 
-// fakeResolverStore is an in-memory PartialIDResolverStore holding the two
+// wispPlaneFakeStore is an in-memory PartialIDResolverStore holding the two
 // planes separately. SearchIssues never merges wisps, which models the
 // transaction-level store the wisp fallback in ResolvePartialID exists for.
-type fakeResolverStore struct {
+type wispPlaneFakeStore struct {
 	issues []string
 	wisps  []string
 	config map[string]string
 }
 
-func (f *fakeResolverStore) SearchIssues(ctx context.Context, query string, filter types.IssueFilter) ([]*types.Issue, error) {
+func (f *wispPlaneFakeStore) SearchIssues(ctx context.Context, query string, filter types.IssueFilter) ([]*types.Issue, error) {
 	ids, err := f.SearchIssueIDs(ctx, query, filter)
 	if err != nil {
 		return nil, err
@@ -29,7 +29,7 @@ func (f *fakeResolverStore) SearchIssues(ctx context.Context, query string, filt
 	return issues, nil
 }
 
-func (f *fakeResolverStore) SearchIssueIDs(ctx context.Context, query string, filter types.IssueFilter) ([]string, error) {
+func (f *wispPlaneFakeStore) SearchIssueIDs(ctx context.Context, query string, filter types.IssueFilter) ([]string, error) {
 	pool := f.issues
 	if filter.Ephemeral != nil && *filter.Ephemeral {
 		pool = f.wisps
@@ -54,7 +54,7 @@ func (f *fakeResolverStore) SearchIssueIDs(ctx context.Context, query string, fi
 	return out, nil
 }
 
-func (f *fakeResolverStore) GetConfig(ctx context.Context, key string) (string, error) {
+func (f *wispPlaneFakeStore) GetConfig(ctx context.Context, key string) (string, error) {
 	return f.config[key], nil
 }
 
@@ -63,7 +63,7 @@ func (f *fakeResolverStore) GetConfig(ctx context.Context, key string) (string, 
 // wisp; a bare hash names no plane, so it may reach either (bd-qsw).
 func TestResolvePartialID_WispPlaneMarker(t *testing.T) {
 	ctx := context.Background()
-	store := &fakeResolverStore{
+	store := &wispPlaneFakeStore{
 		issues: []string{"hq-a3f8e9"},
 		wisps:  []string{"hq-wisp-gyn1c8", "hq-custom1"},
 		config: map[string]string{"issue_prefix": "hq"},
@@ -154,7 +154,7 @@ func TestResolvePartialID_WispPlaneMarker(t *testing.T) {
 // message lists all near misses deterministically instead of picking one.
 func TestResolvePartialID_CrossPlaneReportsEveryCandidate(t *testing.T) {
 	ctx := context.Background()
-	store := &fakeResolverStore{
+	store := &wispPlaneFakeStore{
 		wisps:  []string{"hq-wisp-gyn9zz", "hq-wisp-gyn1c8"},
 		config: map[string]string{"issue_prefix": "hq"},
 	}
@@ -174,7 +174,7 @@ func TestResolvePartialID_CrossPlaneReportsEveryCandidate(t *testing.T) {
 // hash prefix must remain ambiguous rather than silently picking one.
 func TestResolvePartialID_BareHashWispAmbiguityStillReported(t *testing.T) {
 	ctx := context.Background()
-	store := &fakeResolverStore{
+	store := &wispPlaneFakeStore{
 		wisps:  []string{"hq-wisp-gyn9zz", "hq-wisp-gyn1c8"},
 		config: map[string]string{"issue_prefix": "hq"},
 	}
