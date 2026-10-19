@@ -2901,6 +2901,8 @@ type CountIssuesParams struct {
 	// IT IS THE PARAMETER THAT MAKES A COUNT COMPARABLE TO A LISTING. A workspace that keeps records other than work as ordinary labeled beads narrows its listings with the same exclusion, and a count taken without it answers about a strictly larger set — the number and the rows disagreeing about the same queue.
 	//
 	// THE SERVER APPLIES NO DEFAULT HERE, which is the difference from `bd count`. That command layers its workspace's `list.exclude-labels` configuration under whatever the caller typed, and offers `--include-hidden` to drop it. This operation excludes exactly what the request names and nothing else: a server that added its own configured exclusions would be filtering a client's count by a rule the client cannot see and has no parameter to turn off.
+	//
+	// Behind the `issues.count.scope` behavior token: an older server answers `unknown_parameter` for this name.
 	ExcludeLabel *[]string `form:"exclude_label,omitempty" json:"exclude_label,omitempty"`
 
 	// Title Case-insensitive substring match on the title.

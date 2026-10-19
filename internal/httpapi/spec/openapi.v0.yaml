@@ -2661,6 +2661,10 @@ paths:
             the request names and nothing else: a server that added its own
             configured exclusions would be filtering a client's count by a rule
             the client cannot see and has no parameter to turn off.
+
+
+            Behind the `issues.count.scope` behavior token: an older server
+            answers `unknown_parameter` for this name.
           schema:
             type: array
             items:
