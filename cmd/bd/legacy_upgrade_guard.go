@@ -24,6 +24,19 @@ import (
 // SQLite files, and the bounded local version witness; storage internals stay
 // behind the driver boundary.
 func guardLegacyUpgradeWorkspace(beadsDir string) error {
+	return guardLegacyUpgradeWorkspaceForInit(beadsDir, false)
+}
+
+// guardLegacyUpgradeWorkspaceForInit is guardLegacyUpgradeWorkspace for a caller
+// that has already resolved server intent from a source the workspace does not
+// yet record: `bd init --server`, whose flag is the only place that choice lives
+// until init has written it. The guard cannot see the flag, so initSelectsServer
+// carries it in. It is consulted for exactly one thing, the empty-root admission
+// below, and is deliberately not folded into the workspace's own server mode:
+// that would also move a non-empty root with an unreadable witness onto the
+// warn-and-open arm, and an embedded repository beside a non-empty .beads/dolt
+// onto the refusing one.
+func guardLegacyUpgradeWorkspaceForInit(beadsDir string, initSelectsServer bool) error {
 	if beadsDir == "" {
 		return nil
 	}
@@ -73,6 +86,15 @@ func guardLegacyUpgradeWorkspace(beadsDir string) error {
 		// selecting server mode would have moved shared-server workspaces bd
 		// admits today onto the refusing arm: the mode changed, the evidence
 		// did not.
+		return nil
+	}
+	if initSelectsServer && !present && isEmptyDirectory(filepath.Join(beadsDir, "dolt")) {
+		// Init has already chosen a server, so this is the empty root the
+		// serverMode arm below admits for a workspace that records the choice: it
+		// holds no Dolt data a legacy release could have left, and bd makes it
+		// itself on use, so a retry after a first attempt that could not reach a
+		// server finds exactly this. A present witness, a root holding any entry,
+		// and every caller that does not pass the flag are decided as before.
 		return nil
 	}
 	if serverMode {
@@ -469,7 +491,19 @@ func isLegacyUpgradeUnclassified(err error) bool {
 // the authorization question belongs to checkExistingBeadsData and ADR 0002,
 // not to a classifier that could not read the input.
 func guardLegacyUpgradeRepairPath(beadsDir string) error {
-	err := guardLegacyUpgradeWorkspace(beadsDir)
+	return legacyUpgradeRepairVerdict(guardLegacyUpgradeWorkspace(beadsDir))
+}
+
+// guardLegacyUpgradeRepairPathForInit is guardLegacyUpgradeRepairPath for the
+// init path that knows whether init itself selects server mode, so the guard
+// judges the workspace by the mode init is about to write, not the one on disk.
+func guardLegacyUpgradeRepairPathForInit(beadsDir string, initSelectsServer bool) error {
+	return legacyUpgradeRepairVerdict(guardLegacyUpgradeWorkspaceForInit(beadsDir, initSelectsServer))
+}
+
+// legacyUpgradeRepairVerdict keeps a genuine refusal fatal and downgrades an
+// unclassifiable workspace to a warning, as the repair-path guards document.
+func legacyUpgradeRepairVerdict(err error) error {
 	if !isLegacyUpgradeUnclassified(err) {
 		return err
 	}
