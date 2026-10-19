@@ -463,6 +463,12 @@ func sharedServerPortOnlyTestEnv(t *testing.T) []string {
 		t.Fatalf("create shared server dir: %v", err)
 	}
 	t.Cleanup(func() { _ = os.RemoveAll(serverDir) })
+	// A subprocess `bd init`/`create` with shared-server mode daemonizes a dolt
+	// sql-server in THIS directory, and stopSharedServerCleanup resolves the
+	// process's own HOME-based shared dir, not this one, so it never finds it
+	// (wy-j2zc8q). Stop it here; cleanups run LIFO, so this precedes the
+	// RemoveAll above.
+	stopDoltServerCleanup(t, serverDir)
 	return append(os.Environ(),
 		"BEADS_SHARED_SERVER_DIR="+serverDir,
 		"BEADS_DOLT_SERVER_PORT="+strconv.Itoa(port),

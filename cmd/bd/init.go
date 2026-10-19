@@ -1267,7 +1267,16 @@ Non-interactive mode (--non-interactive or BD_NON_INTERACTIVE=1):
 		// Previous logic only created .beads/ when the dolt data dir was a
 		// subdirectory of .beads/, which broke server mode with external
 		// BEADS_DOLT_DATA_DIR or BEADS_DOLT_* env vars (GH#2519).
-		useLocalBeads := !hasExplicitBeadsDir || filepath.Clean(initDBDirAbs) == filepath.Clean(beadsDirAbs)
+		//
+		// "Explicit" here must mean the caller chose the beads dir, not that the
+		// root pre-run exported one it discovered (see beadsDirFromCaller). A
+		// redirect to a provisioned target is discovered that way, and in
+		// shared-server mode the Dolt data lives outside .beads, so counting the
+		// discovered export as explicit skipped metadata.json, config.yaml and
+		// the rest of the workspace files in the redirect target while still
+		// reporting success.
+		callerChoseBeadsDir := hasExplicitBeadsDir && (beadsDirFromCaller != "" || beadsDirProvidedAtStartup)
+		useLocalBeads := !callerChoseBeadsDir || filepath.Clean(initDBDirAbs) == filepath.Clean(beadsDirAbs)
 
 		if useLocalBeads {
 			// Create .beads directory with owner-only permissions (0700).
