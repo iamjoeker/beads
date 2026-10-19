@@ -176,7 +176,7 @@ Do not push to `main`. Before handing off:
 **NEVER use emoji-style icons** (🔴🟠🟡🔵⚪) in CLI output. **ALWAYS use small
 Unicode symbols** with semantic colors: status `○ ◐ ● ❄ ✓ ★ ⚑` (and `◇` for a user-defined custom
 status; every built-in status needs its own glyph, driven off
-`types.AllStatuses` via `internal/ui.GetStatusIcon` and `StatusLegend`); the pin
+`types.AllStatuses` via `GetStatusIcon` and `StatusLegend` in `internal/ui`); the pin
 flag (`Issue.Pinned`, independent of `status=pinned`) is `⌖`; priority as a
 `P0`–`P4` label with color (no status glyph). The full visual design system
 and CLI design principles are in
