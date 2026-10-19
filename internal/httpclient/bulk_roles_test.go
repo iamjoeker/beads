@@ -207,7 +207,8 @@ func TestSweepResultCarriesEveryWireMember(t *testing.T) {
 		Skipped: apigen.SweepSkips{
 			Pinned: 7, Referenced: 8, NotClosed: 9,
 			UnknownClosedAt: 10, ClosedAtOrAfterCutoff: 11, Unreadable: 12,
-			LiveDependent: &liveDependent,
+			LiveDependent:  &liveDependent,
+			LabelProtected: 15,
 		},
 		ReferencedIds: &[]string{"bd-1"},
 		Remaining:     &remaining,
@@ -226,6 +227,9 @@ func TestSweepResultCarriesEveryWireMember(t *testing.T) {
 	}
 	if result.Skipped.LiveDependent != 14 {
 		t.Errorf("Skipped.LiveDependent = %d, want 14", result.Skipped.LiveDependent)
+	}
+	if result.Skipped.LabelProtected != 15 {
+		t.Errorf("Skipped.LabelProtected = %d, want 15", result.Skipped.LabelProtected)
 	}
 }
 

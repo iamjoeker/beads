@@ -176,6 +176,7 @@ func sweepResult(res *apigen.SweepResult) issueops.SweepResult {
 			UnknownClosedAt:       res.Skipped.UnknownClosedAt,
 			ClosedAtOrAfterCutoff: res.Skipped.ClosedAtOrAfterCutoff,
 			Unreadable:            res.Skipped.Unreadable,
+			LabelProtected:        res.Skipped.LabelProtected,
 		},
 	}
 	if res.Skipped.LiveDependent != nil {
