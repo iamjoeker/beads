@@ -102,6 +102,14 @@ func TestServedSweeperProtectsPinnedRows(t *testing.T) {
 	conformance.RunSweeperProtectsPinnedRows(t, t.Context(), newServedSweeperFixture(t, "hs03"))
 }
 
+func TestServedSweeperProtectsLabelProtectedRecords(t *testing.T) {
+	conformance.RunSweeperProtectsLabelProtectedRecords(t, t.Context(), newServedSweeperFixture(t, "hs19"))
+}
+
+func TestServedSweeperProtectsEscalationWisps(t *testing.T) {
+	conformance.RunSweeperProtectsEscalationWisps(t, t.Context(), newServedSweeperFixture(t, "hs20"))
+}
+
 func TestServedSweeperHonorsTheCutoffAndThePattern(t *testing.T) {
 	conformance.RunSweeperHonorsTheCutoffAndThePattern(t, t.Context(), newServedSweeperFixture(t, "hs04"))
 }

@@ -88,6 +88,11 @@ func (fixedWispsMolReader) GetBlockedIssues(context.Context, types.WorkFilter) (
 func (fixedWispsMolReader) GetCustomStatusesDetailed(context.Context) ([]types.CustomStatus, error) {
 	return nil, nil
 }
+
+// GetConfig answers "no stored setting": findAbandonedWisps now resolves the
+// gc-protected labels (resolveGCProtectedLabels) before it filters, and a
+// failed or empty read still yields the built-in protecting set.
+func (fixedWispsMolReader) GetConfig(context.Context, string) (string, error)    { return "", nil }
 func (fixedWispsMolReader) IsInfraTypeCtx(context.Context, types.IssueType) bool { return false }
 func (fixedWispsMolReader) FindWispDependentsRecursive(context.Context, []string) (map[string]bool, error) {
 	return nil, nil

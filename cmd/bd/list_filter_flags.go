@@ -36,6 +36,10 @@ func (f *unionStringFlag) Set(s string) error {
 
 func (f *unionStringFlag) String() string { return f.value }
 
+// ResetForTesting returns the flag to its registered default (empty).
+// Implements flagValueResetter; see cmd/bd/flag_reset_test.go.
+func (f *unionStringFlag) ResetForTesting() { f.value = "" }
+
 // Type reports "string" so cmd.Flags().GetString keeps working on flags
 // registered with this value.
 func (f *unionStringFlag) Type() string { return "string" }
@@ -66,6 +70,14 @@ func (f *onceStringFlag) Set(s string) error {
 }
 
 func (f *onceStringFlag) String() string { return f.value }
+
+// ResetForTesting returns the flag to its registered default (empty, not yet
+// set), which lets a second in-process run pass the flag again. Implements
+// flagValueResetter; see cmd/bd/flag_reset_test.go.
+func (f *onceStringFlag) ResetForTesting() {
+	f.value = ""
+	f.set = false
+}
 
 func (f *onceStringFlag) Type() string { return "string" }
 

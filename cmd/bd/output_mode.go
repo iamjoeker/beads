@@ -21,12 +21,13 @@ import (
 //
 // It reads through cmd.Flags(), which at execution time carries the inherited
 // persistent flags as well as the command's own. That distinction is load
-// bearing: compact, migrate, repo and restore each declare a LOCAL --json,
+// bearing: a command may declare a LOCAL --json (compact, migrate, repo and restore did before upstream removed them),
 // and pflag keeps the first flag registered under a name, so the root's
-// persistent --json never reaches their flag set. Resolving from
-// cmd.Root().PersistentFlags() alone therefore sees Changed("json") == false
-// for `bd repo list --json` and falls through to config — which is why that
-// command printed human output while `bd list --json` printed JSON.
+// persistent --json never reaches their flag set. (Upstream has since dropped
+// those local declarations, so today the root flag is the only one, but a
+// command that adds a local --json again must still resolve correctly.)
+// Resolving from cmd.Root().PersistentFlags() alone would see
+// Changed("json") == false for such a command and fall through to config.
 func resolveJSONOutput(cmd *cobra.Command, configJSON bool) bool {
 	if cmd == nil {
 		return configJSON

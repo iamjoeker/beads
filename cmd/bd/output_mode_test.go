@@ -16,7 +16,7 @@ import (
 // newOutputModeTestTree builds a command tree with the same shape as bd's: a
 // root that owns the persistent --json/--format pair, a plain child that
 // inherits them, and a child that declares its own --json and so shadows the
-// inherited one (compact, migrate, repo and restore all do this).
+// inherited one (compact, migrate, repo and restore did before upstream dropped their local flags).
 func newOutputModeTestTree() (root, plain, shadow *cobra.Command) {
 	var rootJSON bool
 	var shadowJSON bool
@@ -109,42 +109,6 @@ func TestResolveJSONOutputNilCommand(t *testing.T) {
 	if resolveJSONOutput(nil, false) != false {
 		t.Error("resolveJSONOutput(nil, false) = true, want false")
 	}
-}
-
-// TestRealCommandsDeclareShadowingJSONFlags keeps the synthetic tree above
-// honest. The shadowing shape it exercises is not hypothetical: several real
-// commands declare their own --json, pflag keeps the first flag registered
-// under a name, and so the root's persistent --json never reaches their flag
-// set. That is why the resolver reads cmd.Flags() and not
-// cmd.Root().PersistentFlags() — the latter reports "not set" for a --json the
-// user typed, and the value falls through to config.
-//
-// Read-only on purpose: parsing onto the real tree would write cobra state
-// that parallel tests share, and these flags are bound to the jsonOutput
-// global itself.
-func TestRealCommandsDeclareShadowingJSONFlags(t *testing.T) {
-	rootJSON := rootCmd.PersistentFlags().Lookup("json")
-	if rootJSON == nil {
-		t.Fatal("root has no persistent --json flag")
-	}
-
-	var shadowing []string
-	var walk func(cmd *cobra.Command)
-	walk = func(cmd *cobra.Command) {
-		if local := cmd.LocalNonPersistentFlags().Lookup("json"); local != nil && local != rootJSON {
-			shadowing = append(shadowing, cmd.CommandPath())
-		}
-		for _, child := range cmd.Commands() {
-			walk(child)
-		}
-	}
-	walk(rootCmd)
-
-	if len(shadowing) == 0 {
-		t.Fatal("no command declares a local --json; the shadowing cases in TestResolveJSONOutput no longer describe this CLI, " +
-			"so either they are dead weight or the walk stopped finding commands")
-	}
-	t.Logf("commands with a local --json that shadows the root's: %s", strings.Join(shadowing, ", "))
 }
 
 // TestJSONOutputHasOneProductionWriter is the audit the bd-vm6 sweep could not

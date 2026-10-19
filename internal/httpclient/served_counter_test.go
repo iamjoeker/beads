@@ -89,6 +89,7 @@ func TestServedCounterContract(t *testing.T) {
 		{"ExcludeTypesMatchesListCardinality", conformance.RunCounterExcludeTypesMatchesListCardinality},
 		{"ParentIDIncludesAWispChild", conformance.RunCounterParentIDIncludesAWispChild},
 		{"ParentIDAndExcludeStatusComposeOnAClosedChild", conformance.RunCounterParentIDAndExcludeStatusComposeOnAClosedChild},
+		{"ExcludeLabelsRemovesLabeledRows", conformance.RunCounterExcludeLabelsRemovesLabeledRows},
 	} {
 		t.Run(tc.name, func(t *testing.T) { tc.run(t, t.Context(), fixture) })
 	}

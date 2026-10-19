@@ -20,8 +20,12 @@ func TestListTypedFormatBeatsAConfigJSONDefault(t *testing.T) {
 		if err != nil {
 			t.Fatalf("gatherListInput: %v", err)
 		}
-		if in.jsonOutput || jsonOutput {
-			t.Errorf("jsonOutput = %v (in.jsonOutput = %v), want false: the typed --format must beat the config default", jsonOutput, in.jsonOutput)
+		// gatherListInput records the decision on the input struct and never
+		// writes the jsonOutput global (TestJSONOutputHasOneProductionWriter);
+		// the global is resolved by the root pre-run, which already returns
+		// false for a changed --format (see resolveJSONOutput).
+		if in.jsonOutput {
+			t.Errorf("in.jsonOutput = true, want false: the typed --format must beat the config default")
 		}
 		if in.formatStr != "digraph" {
 			t.Errorf("formatStr = %q, want %q", in.formatStr, "digraph")
