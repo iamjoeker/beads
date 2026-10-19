@@ -739,6 +739,7 @@ func writeSideRows() []Row {
 		patchRow("Owner", "an owner edit refuses ON updateIssue",
 			"IssuePatchBody excludes owner — which the document itself calls an accident of order rather than a decision, since ApplyPatchBody DOES publish it and issues:batchApply's update item carries it"),
 		patchRow("ClosedBySession", "a closed-by-session edit refuses", "neither IssuePatchBody nor ApplyPatchBody publishes closed_by_session"),
+		patchRow("WispType", "a wisp-type edit refuses", "neither IssuePatchBody nor ApplyPatchBody publishes wisp_type (the only wisp_type on the wire is the list/ready read filter); bd mol bond --wisp-type (bd-2kl) needs a local workspace until the spec grows the member"),
 		patchRow("Persistence", "a persistence-mode edit refuses ON issues:batchApply",
 			"ApplyPatchBody excludes persistence: moving a row between planes mid-plan is a different act from writing its fields. IssuePatchBody publishes it behind issues.update.persistence, and updateIssue's encoder carries it (refusing before the dial against a server without that token)"),
 		{

@@ -547,6 +547,7 @@ var applyPatchExcludedMembers = []struct {
 	{"ParentID", "W-ApplyPatch.ParentID", func(p issueops.IssuePatch) bool { return p.ParentID.Set }},
 	{"SpecID", "W-IssuePatch.SpecID", func(p issueops.IssuePatch) bool { return p.SpecID.Set }},
 	{"ClosedBySession", "W-IssuePatch.ClosedBySession", func(p issueops.IssuePatch) bool { return p.ClosedBySession.Set }},
+	{"WispType", "W-IssuePatch.WispType", func(p issueops.IssuePatch) bool { return p.WispType.Set }},
 	{"Persistence", "W-IssuePatch.Persistence", func(p issueops.IssuePatch) bool { return p.Persistence.Set }},
 }
 

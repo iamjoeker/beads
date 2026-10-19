@@ -1109,6 +1109,8 @@ func refuseExcludedPatchMembers(patch issueops.IssuePatch) error {
 		return refuse(encode.OpUpdateIssue, "W-IssuePatch.ClosedBySession")
 	case patch.SpecID.Set:
 		return refuse(encode.OpUpdateIssue, "W-IssuePatch.SpecID")
+	case patch.WispType.Set:
+		return refuse(encode.OpUpdateIssue, "W-IssuePatch.WispType")
 	}
 	return nil
 }
