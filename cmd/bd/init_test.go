@@ -2046,7 +2046,7 @@ func TestInitDatabaseFlag(t *testing.T) {
 		tmpDir := t.TempDir()
 
 		// Run init with --database to specify a pre-existing database name
-		cmd := exec.Command(bd, "init", "--server", "--database", "myapp_production", "--quiet")
+		cmd := exec.Command(bd, "init", "--database", "myapp_production", "--quiet")
 		cmd.Dir = tmpDir
 		cmd.Env = os.Environ()
 		out, err := cmd.CombinedOutput()
@@ -2176,7 +2176,7 @@ func TestInitDatabaseFlag(t *testing.T) {
 		tmpDir := t.TempDir()
 
 		// Run init with --database
-		cmd := exec.Command(bd, "init", "--server", "--database", "test_server_cfg", "--quiet")
+		cmd := exec.Command(bd, "init", "--database", "test_server_cfg", "--quiet")
 		cmd.Dir = tmpDir
 		cmd.Env = os.Environ()
 		out, err := cmd.CombinedOutput()
