@@ -614,7 +614,7 @@ var createCmd = &cobra.Command{
 			issue.Priority = 0
 		}
 		result, err := ops.Create(opsCtx, issueops.CreateRequest{
-			Actor:                   actor,
+			Actor:                   currentActor(),
 			Issue:                   issue,
 			ParentID:                parentID,
 			InheritLabelsFromParent: inheritParentLabels,
