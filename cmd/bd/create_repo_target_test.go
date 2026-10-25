@@ -116,36 +116,17 @@ func TestResolveRepoTargetBeadsDir(t *testing.T) {
 	})
 }
 
-// TestCheckRepoTargetInitializable pins the two refusals ensureBeadsDirForPath
-// used to hold inline (bd-cqv). They live in their own stat-only function so
-// `--dry-run` can apply them without creating the workspace it is previewing a
-// create into (bd-e7v) — which means this function must stay free of writes.
-func TestCheckRepoTargetInitializable(t *testing.T) {
+// TestRefuseUnmaterializableTarget pins the two refusals ensureBeadsDirForPath
+// applies to a target with no metadata.json (bd-cqv). They live in their own
+// stat-only function so `--dry-run` (checkRepoTargetInitializable) can apply
+// them without creating the workspace it is previewing a create into (bd-e7v)
+// — which means this function must stay free of writes.
+func TestRefuseUnmaterializableTarget(t *testing.T) {
 	t.Parallel()
-
-	t.Run("initialized_target_reports_initialized", func(t *testing.T) {
-		t.Parallel()
-		beadsDir := filepath.Join(t.TempDir(), ".beads")
-		if err := os.MkdirAll(beadsDir, 0o750); err != nil {
-			t.Fatal(err)
-		}
-		if err := os.WriteFile(filepath.Join(beadsDir, "metadata.json"),
-			[]byte(`{"dolt_database":"real_db"}`), 0o600); err != nil {
-			t.Fatal(err)
-		}
-
-		initialized, err := checkRepoTargetInitializable(beadsDir)
-		if err != nil {
-			t.Fatalf("checkRepoTargetInitializable: %v", err)
-		}
-		if !initialized {
-			t.Error("a target with metadata.json must report initialized")
-		}
-	})
 
 	t.Run("unresolved_redirect_is_refused", func(t *testing.T) {
 		t.Parallel()
-		// resolveRepoTargetBeadsDir already followed every redirect it could,
+		// repoTargetRoot already followed every redirect it could,
 		// so one surviving to here is one FollowRedirect fell back from.
 		beadsDir := filepath.Join(t.TempDir(), ".beads")
 		if err := os.MkdirAll(beadsDir, 0o750); err != nil {
@@ -156,9 +137,9 @@ func TestCheckRepoTargetInitializable(t *testing.T) {
 			t.Fatal(err)
 		}
 
-		initialized, err := checkRepoTargetInitializable(beadsDir)
+		err := refuseUnmaterializableTarget(beadsDir)
 		if err == nil {
-			t.Fatalf("expected a refusal for an unresolved redirect (initialized=%v)", initialized)
+			t.Fatal("expected a refusal for an unresolved redirect")
 		}
 		if !strings.Contains(err.Error(), "redirect") {
 			t.Errorf("error should name the redirect, got: %v", err)
@@ -169,7 +150,7 @@ func TestCheckRepoTargetInitializable(t *testing.T) {
 		}
 	})
 
-	t.Run("uninitialized_target_reports_not_initialized_or_refuses", func(t *testing.T) {
+	t.Run("uninitialized_target_is_admitted_or_refused_by_mode", func(t *testing.T) {
 		t.Parallel()
 		// An existing directory with no .beads and no redirect: embedded-mode
 		// invocations may initialize it in place, server-backed ones must
@@ -177,10 +158,7 @@ func TestCheckRepoTargetInitializable(t *testing.T) {
 		// pairing rather than one branch.
 		beadsDir := filepath.Join(t.TempDir(), ".beads")
 
-		initialized, err := checkRepoTargetInitializable(beadsDir)
-		if initialized {
-			t.Fatal("a target with no metadata.json must not report initialized")
-		}
+		err := refuseUnmaterializableTarget(beadsDir)
 		if isEmbeddedMode() {
 			if err != nil {
 				t.Errorf("embedded mode initializes an empty target in place, got: %v", err)
@@ -275,7 +253,7 @@ func TestEnsureBeadsDirForPathRefusesToStrandAWrite(t *testing.T) {
 			t.Fatal(err)
 		}
 
-		err := ensureBeadsDirForPath(rootCtx, beadsDir, nil, true)
+		err := ensureBeadsDirForPath(rootCtx, filepath.Dir(beadsDir), nil, true)
 		if err == nil {
 			t.Fatal("expected a refusal to initialize a database beside a redirect")
 		}
@@ -301,7 +279,7 @@ func TestEnsureBeadsDirForPathRefusesToStrandAWrite(t *testing.T) {
 		target := t.TempDir()
 		beadsDir := filepath.Join(target, ".beads")
 
-		err := ensureBeadsDirForPath(rootCtx, beadsDir, nil, true)
+		err := ensureBeadsDirForPath(rootCtx, filepath.Dir(beadsDir), nil, true)
 		if err == nil {
 			t.Fatal("expected a refusal to initialize an embedded database from a server-backed workspace")
 		}

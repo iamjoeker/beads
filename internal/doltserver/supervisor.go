@@ -27,6 +27,8 @@ import (
 	"strconv"
 	"strings"
 	"time"
+
+	"github.com/steveyegge/beads/internal/storage/doltutil"
 )
 
 // supervisorProbeTimeout bounds the reachability probe used to turn "bd has no
@@ -254,19 +256,23 @@ func ExplainLocalServerNotStarted(port int, reason string) string {
 // their state — only reachability is knowable from here, so only reachability
 // is reported.
 func ExplainRemoteServerNotStarted(host string, port int) string {
+	// The host is config-supplied, so it is spelled through the printers that
+	// keep a control character or a shell metacharacter in it from redrawing
+	// the advice (remedy.PrintedValue).
+	addr := doltutil.PrintedServerAddr(host, port)
 	if InspectRemoteAddr(host, port).Listening {
-		return fmt.Sprintf("Configured Dolt server at %s:%d is reachable, but bd has no server of its\n"+
+		return fmt.Sprintf("Configured Dolt server at %s is reachable, but bd has no server of its\n"+
 			"own for this project and will not start one for an external host.\n\n"+
-			"  bd dolt status   # detailed external-server check", host, port)
+			"  bd dolt status   # detailed external-server check", addr)
 	}
-	return fmt.Sprintf("Configured Dolt server at %s:%d did not answer a connection probe just now.\n\n"+
+	return fmt.Sprintf("Configured Dolt server at %s did not answer a connection probe just now.\n\n"+
 		"bd will not start it: the server lives on another host. dolt.auto-start decides\n"+
 		"only whether bd spawns a LOCAL server — it does not govern that one, and enabling\n"+
 		"it would not bring that server up. Whatever runs it there owns its lifecycle.\n\n"+
 		"Verify it is running and reachable from this host:\n"+
-		"  nc -zv %s %d  # or curl %s:%d for an HTTP-style check\n"+
+		"  %s\n"+
 		"  bd dolt status   # detailed external-server check",
-		host, port, host, port, host, port)
+		addr, ReachabilityCheck(host, port))
 }
 
 // ExplainAutoStartDisabled renders the hint for a local Dolt server that did

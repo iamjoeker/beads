@@ -8,6 +8,7 @@ import (
 	"strings"
 
 	"github.com/steveyegge/beads/internal/configfile"
+	"github.com/steveyegge/beads/internal/remedy"
 	"github.com/steveyegge/beads/internal/storage/backends"
 )
 
@@ -339,7 +340,7 @@ func ResolvePhysicalRoots(beadsDir string) (PhysicalRoots, error) {
 		host := cfg.GetDoltServerHost()
 		if isRemoteServerHost(host) {
 			pr.RemoteBackend = true
-			pr.Provenance = fmt.Sprintf("server mode with remote host %s; no local physical root", host)
+			pr.Provenance = fmt.Sprintf("server mode with remote host %s; no local physical root", remedy.PrintedValue(host))
 			break
 		}
 		root := cfg.DatabasePath(abs)

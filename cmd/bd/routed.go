@@ -14,6 +14,7 @@ import (
 	"github.com/steveyegge/beads/internal/beads"
 	"github.com/steveyegge/beads/internal/configfile"
 	"github.com/steveyegge/beads/internal/debug"
+	"github.com/steveyegge/beads/internal/remedy"
 	"github.com/steveyegge/beads/internal/routing"
 	"github.com/steveyegge/beads/internal/storage"
 	"github.com/steveyegge/beads/internal/storage/embeddeddolt"
@@ -109,6 +110,12 @@ func resolveAndGetIssueWithRoutingAccess(ctx context.Context, localStore storage
 		return result, nil
 	}
 
+	// The first routed tier that refuses the id answers instead of the local
+	// not-found (isRoutedResolutionRefusal). The refusal is checked before
+	// isRoutingFailure, which it would also satisfy, so the auto tier still
+	// gets its chance.
+	var refusal error
+
 	// If not found locally, try prefix-based routing via routes.jsonl.
 	// This handles cross-rig lookups where the ID's prefix maps to a different
 	// database (e.g., hr-8wn.1 routes to the herald rig's database).
@@ -117,6 +124,8 @@ func resolveAndGetIssueWithRoutingAccess(ctx context.Context, localStore storage
 		prefixResult, routeErr := resolveViaPrefixRoutingWithAccess(ctx, id, writable, false)
 		if routeErr == nil {
 			return prefixResult, nil
+		} else if isRoutedResolutionRefusal(routeErr) {
+			refusal = routeErr
 		} else if isRoutingFailure(routeErr) {
 			return nil, routeErr
 		}
@@ -132,6 +141,8 @@ func resolveAndGetIssueWithRoutingAccess(ctx context.Context, localStore storage
 		autoResult, routeErr := resolveViaAutoRoutingWithAccess(ctx, localStore, id, writable, false)
 		if routeErr == nil {
 			return autoResult, nil
+		} else if refusal != nil {
+			return nil, refusal
 		} else if isRoutingFailure(routeErr) {
 			return nil, routeErr
 		}
@@ -139,6 +150,17 @@ func resolveAndGetIssueWithRoutingAccess(ctx context.Context, localStore storage
 	}
 
 	return nil, annotateLookupFailure(ctx, localStore, err, prefixErr, autoErr)
+}
+
+// isRoutedResolutionRefusal reports whether a routed tier's resolution error
+// answers in place of the local store's not-found. Both sentinels mean the
+// routed store holds what the id names but will not pick it: the id names
+// several issues there (utils.ErrAmbiguousID), or it only abbreviates an
+// issue there and exact resolution was required
+// (utils.ErrAbbreviatedIDNotAllowed). Reporting the local "no issue found"
+// instead would be false.
+func isRoutedResolutionRefusal(err error) bool {
+	return errors.Is(err, utils.ErrAmbiguousID) || errors.Is(err, utils.ErrAbbreviatedIDNotAllowed)
 }
 
 // idResolverFor is the store id resolution should ask. A backend that can only
@@ -227,34 +249,34 @@ func resolveAndGetIssueForMutationExact(ctx context.Context, localStore storage.
 	}
 
 	// The routed tiers resolve with utils.ResolvePartialIDExact too, so each
-	// can mint utils.ErrAbbreviatedIDNotAllowed of its own — the abbreviation
-	// names a real issue in the routed rig rather than here — and both
-	// wrappers hand that error back unwrapped. Keep the first such refusal:
-	// the local error is only a plain not-found, and returning it would tell
-	// the caller no issue matches an id a routed store demonstrably holds,
-	// which is exactly the falsehood the sentinel exists to prevent. The
-	// refusal is checked before isRoutingFailure, which it would also satisfy,
-	// so the auto tier still gets its chance at an exact match.
-	var abbrevErr error
+	// can refuse the id on its own — it abbreviates a real issue in the routed
+	// rig, or is a hash several issues share there — and both wrappers hand
+	// that error back unwrapped. Keep the first such refusal: the local error
+	// is only a plain not-found, and returning it would tell the caller no
+	// issue matches an id a routed store demonstrably holds, which is exactly
+	// the falsehood the sentinels exist to prevent (isRoutedResolutionRefusal).
+	// The refusal is checked before isRoutingFailure, which it would also
+	// satisfy, so the auto tier still gets its chance at an exact match.
+	var refusal error
 	prefixResult, prefixErr := resolveViaPrefixRoutingWithAccess(ctx, id, true, true)
 	switch {
 	case prefixErr == nil:
 		return prefixResult, nil
-	case errors.Is(prefixErr, utils.ErrAbbreviatedIDNotAllowed):
-		abbrevErr = prefixErr
+	case isRoutedResolutionRefusal(prefixErr):
+		refusal = prefixErr
 	case isRoutingFailure(prefixErr):
 		return nil, prefixErr
 	}
 
 	// Write intent, as in resolveAndGetIssueForMutation: the auto-route opens
 	// writable so the write commits where the issue lives. The auto tier's own
-	// abbreviation refusal is a routing failure here, and is returned as one.
+	// refusal is a routing failure here, and is returned as one.
 	autoResult, autoErr := resolveViaAutoRoutingWithAccess(ctx, localStore, id, true, true)
 	switch {
 	case autoErr == nil:
 		return autoResult, nil
-	case abbrevErr != nil:
-		return nil, abbrevErr
+	case refusal != nil:
+		return nil, refusal
 	case isRoutingFailure(autoErr):
 		return nil, autoErr
 	}
@@ -557,6 +579,14 @@ func resolveViaPrefixRoutingWithAccess(ctx context.Context, id string, writable 
 	}
 	prefix := matchedRoute.Prefix
 
+	// Refuse what admission refuses from the target's own contents first, as
+	// an auto-route does (openAutoRoutedStore): the dolt_database lookup
+	// below would otherwise report a historical SQLite or legacy Dolt rig as
+	// a missing dolt_database field, or a missing metadata.json.
+	if _, err := admitForeignWorkspace(targetBeadsDir); err != nil {
+		return nil, fmt.Errorf("prefix route %q to %s: %w", matchedRoute.Prefix, matchedRoute.Path, err)
+	}
+
 	// Check that the target has a different dolt_database
 	targetDB, err := loadDoltDatabase(targetBeadsDir)
 	if err == nil && targetDB == "" {
@@ -614,7 +644,7 @@ func resolveViaPrefixRoutingWithAccess(ctx context.Context, id string, writable 
 	result.closeFn = func() { _ = targetStore.Close() }
 
 	if os.Getenv("BD_DEBUG_ROUTING") != "" {
-		fmt.Fprintf(os.Stderr, "[routing] Resolved %s via prefix route to %s (database: %s)\n", id, matchedRoute.Path, targetDB)
+		fmt.Fprintf(os.Stderr, "[routing] Resolved %s via prefix route to %s (database: %s)\n", id, remedy.PrintedValue(matchedRoute.Path), remedy.PrintedValue(targetDB))
 	}
 
 	return result, nil
@@ -697,6 +727,12 @@ func lookupPrefixRoute(id string) (*prefixRoute, string, *prefixRoutesSource, er
 // named database under the target. An empty database leaves the environment
 // as it is: the target names no database of its own to prefer.
 //
+// It opens through openForeignStore, so a target admitForeignWorkspace
+// refuses (a legacy Dolt workspace among them) is refused before the open can
+// start a server there or run migrations into its database. That is not every
+// target bd run inside it refuses: see guardForeignLegacyDoltWorkspace and
+// targetSelectsServerMode for the legacy Dolt layouts it admits.
+//
 // A writable open never creates the target's database
 // (newExistingDoltStoreFromConfig): the open runs before the lookup it serves,
 // so an id that misses must leave a repository that has not been bootstrapped
@@ -718,9 +754,9 @@ func openRoutedTargetStore(ctx context.Context, beadsDir, database string, writa
 		}()
 	}
 	if writable {
-		return newExistingDoltStoreFromConfig(ctx, beadsDir)
+		return openForeignStore(ctx, beadsDir, foreignWrite)
 	}
-	return newReadOnlyStoreFromConfig(ctx, beadsDir)
+	return openForeignStore(ctx, beadsDir, foreignRead)
 }
 
 // matchPrefixRoute returns the route whose prefix is the longest leading match
@@ -914,7 +950,7 @@ func loadDoltDatabase(beadsDir string) (string, error) {
 		DoltDatabase string `json:"dolt_database"`
 	}
 	if err := json.Unmarshal(data, &meta); err != nil {
-		return "", fmt.Errorf("parsing %s: %w", metadataPath, err)
+		return "", fmt.Errorf("parsing %s: %w", remedy.PrintedValue(metadataPath), remedy.PrintedError(err))
 	}
 	return meta.DoltDatabase, nil
 }
@@ -1049,9 +1085,10 @@ func autoRouteTargetDatabase(beadsDir string, writable bool) (string, error) {
 	case !writable:
 		return database, nil
 	case err != nil:
-		return "", err
+		// A read or parse error repeats the routed path as the OS spelled it.
+		return "", remedy.PrintedError(err)
 	case database == "":
-		return "", fmt.Errorf("%s has no dolt_database field", filepath.Join(beadsDir, "metadata.json"))
+		return "", fmt.Errorf("%s has no dolt_database field", remedy.PrintedValue(filepath.Join(beadsDir, "metadata.json")))
 	}
 	return database, nil
 }

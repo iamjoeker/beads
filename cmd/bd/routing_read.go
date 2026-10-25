@@ -9,6 +9,7 @@ import (
 
 	"github.com/steveyegge/beads/internal/config"
 	"github.com/steveyegge/beads/internal/debug"
+	"github.com/steveyegge/beads/internal/remedy"
 	"github.com/steveyegge/beads/internal/routing"
 	"github.com/steveyegge/beads/internal/storage"
 )
@@ -249,13 +250,20 @@ func openRoutedStoreTarget(ctx context.Context, store storage.DoltStorage, writa
 		RepoPath: targetRepoPath,
 		BeadsDir: filepath.Join(targetRepoPath, ".beads"),
 	}
+	// Refuse what admission refuses from the target's own contents first, as
+	// the open below would: a write's dolt_database lookup would otherwise
+	// report a historical SQLite or legacy Dolt target as a missing
+	// dolt_database field.
+	if _, err := admitForeignWorkspace(target.BeadsDir); err != nil {
+		return nil, target, fmt.Errorf("failed to open routed store at %s: %w", remedy.PrintedValue(targetRepoPath), err)
+	}
 	database, err := autoRouteTargetDatabase(target.BeadsDir, writable)
 	if err != nil {
-		return nil, target, fmt.Errorf("failed to open routed store at %s: target has no dolt_database configured: %w", targetRepoPath, err)
+		return nil, target, fmt.Errorf("failed to open routed store at %s: target has no dolt_database configured: %w", remedy.PrintedValue(targetRepoPath), err)
 	}
 	targetStore, err := openRoutedTargetStore(ctx, target.BeadsDir, database, writable)
 	if err != nil {
-		return nil, target, fmt.Errorf("failed to open routed store at %s: %w", target.RepoPath, err)
+		return nil, target, fmt.Errorf("failed to open routed store at %s: %w", remedy.PrintedValue(target.RepoPath), err)
 	}
 	return wireExternalDependencyPolicy(targetStore), target, nil
 }

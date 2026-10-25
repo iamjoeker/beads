@@ -78,7 +78,7 @@ result: ok
 --- stdout
 Removing Claude hooks from project...
 ✓ Removed SessionStart hook
-Removing Claude Code integration...
+Removing Claude Code integration from $ROOT/project/CLAUDE.md...
 ✓ Removed beads section from CLAUDE.md
 ✓ Claude hooks removed
 --- stderr
@@ -91,8 +91,6 @@ Removing Claude Code integration...
 # Project Instructions for AI Agents
 
 This file provides instructions and context for AI coding agents working on this project.
-
-
 
 ## Build & Test
 

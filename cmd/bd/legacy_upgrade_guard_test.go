@@ -441,7 +441,7 @@ func TestLegacyUpgradeGuardRejectsBackendTombstonesWithoutMigratingConfig(t *tes
 // An unparseable metadata.json leaves the guard nothing to classify. That must
 // not be reported as a legacy refusal — the refusal text tells the operator to
 // preserve .beads and run a cross-era migration, which is the wrong instruction
-// for a truncated file — and the repair path must be able to proceed past it.
+// for a truncated file.
 func TestLegacyUpgradeGuardReportsUnreadableMetadataAsUnclassified(t *testing.T) {
 	beadsDir := t.TempDir()
 	if err := os.WriteFile(filepath.Join(beadsDir, "metadata.json"), []byte(`{"dolt_mode":"serv`), 0o600); err != nil {
@@ -456,21 +456,5 @@ func TestLegacyUpgradeGuardReportsUnreadableMetadataAsUnclassified(t *testing.T)
 	}
 	if !isLegacyUpgradeUnclassified(err) {
 		t.Fatalf("guardLegacyUpgradeWorkspace() = %v, want unclassified error", err)
-	}
-	if err := guardLegacyUpgradeRepairPath(beadsDir); err != nil {
-		t.Fatalf("guardLegacyUpgradeRepairPath() = %v, want nil so the repair can rewrite the file", err)
-	}
-}
-
-// The repair-path exemption is scoped to unclassifiable metadata only: a
-// workspace the guard did recognize as a refused legacy shape stays refused
-// there too, because reinitializing beside it would strand the original data.
-func TestLegacyUpgradeRepairPathStillRefusesRecognizedLegacyWorkspaces(t *testing.T) {
-	beadsDir := t.TempDir()
-	if err := os.WriteFile(filepath.Join(beadsDir, "beads.db"), []byte("SQLite format 3\x00rest"), 0o600); err != nil {
-		t.Fatal(err)
-	}
-	if err := guardLegacyUpgradeRepairPath(beadsDir); !isLegacyUpgradeRefusal(err) {
-		t.Fatalf("guardLegacyUpgradeRepairPath() = %v, want migration refusal", err)
 	}
 }
