@@ -17,6 +17,12 @@ type cascadeAgeReader struct {
 	children map[string]bool
 }
 
+// GetConfig answers every key as unset, so the GC-protection set resolves to
+// its built-in defaults (resolveGCProtectedLabels).
+func (r *cascadeAgeReader) GetConfig(context.Context, string) (string, error) {
+	return "", nil
+}
+
 func (r *cascadeAgeReader) SearchIssues(context.Context, string, types.IssueFilter) ([]*types.Issue, error) {
 	return r.issues, nil
 }

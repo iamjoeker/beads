@@ -3,6 +3,7 @@ package main
 import (
 	"context"
 	"fmt"
+	"github.com/steveyegge/beads/internal/remedy"
 	"os"
 	"strings"
 
@@ -179,7 +180,7 @@ func printHiddenByStatusNotice(ctx context.Context, s workapi.StatusSearcher, li
 	}
 	lines := hiddenByStatusNoticeLines(listing.Dropped(), countHiddenByStatus(ctx, s, listing), countHiddenPinnedByStatus(ctx, s, listing), resultCount, storeDesc)
 	for _, line := range lines {
-		fmt.Fprintln(os.Stderr, line)
+		fmt.Fprintln(os.Stderr, remedy.PrintedText(line))
 	}
 	return len(lines) > 0
 }

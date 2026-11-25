@@ -82,7 +82,7 @@ func ExecuteCreate(ctx context.Context, tx *sql.Tx, request publicops.CreateRequ
 		}
 		childCounterChanged = !parentIsWisp
 	}
-	if err := assignCreateIssueIDInTx(ctx, tx, batch, issue, attempt.Actor); err != nil {
+	if err := assignCreateIssueIDInTx(ctx, tx, batch, issue, attempt.Actor, nil); err != nil {
 		return publicops.CreateResult{}, nil, ClassifyPublicCreateError(err)
 	}
 	issue.Dependencies = storage.CreatePublicCreateDependencies(issue.ID, attempt)
@@ -198,7 +198,7 @@ func executeUpdate(ctx context.Context, tx *sql.Tx, request publicops.UpdateRequ
 	// first.
 	changedAny := false
 	if attempt.Claim {
-		claimed, err := claimIssueInTx(ctx, tx, attempt.IssueID, attempt.Actor, false)
+		claimed, err := claimIssueInTx(ctx, tx, attempt.IssueID, attempt.Actor, false, !attempt.ForceClaimBlocked)
 		if err != nil {
 			return publicops.UpdateResult{}, nil, err
 		}

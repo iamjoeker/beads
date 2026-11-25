@@ -3,6 +3,7 @@ package uow
 import (
 	"context"
 	"errors"
+	"reflect"
 	"strings"
 	"testing"
 
@@ -84,7 +85,46 @@ func TestApplyProviderOptions(t *testing.T) {
 	if applyProviderOptions(nil).rotateServerLog {
 		t.Fatal("applyProviderOptions(nil).rotateServerLog = true, want false")
 	}
-	if got := applyProviderOptions([]ProviderOption{WithServerLogRotation()}); got != (providerOptions{rotateServerLog: true}) {
+	if got := applyProviderOptions([]ProviderOption{WithServerLogRotation()}); !reflect.DeepEqual(got, providerOptions{rotateServerLog: true}) {
 		t.Fatalf("applyProviderOptions(WithServerLogRotation()) = %+v, want only rotateServerLog set", got)
+	}
+	// The proxy executable is unset unless the caller names one, so the CLI
+	// keeps spawning itself.
+	if applyProviderOptions(nil).proxyExecutable != nil {
+		t.Fatal("applyProviderOptions(nil).proxyExecutable != nil, want the proxy package default")
+	}
+	resolve := func() (string, error) { return "/opt/bd", nil }
+	got = applyProviderOptions([]ProviderOption{WithProxyExecutable(resolve)})
+	if got.proxyExecutable == nil {
+		t.Fatal("WithProxyExecutable did not set proxyExecutable")
+	}
+	if path, _ := got.proxyExecutable(); path != "/opt/bd" {
+		t.Fatalf("proxyExecutable() = %q, want the resolver passed to WithProxyExecutable", path)
+	}
+	if got.preview || got.readOnly || got.rotateServerLog || got.proxiedServerMode {
+		t.Fatalf("applyProviderOptions(WithProxyExecutable()) = %+v, want only proxyExecutable set", got)
+	}
+}
+
+// TestOpensForBeadWrites pins which postures events-journal activation treats
+// as writing beads: only the ordinary open. A preview, a read-only open and a
+// working-set reconcile write none, so a journal table the journal cannot run
+// against must not refuse them — and the reconcile marker must not change the
+// open itself.
+func TestOpensForBeadWrites(t *testing.T) {
+	if !OpensForBeadWrites() {
+		t.Fatal("OpensForBeadWrites() = false, want true for the ordinary open")
+	}
+	for name, opt := range map[string]ProviderOption{
+		"preview":               WithPreview(),
+		"read-only":             WithReadOnly(),
+		"working-set reconcile": WithWorkingSetReconcile(),
+	} {
+		if OpensForBeadWrites(opt) {
+			t.Errorf("OpensForBeadWrites(%s) = true, want false", name)
+		}
+	}
+	if got := applyProviderOptions([]ProviderOption{WithWorkingSetReconcile()}); got.preview || got.readOnly {
+		t.Errorf("WithWorkingSetReconcile changed the open itself: %+v", got)
 	}
 }

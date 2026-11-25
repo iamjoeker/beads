@@ -13,6 +13,7 @@ import (
 	"github.com/steveyegge/beads/internal/storage/versioncontrolops"
 	"github.com/steveyegge/beads/internal/types"
 	"github.com/steveyegge/beads/internal/workapi"
+	"github.com/steveyegge/beads/issueops"
 )
 
 func runGCProxiedServer(ctx context.Context) error {
@@ -42,6 +43,7 @@ func runGCProxiedServer(ctx context.Context) error {
 	}
 	var results []phaseResult
 	var gcFailed bool
+	retentionKept := 0
 
 	if gcSkipDecay {
 		results = append(results, phaseResult{name: "Decay", skipped: true})
@@ -58,29 +60,11 @@ func runGCProxiedServer(ctx context.Context) error {
 			ClosedBefore: &cutoffTime,
 		}
 
-		// The candidates and the protected-label set come off ONE read, so a
-		// setting changed mid-sweep cannot leave the two describing different
-		// workspaces.
-		type decayScan struct {
-			issues    []*types.Issue
-			protected workapi.GCProtectedLabels
-		}
-		scan, err := uow.RunTxRead(ctx, uowProvider, func(ctx context.Context, uw uow.UnitOfWork) (decayScan, error) {
-			page, err := uw.IssueUseCase().SearchIssues(ctx, "", filter)
-			if err != nil {
-				return decayScan{}, err
-			}
-			return decayScan{issues: page.Items, protected: resolveGCProtectedLabels(ctx, uowMolReader{uw: uw})}, nil
-		})
+		closedIssues, kept, err := readProxiedDecayCandidates(ctx, filter, &cutoffTime)
 		if err != nil {
-			return HandleErrorRespectJSON("searching closed issues: %v", err)
+			return HandleErrorRespectJSON("%v", err)
 		}
-		closedIssues := scan.issues
-
-		var stats closedDeletionCandidateStats
-		closedIssues, stats = filterClosedDeletionCandidates(closedIssues, &cutoffTime, scan.protected)
-		warnClosedDeletionSafetySkips(stats)
-		reportGCLabelProtectedSkips(stats, scan.protected)
+		retentionKept = kept
 
 		switch {
 		case len(closedIssues) == 0:
@@ -224,6 +208,9 @@ func runGCProxiedServer(ctx context.Context) error {
 			phases = append(phases, p)
 		}
 		summaryMap["phases"] = phases
+		if retentionKept > 0 {
+			summaryMap["retention_required"] = retentionKept
+		}
 		if err := outputJSON(summaryMap); err != nil {
 			return err
 		}
@@ -276,4 +263,43 @@ func scalarCount(res *domain.RawSQLResult) int {
 	default:
 		return 0
 	}
+}
+
+// readProxiedDecayCandidates is the proxied route's decay selection: the
+// closed issues filter selects and the workspace's types.retained setting,
+// read on one unit of work, then the closed-deletion safety filter and the
+// retained-type hold-back (holdBackRetainedTypes). It returns the issues the
+// decay may delete and how many it held back as retained, and prints the
+// safety skips and the kept line. A failed read of either fails the decay.
+func readProxiedDecayCandidates(ctx context.Context, filter types.IssueFilter, cutoff *time.Time) ([]*types.Issue, int, error) {
+	type decayRead struct {
+		closed    []*types.Issue
+		retained  string
+		protected workapi.GCProtectedLabels
+	}
+	read, err := uow.RunTxRead(ctx, uowProvider, func(ctx context.Context, uw uow.UnitOfWork) (decayRead, error) {
+		page, err := uw.IssueUseCase().SearchIssues(ctx, "", filter)
+		if err != nil {
+			return decayRead{}, fmt.Errorf("searching closed issues: %w", err)
+		}
+		retained, err := uw.ConfigUseCase().GetConfig(ctx, issueops.SettingKeyTypesRetained)
+		if err != nil {
+			return decayRead{}, fmt.Errorf("reading %s: %w", issueops.SettingKeyTypesRetained, err)
+		}
+		// The candidates, types.retained and the protected-label set come off
+		// ONE read, so a setting changed mid-sweep cannot leave them
+		// describing different workspaces.
+		return decayRead{closed: page.Items, retained: retained, protected: resolveGCProtectedLabels(ctx, uowMolReader{uw: uw})}, nil
+	})
+	if err != nil {
+		return nil, 0, err
+	}
+	closedIssues, stats := filterClosedDeletionCandidates(read.closed, cutoff, read.protected)
+	warnClosedDeletionSafetySkips(stats)
+	reportGCLabelProtectedSkips(stats, read.protected)
+	closedIssues, kept := holdBackRetainedTypes(closedIssues, read.retained)
+	if kept > 0 && !jsonOutput {
+		fmt.Println(retainedTypesKeptLine(kept, "closed issue(s)"))
+	}
+	return closedIssues, kept, nil
 }

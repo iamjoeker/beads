@@ -5,6 +5,7 @@ import (
 	"database/sql"
 	"errors"
 	"fmt"
+	"math"
 	"strings"
 	"time"
 
@@ -86,7 +87,13 @@ type CreateIssueResult struct {
 	// StaleRejected reports that the RejectStaleUpserts guard kept the stored
 	// row: nothing was written, and the issue's aux data must not be
 	// persisted by later batch stages either (bd-578h9.8).
-	StaleRejected         bool
+	StaleRejected bool
+	// RetiredSkipped reports that the row's explicit id is retired (a
+	// retaining sweep deleted it and kept its tombstone) and the batch's
+	// options said to skip such rows rather than refuse them
+	// (BatchCreateOptions.OnRetiredID, ConflictSkip): nothing was written, and
+	// the issue's aux data must not be persisted by later batch stages either.
+	RetiredSkipped        bool
 	persistedDependencies []persistedDependency
 	// persistedComments are the comments this create actually inserted, carried
 	// up to the entry point so their journal rows land AFTER the create's. A
@@ -139,9 +146,13 @@ func mergeChangedTables(dst map[string]bool, src map[string]bool) map[string]boo
 
 func CreateIssueInTxWithResult(ctx context.Context, tx DBTX, bc *BatchContext, issue *types.Issue, actor string) (CreateIssueResult, error) {
 	var result CreateIssueResult
-	issueTable, eventTable, skip, err := prepareCreateIssueInTx(ctx, tx, bc, issue, actor)
-	if err != nil || skip {
+	issueTable, eventTable, outcome, err := prepareCreateIssueInTx(ctx, tx, bc, issue, actor)
+	if err != nil || outcome == prepareSkip {
 		return result, err
+	}
+	if outcome == prepareRetiredSkip {
+		result.RetiredSkipped = true
+		return result, nil
 	}
 
 	isNew, staleRejected, err := insertIssueIfNewCached(ctx, tx, issueTable, issue, bc.Opts, bc.cache)
@@ -161,31 +172,96 @@ func CreateIssueInTxWithResult(ctx context.Context, tx DBTX, bc *BatchContext, i
 	return finishCreateIssueInTx(ctx, tx, bc, issue, actor, issueTable, eventTable, isNew)
 }
 
+// prepareOutcome is what prepareCreateIssueInTx decided for one issue.
+type prepareOutcome int
+
+const (
+	// prepareWrite: the row is to be written.
+	prepareWrite prepareOutcome = iota
+	// prepareSkip: a cross-plane collision the options tolerate
+	// (ConflictSkip). Nothing is written for the row itself, but the issue
+	// stays in the batch, so its labels, comments and edges still merge.
+	prepareSkip
+	// prepareRetiredSkip: the explicit id is retired and the options say to
+	// skip such rows. Nothing at all is written for the issue.
+	prepareRetiredSkip
+)
+
 // prepareCreateIssueInTx is the part of a create before its row write:
 // normalization and validation, table routing, id assignment, the create-only
-// guard and the cross-plane collision check. skip reports a collision the
-// options tolerate (ConflictSkip): nothing is written for the issue.
-func prepareCreateIssueInTx(ctx context.Context, tx DBTX, bc *BatchContext, issue *types.Issue, actor string) (issueTable, eventTable string, skip bool, err error) {
+// guard, the retired-id guard and the cross-plane collision check.
+//
+// THE RETIRED-ID GUARD covers the upsert-shaped creates (CreateOnly false:
+// the stores' CreateIssue, transactions, import, tracker sync) for an
+// EXPLICIT id; a create-only create meets the same rule inside
+// EnsureIssueIDAvailableInTx, and a generated id is never retired (the
+// generators skip tombstones). Without it an upsert would resurrect a row a
+// retaining sweep retired. A retired id with no live row is refused with
+// *publicops.IdempotencyExpiredError, unless the options say to skip it:
+// ConflictSkip or OnRetiredID skips it, and OnRetiredID, when set, reports it
+// under ConflictSkip too.
+func prepareCreateIssueInTx(ctx context.Context, tx DBTX, bc *BatchContext, issue *types.Issue, actor string) (issueTable, eventTable string, outcome prepareOutcome, err error) {
 	if err := PrepareIssueForInsert(issue, bc.CustomStatuses, bc.CustomTypes); err != nil {
-		return "", "", false, err
+		return "", "", prepareWrite, err
 	}
 
 	issueTable, eventTable = TableRouting(issue)
 
-	if err := assignCreateIssueIDInTx(ctx, tx, bc, issue, actor); err != nil {
-		return "", "", false, err
+	explicitID := issue.ID != ""
+	// No claimed set. Each issue is written before the next one mints, so a
+	// mint sees every EARLIER issue's row; an explicit id a LATER issue of the
+	// same slice names is not seen, and a mint can still draw it.
+	if err := assignCreateIssueIDInTx(ctx, tx, bc, issue, actor, nil); err != nil {
+		return "", "", prepareWrite, err
 	}
 	if bc.Opts.CreateOnly {
-		if err := EnsureIssueIDAvailableInTx(ctx, tx, issue.ID); err != nil {
-			return "", "", false, err
+		// A batch that coordinated this id up front already holds its cell.
+		ensure := EnsureIssueIDAvailableInTx
+		if bc.cache.coordinatedID(issue.ID) {
+			ensure = checkIssueIDAvailableInTx
+		}
+		if err := ensure(ctx, tx, issue.ID); err != nil {
+			return "", "", prepareWrite, err
+		}
+		// The guard has just read both planes in this transaction and found
+		// no row with this id, so the cross-plane collision check below would
+		// re-read the sibling plane only to find the same nothing.
+		return issueTable, eventTable, prepareWrite, nil
+	}
+	if explicitID {
+		// Coordinate before the probe (CoordinateIDCreatesInTx): on READ
+		// COMMITTED a retaining sweep could otherwise commit between the probe
+		// and the upsert below. A batch that coordinated up front already did.
+		if !bc.cache.coordinatedID(issue.ID) {
+			if err := CoordinateIDCreatesInTx(ctx, tx, []string{issue.ID}); err != nil {
+				return "", "", prepareWrite, err
+			}
+		}
+		retired, err := bc.cache.retiredNotLive(ctx, tx, issue.ID)
+		if err != nil {
+			return "", "", prepareWrite, err
+		}
+		if retired != nil {
+			// Report before skipping, ConflictSkip or not, so a caller that
+			// counts the rows it wrote never counts a retired one.
+			if bc.Opts.OnRetiredID != nil {
+				bc.Opts.OnRetiredID(issue.ID)
+			}
+			if bc.Opts.ConflictSkip || bc.Opts.OnRetiredID != nil {
+				return issueTable, eventTable, prepareRetiredSkip, nil
+			}
+			return "", "", prepareWrite, idempotencyExpired(retired)
 		}
 	}
 
-	skip, err = checkCrossTableIDCollisionCached(ctx, tx, issue.ID, issueTable, bc.Opts, bc.cache)
+	skip, err := checkCrossTableIDCollisionCached(ctx, tx, issue.ID, issueTable, bc.Opts, bc.cache)
 	if err != nil {
-		return "", "", false, err
+		return "", "", prepareWrite, err
 	}
-	return issueTable, eventTable, skip, nil
+	if skip {
+		return issueTable, eventTable, prepareSkip, nil
+	}
+	return issueTable, eventTable, prepareWrite, nil
 }
 
 // finishCreateIssueInTx is the part of a create after its row is written:
@@ -243,8 +319,9 @@ func finishCreateIssueInTx(ctx context.Context, tx DBTX, bc *BatchContext, issue
 	}
 	// Journal the create once, after labels and comments are in the row's
 	// transaction, so the snapshot is the complete bead. The early returns above
-	// (collision skip, stale reject) wrote nothing and journal nothing.
-	if err := RecordEventInTx(ctx, tx, EventCreate, issue.ID, actor); err != nil {
+	// (collision skip, stale reject) wrote nothing and journal nothing. The
+	// record hands the row's arrival_seq back onto issue, which callers keep.
+	if err := RecordCreateEventInTx(ctx, tx, issue, actor); err != nil {
 		return result, err
 	}
 	// The version row is the create's LAST durable-state write. A batch
@@ -274,7 +351,10 @@ func finishCreateIssueInTx(ctx context.Context, tx DBTX, bc *BatchContext, issue
 	return result, nil
 }
 
-func assignCreateIssueIDInTx(ctx context.Context, tx DBTX, bc *BatchContext, issue *types.Issue, actor string) error {
+// assignCreateIssueIDInTx mints issue an id when it names none, passing over
+// the ids claimed holds (GenerateIssueIDInTable), and otherwise validates the
+// prefix of the one it names.
+func assignCreateIssueIDInTx(ctx context.Context, tx DBTX, bc *BatchContext, issue *types.Issue, actor string, claimed map[string]bool) error {
 	if issue.ID == "" {
 		issueTable, _ := TableRouting(issue)
 		prefix := bc.ConfigPrefix
@@ -286,7 +366,7 @@ func assignCreateIssueIDInTx(ctx context.Context, tx DBTX, bc *BatchContext, iss
 			prefix = bc.ConfigPrefix + "-wisp"
 		}
 		var err error
-		issue.ID, err = GenerateIssueIDInTable(ctx, tx, issueTable, prefix, issue, actor)
+		issue.ID, err = GenerateIssueIDInTable(ctx, tx, issueTable, prefix, issue, actor, claimed)
 		if err != nil {
 			return fmt.Errorf("failed to generate issue ID: %w", err)
 		}
@@ -298,6 +378,23 @@ func assignCreateIssueIDInTx(ctx context.Context, tx DBTX, bc *BatchContext, iss
 		}
 	}
 	return nil
+}
+
+// ResetCreateIDsIfRolledBack runs reset when err means the create's
+// transaction rolled back, and returns err unchanged. A nil error keeps the
+// filled IDs (the rows exist), and so does an error wrapping
+// storage.ErrCommitIndeterminate (directly or inside errors.Join): the commit
+// may have landed, so the IDs may name real rows.
+//
+// Store create entry points take a SnapshotUnsetCreateIDs snapshot before
+// their transaction and hand its closure here on the transaction's error
+// return, so a create that rolled back leaves the caller's struct as it was
+// passed in and a retry of the same struct mints afresh (GH#8457).
+func ResetCreateIDsIfRolledBack(err error, reset func()) error {
+	if err != nil && !errors.Is(err, storage.ErrCommitIndeterminate) && reset != nil {
+		reset()
+	}
+	return err
 }
 
 // CreateIssuesResult reports side effects that callers need for selective
@@ -383,7 +480,7 @@ func CreateIssuesInTxWithContext(ctx context.Context, tx DBTX, bc *BatchContext,
 	// creation, minted last).
 	batch.DeferVersionMint = true
 	if len(issues) >= createBatchCacheMinIssues && !createFastPathsDisabled.Load() {
-		cache, err := newCreateBatchCache(ctx, tx, issues)
+		cache, err := newCreateBatchCache(ctx, tx, issues, opts)
 		if err != nil {
 			return CreateIssuesResult{}, err
 		}
@@ -398,8 +495,10 @@ func CreateIssuesInTxWithContext(ctx context.Context, tx DBTX, bc *BatchContext,
 		if issueResult.versionDeferred {
 			toVersion = append(toVersion, deferredVersion{id: issue.ID, isNew: issueResult.isNew})
 		}
-		if issueResult.StaleRejected {
-			return // stale snapshot: keep its deps out of the batch too
+		if issueResult.StaleRejected || issueResult.RetiredSkipped {
+			// A stale snapshot or a retired id: nothing of the issue was
+			// written, so keep its deps out of the batch too.
+			return
 		}
 		accepted = append(accepted, issue)
 	}
@@ -474,7 +573,7 @@ func CreateIssuesInTxWithContext(ctx context.Context, tx DBTX, bc *BatchContext,
 	}
 	// The ids are this batch's rows, most of them fresh and edgeless: let the
 	// recompute skip the union statements for those (planRecomputeInTx).
-	recomputed, err := recomputeIsBlockedInTxWithResult(ctx, tx, issueIDs, wispIDs, true)
+	recomputed, err := recomputeIsBlockedInTxWithResult(ctx, tx, issueIDs, wispIDs, actor, recomputeOptions{splitEdgeless: true})
 	if err != nil {
 		return CreateIssuesResult{}, err
 	}
@@ -723,6 +822,12 @@ func PrepareIssueForInsert(issue *types.Issue, customStatuses, customTypes []str
 	if issue.ContentHash == "" {
 		issue.ContentHash = issue.ComputeContentHash()
 	}
+	// arrival_seq is assigned by storage alone, at the journal's create seam
+	// (stampArrivalSeqInTx). A value carried in from a caller, an import, or a
+	// row being moved between planes is never stored, and the struct must not
+	// claim one the row does not have; the create record hands the row's own
+	// stamp back (RecordCreateEventInTx).
+	issue.ArrivalSeq = 0
 	return nil
 }
 
@@ -845,7 +950,9 @@ func InsertIssueIfNew(ctx context.Context, tx DBTX, issueTable string, issue *ty
 // cache when it covers the id, and recording the write in cache.
 func insertIssueIfNewCached(ctx context.Context, tx DBTX, issueTable string, issue *types.Issue, opts storage.BatchCreateOptions, cache *createBatchCache) (isNew bool, staleRejected bool, err error) {
 	var existingCount int
-	if issue.ID != "" {
+	// A create-only insert that does not skip conflicts never reads the
+	// count: the strict INSERT itself refuses a duplicate.
+	if issue.ID != "" && (!opts.CreateOnly || opts.ConflictSkip) {
 		existingCount, err = cache.rowCount(ctx, tx, issueTable, issue.ID)
 		if err != nil {
 			return false, false, fmt.Errorf("failed to check issue existence for %s: %w", issue.ID, err)
@@ -1081,7 +1188,15 @@ func PersistComments(ctx context.Context, tx DBTX, issue *types.Issue) (CreateIs
 			continue
 		}
 		// Incoming id (import/interchange): preserve it, with the historical
-		// existence check preventing duplicates on re-import.
+		// content check preventing duplicates on re-import. The content check
+		// misses a stored comment whose id matches but whose text, author or
+		// time was edited since, and inserting it then collides on the
+		// primary key (Error 1062), rolling back the whole chunk. Resolve the
+		// id before writing: comment merge is additive, so a comment already
+		// stored on this issue keeps its stored fields in every mode — no
+		// rewrite, no comment journal event, whatever the issue row's own
+		// stale guard decided. An id owned by a different issue is a conflict
+		// the caller must see (not a silent remap, drop or duplicate).
 		var exists int
 		//nolint:gosec // G201: table is determined by ephemeral flag
 		if err := tx.QueryRowContext(ctx, fmt.Sprintf(`
@@ -1093,8 +1208,27 @@ func PersistComments(ctx context.Context, tx DBTX, issue *types.Issue) (CreateIs
 		if exists > 0 {
 			continue
 		}
+		var owner string
 		//nolint:gosec // G201: table is determined by ephemeral flag
-		_, err := tx.ExecContext(ctx, fmt.Sprintf(`
+		err := tx.QueryRowContext(ctx, fmt.Sprintf(`
+				SELECT issue_id FROM %s WHERE id = ?
+			`, commentTable), comment.ID).Scan(&owner)
+		switch {
+		case errors.Is(err, sql.ErrNoRows):
+			// Not stored anywhere: insert below, preserving the incoming id.
+		case err != nil:
+			return result, fmt.Errorf("failed to check comment id %s for %s: %w", comment.ID, issue.ID, err)
+		case owner == issue.ID:
+			// Already stored on this issue: keep the stored comment (fields
+			// and journal state), whatever the incoming snapshot says.
+			continue
+		default:
+			return result, fmt.Errorf(
+				"cannot import comment %s on issue %s: it is already stored on issue %s",
+				comment.ID, issue.ID, owner)
+		}
+		//nolint:gosec // G201: table is determined by ephemeral flag
+		_, err = tx.ExecContext(ctx, fmt.Sprintf(`
 			INSERT INTO %s (id, issue_id, author, text, created_at)
 			VALUES (?, ?, ?, ?, ?)
 		`, commentTable), comment.ID, issue.ID, comment.Author, comment.Text, createdAtText)
@@ -1289,14 +1423,16 @@ func recordSkippedDependencyEdge(opts storage.BatchCreateOptions, issueID, depen
 	opts.OnSkippedDependency(issueID, dependsOnID, reason)
 }
 
+// childCounterBucket is one parent's pending counter reservation: the highest
+// direct child suffix to preserve, and the parent's plane once known.
+type childCounterBucket struct {
+	maxChild int
+	isWisp   bool
+	known    bool
+}
+
 func ReconcileChildCounters(ctx context.Context, tx DBTX, issues []*types.Issue) (map[string]bool, error) {
-	type bucket struct {
-		maxChild int
-		isWisp   bool
-		known    bool
-	}
-	parents := make(map[string]*bucket)
-	var changed map[string]bool
+	parents := make(map[string]*childCounterBucket)
 
 	for _, issue := range issues {
 		if issue == nil {
@@ -1306,7 +1442,7 @@ func ReconcileChildCounters(ctx context.Context, tx DBTX, issues []*types.Issue)
 			if b, ok := parents[issue.ID]; ok {
 				b.isWisp, b.known = true, true
 			} else {
-				parents[issue.ID] = &bucket{isWisp: true, known: true}
+				parents[issue.ID] = &childCounterBucket{isWisp: true, known: true}
 			}
 		}
 	}
@@ -1321,13 +1457,71 @@ func ReconcileChildCounters(ctx context.Context, tx DBTX, issues []*types.Issue)
 		}
 		b, exists := parents[parentID]
 		if !exists {
-			b = &bucket{}
+			b = &childCounterBucket{}
 			parents[parentID] = b
 		}
 		if childNum > b.maxChild {
 			b.maxChild = childNum
 		}
 	}
+
+	return applyChildCounterBuckets(ctx, tx, parents)
+}
+
+// ReserveChildSuffixesInTx preserves, in each surviving immediate parent's
+// existing child counter, the highest direct child suffix among ids: the ids a
+// create or rename just materialized, or the ids a removal is about to delete
+// or a rename just vacated (GH#4750). The counter is the parent's
+// automatic-allocation high-water mark, and once a row is gone it is the only
+// record that its suffix was used; without this a plain removal of the
+// highest child, under a counter that lagged it (a database written before
+// the singular create reconciled, or a child created through a door that did
+// not advance it), let the next generated child re-mint the removed id.
+//
+// The counter is written in the parent's own plane (child_counters for an
+// issues-plane parent, wisp_child_counters for a wisps-plane one), never the
+// child's. A parent named in departing (the complete set a removal deletes)
+// gets no counter, nor does a parent with no row: both counter tables require
+// an owner. An adequate counter is left alone and a raise is GREATEST, so the
+// counter never decreases. This is not retention: plain removal writes no
+// tombstone, and an explicit create may still reuse the removed id.
+//
+// A suffix above math.MaxInt32 (a legacy P.3000000000) is skipped. The INT
+// counter column cannot hold it, and the allocator stores every suffix it
+// mints in that column, so it can never mint such a suffix again. Skipping
+// keeps the create, rename or removal that names it working; clamping the
+// counter to math.MaxInt32 instead would leave the parent no suffix to mint.
+//
+// The returned set names the counter tables written, for callers that stage
+// tables for a Dolt commit.
+func ReserveChildSuffixesInTx(ctx context.Context, tx DBTX, ids []string, departing map[string]bool) (map[string]bool, error) {
+	parents := make(map[string]*childCounterBucket)
+	for _, id := range ids {
+		parentID, childNum, ok := ParseHierarchicalID(id)
+		if !ok || childNum <= 0 || childNum > math.MaxInt32 || departing[parentID] {
+			continue
+		}
+		b, exists := parents[parentID]
+		if !exists {
+			b = &childCounterBucket{}
+			parents[parentID] = b
+		}
+		if childNum > b.maxChild {
+			b.maxChild = childNum
+		}
+	}
+	if len(parents) == 0 {
+		return nil, nil
+	}
+	return applyChildCounterBuckets(ctx, tx, parents)
+}
+
+// applyChildCounterBuckets routes every bucket whose plane is not yet known by
+// its parent's live row, then raises each existing parent's counter to at
+// least the bucket's maximum. It is the shared write half of
+// ReconcileChildCounters and ReserveChildSuffixesInTx.
+func applyChildCounterBuckets(ctx context.Context, tx DBTX, parents map[string]*childCounterBucket) (map[string]bool, error) {
+	var changed map[string]bool
 
 	unknownParentIDs := make([]string, 0, len(parents))
 	for parentID, b := range parents {

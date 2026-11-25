@@ -21,9 +21,8 @@ import (
 )
 
 // guardLegacyUpgradeWorkspace rejects the reviewed pre-Dolt and legacy-Dolt
-// workspace shapes, and workspaces whose metadata declares a format this build
-// cannot open (checkWorkspaceFormat), before command setup can track a version,
-// migrate metadata, or construct a store. It intentionally classifies only
+// workspace shapes before command setup can track a version, migrate
+// metadata, or construct a store. It intentionally classifies only
 // metadata, regular SQLite files, and the bounded local version witness;
 // storage internals stay behind the driver boundary. Render its refusals with
 // handleWorkspaceGuardError.
@@ -44,16 +43,10 @@ func guardLegacyUpgradeWorkspaceForInit(beadsDir string, initSelectsServer bool)
 	if beadsDir == "" {
 		return nil
 	}
-	// This guard admits only the ordinary Issue store. A workspace in another
-	// format is refused before any legacy classification, which could
-	// otherwise admit it, or report it as a legacy store to migrate.
-	cfg, err := loadAndCheckWorkspaceFormat(beadsDir)
+	cfg, err := configfile.LoadForDiscovery(beadsDir)
 	if err != nil {
-		// A format refusal stays fatal; unreadable metadata is unclassified,
-		// which the repair-path guards (bd init) downgrade to a warning.
-		if isUnsupportedWorkspaceFormat(err) {
-			return err
-		}
+		// Unreadable metadata is unclassified, which the repair-path guards
+		// (bd init) downgrade to a warning rather than a legacy refusal.
 		return legacyUpgradeUnclassifiedError{err: err}
 	}
 	// The same refusal, with the same text, that every path opening a
@@ -96,8 +89,8 @@ type legacyDoltModes struct {
 // guardLegacyUpgradeWorkspace: it refuses a workspace whose .beads/dolt root,
 // version witness and server intent (modes) place it in a legacy Dolt era,
 // and admits every other. cfg is the workspace's metadata as discovery reads
-// it (nil for none), already checked for format, historical SQLite and
-// backend. It writes nothing; it may warn about an unreadable witness.
+// it (nil for none), already checked for historical SQLite and backend. It
+// writes nothing; it may warn about an unreadable witness.
 func classifyLegacyDoltWorkspace(beadsDir string, cfg *configfile.Config, modes legacyDoltModes) error {
 	serverMode, initSelectsServer := modes.serverMode, modes.initSelectsServer
 	if embeddeddolt.HasRepository(beadsDir) && !serverMode {
@@ -227,12 +220,12 @@ func guardUndiscoveredLegacyWorkspace() error {
 	return nil
 }
 
-// checkUndiscoveredWorkspaceFormat refuses a workspace that discovery passed
+// checkUndiscoveredForOpen refuses a workspace that discovery passed
 // over, such as one marked only by a legacy config.json or holding only a
-// SQLite database, when it is in a format this build cannot open or is a
-// historical SQLite workspace (checkDiscoveredForOpen), and nothing else. It
-// reads metadata without migrating it.
-func checkUndiscoveredWorkspaceFormat() error {
+// SQLite database, when it is a historical SQLite workspace
+// (checkDiscoveredForOpen), and nothing else. It reads metadata without
+// migrating it.
+func checkUndiscoveredForOpen() error {
 	for _, beadsDir := range undiscoveredWorkspaceCandidates() {
 		if err := checkDiscoveredForOpen(beadsDir); err != nil {
 			return err
@@ -418,8 +411,7 @@ func isLegacyUpgradeRefusal(err error) bool {
 type legacyUpgradeUnclassifiedError struct{ err error }
 
 func (err legacyUpgradeUnclassifiedError) Error() string {
-	// err.err already reads "loading config: ..." (configfile.LoadAndCheckWorkspaceFormat).
-	return err.err.Error()
+	return fmt.Sprintf("loading config: %v", err.err)
 }
 
 func (err legacyUpgradeUnclassifiedError) Unwrap() error { return err.err }

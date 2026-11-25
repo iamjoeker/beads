@@ -4,6 +4,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"io"
 	"os"
 	"path/filepath"
 	"slices"
@@ -104,8 +105,9 @@ This command checks:
 Storage Availability:
   Full diagnostics, --perf, --deep, --server, --migration, and
   --check=validate currently require Dolt server mode. Embedded Dolt
-  supports --check=artifacts, --check=conventions, and
-  --check=pollution. --check-health has a limited hook-health fallback.
+  supports --check=artifacts, --check=conventions,
+  --check=export, and --check=pollution. --check-health has a limited
+  hook-health fallback.
   Unsupported combinations return a notice without changing storage.
 
 Performance Mode (--perf):
@@ -122,9 +124,14 @@ Export Mode (--output):
 Specific Check Mode (--check):
   Run a specific check in detail. Available checks:
   - artifacts: Detect and optionally clean beads classic artifacts
-    (stale JSONL, SQLite files, cruft .beads dirs). Use with --clean.
+    (SQLite files, cruft .beads dirs). Use with --clean. Does not
+    check export coverage - see the export check.
   - conventions: Check for convention drift (lint warnings, stale
     issues, orphaned issues). Advisory only - warns, never blocks.
+  - export: Compare in-scope store issue IDs against the passive export
+    file's IDs (coverage only, not content equality). Reports missing
+    IDs as a warning; read-only even with --fix/--clean. Refresh
+    manually with: bd export -o <resolved-path>
   - pollution: Detect and optionally clean test issues from database
   - validate: Run focused data-integrity checks (duplicates, orphaned
     deps, test pollution, git conflicts). Use with --fix to auto-repair.
@@ -143,7 +150,7 @@ Deep Validation Mode (--deep):
 Server Mode (--server):
   Run health checks for Dolt server mode connections (bd-dolt.2.3):
   - Server reachable: Can connect to configured host:port?
-  - Dolt version: Is it a Dolt server (not vanilla MySQL)?
+  - Dolt version: Is it a Dolt server (not vanilla MySQL) at 2.6.0 or newer?
   - Database exists: Does the 'beads' database exist?
   - Schema compatible: Can query beads tables?
   - Connection pool: Pool health metrics
@@ -186,14 +193,13 @@ Examples:
   bd doctor --fix --yes  # Automatically fix issues (no confirmation)
   bd doctor --fix -i     # Confirm each fix individually
   bd doctor --fix --fix-child-parent  # Also fix child→parent deps (opt-in)
-  bd doctor --fix --force # Force repair even when database can't be opened
-  bd doctor --fix --source=jsonl # Rebuild database from a JSONL export
   bd doctor --dry-run    # Preview what --fix would do without making changes
   bd doctor --perf       # Performance diagnostics
   bd doctor --output diagnostics.json  # Export diagnostics to file
   bd doctor --check=artifacts           # Show classic artifacts (JSONL, SQLite, cruft dirs)
   bd doctor --check=artifacts --clean  # Delete safe-to-delete artifacts (with confirmation)
   bd doctor --check=conventions        # Convention drift check (lint, stale, orphans)
+  bd doctor --check=export             # Warn when the export file is missing store IDs
   bd doctor --check=pollution          # Show potential test issues
   bd doctor --check=pollution --clean  # Delete test issues (with confirmation)
   bd doctor --check=validate         # Data-integrity checks only
@@ -281,6 +287,11 @@ Examples:
 				return runConventionsCheck(absPath)
 			case "pollution":
 				return runPollutionCheck(absPath, doctorClean, doctorYes)
+			case "export":
+				// Read-only coverage diagnostic (GH#6955): no --clean/--fix
+				// mutation is associated with it, and it works in embedded
+				// mode alongside the other individually gated checks.
+				return runExportCoverageCheck(absPath, len(args) > 0)
 			case "validate":
 				if isEmbeddedMode() {
 					printEmbeddedUnsupported("doctor --check=validate")
@@ -288,7 +299,7 @@ Examples:
 				}
 				return runValidateCheck(absPath)
 			default:
-				return HandleErrorWithHint(fmt.Sprintf("unknown check %q", doctorCheckFlag), "Available checks: artifacts, conventions, pollution, validate")
+				return HandleErrorWithHint(fmt.Sprintf("unknown check %q", doctorCheckFlag), "Available checks: artifacts, conventions, export, pollution, validate")
 			}
 		}
 
@@ -299,7 +310,7 @@ Examples:
 		// that reach into the database layer stay server-gated until the
 		// storage driver interface covers them (AGENTS.md "Storage Boundary").
 		if isEmbeddedMode() {
-			printEmbeddedUnsupported("doctor")
+			printEmbeddedUnsupportedWith("doctor", embeddedDoctorHostIssues())
 			return nil
 		}
 
@@ -493,13 +504,21 @@ func printLegacyUpgradeDiagnostic(err error) error {
 // a `code` field, and is wrapped with schema_version. Exit code stays 0 - a
 // benign refusal, not a failure.
 func printEmbeddedUnsupported(commandLabel string) {
+	printEmbeddedUnsupportedWith(commandLabel, nil)
+}
+
+// printEmbeddedUnsupportedWith is printEmbeddedUnsupported with store-free
+// host-level issues shown alongside the stub (GH#8113): in prose above the
+// "Note:" line, in JSON as "host_checks". With no issues the output is
+// exactly printEmbeddedUnsupported's.
+func printEmbeddedUnsupportedWith(commandLabel string, hostIssues []doctorCheck) {
 	hints := []string{
 		"Verify database exists:  ls -la .beads/embeddeddolt/",
 		"Check bd version:        bd version",
-		"Reinitialize if needed:  bd init --reinit-local",
+		"If it will not open:     preserve it first, then recover: " + doctor.EngineWontOpenRecoveryURL,
 		"Switch to server mode:   bd init --server",
 	}
-	supported := []string{"artifacts", "conventions", "pollution"}
+	supported := []string{"artifacts", "conventions", "export", "pollution"}
 	unsupported := []string{"validate"}
 
 	if jsonOutput || doctorAgent {
@@ -513,12 +532,21 @@ func printEmbeddedUnsupported(commandLabel string) {
 			"checks_unsupported_in_embedded_mode": unsupported,
 			"hints":                               hints,
 		}
+		if len(hostIssues) > 0 {
+			payload["host_checks"] = hostIssues
+		}
 		encoder := json.NewEncoder(os.Stderr)
 		encoder.SetIndent("", "  ")
 		_ = encoder.Encode(wrapWithSchemaVersion(payload))
 		return
 	}
 
+	if len(hostIssues) > 0 {
+		for _, check := range hostIssues {
+			fprintDoctorIssue(os.Stderr, check.printed())
+		}
+		fmt.Fprintln(os.Stderr, "")
+	}
 	fmt.Fprintf(os.Stderr, "Note: 'bd %s' is not yet supported in embedded mode.\n\n", commandLabel)
 	fmt.Fprintln(os.Stderr, "For embedded mode troubleshooting:")
 	for _, h := range hints {
@@ -528,7 +556,32 @@ func printEmbeddedUnsupported(commandLabel string) {
 	fmt.Fprintln(os.Stderr, "Checks available in embedded mode:")
 	fmt.Fprintln(os.Stderr, "  • bd doctor --check=artifacts")
 	fmt.Fprintln(os.Stderr, "  • bd doctor --check=conventions")
+	fmt.Fprintln(os.Stderr, "  • bd doctor --check=export")
 	fmt.Fprintln(os.Stderr, "  • bd doctor --check=pollution")
+}
+
+// fprintDoctorIssue writes one non-OK check to w the way printDiagnostics
+// renders an issue: icon and "Name: Message", muted Detail, then the Fix
+// lines under a muted tree branch. check should already be printed().
+func fprintDoctorIssue(w io.Writer, check doctorCheck) {
+	line := fmt.Sprintf("%s: %s", check.Name, check.Message)
+	if check.Status == statusError {
+		fmt.Fprintf(w, "  %s  %s\n", ui.RenderFailIcon(), ui.RenderFail(line))
+	} else {
+		fmt.Fprintf(w, "  %s  %s\n", ui.RenderWarnIcon(), line)
+	}
+	if check.Detail != "" {
+		fmt.Fprintf(w, "      %s\n", ui.RenderMuted(check.Detail))
+	}
+	if check.Fix != "" {
+		for j, fixLine := range strings.Split(check.Fix, "\n") {
+			if j == 0 {
+				fmt.Fprintf(w, "      %s%s\n", ui.MutedStyle.Render(ui.TreeLast), fixLine)
+			} else {
+				fmt.Fprintf(w, "        %s\n", fixLine)
+			}
+		}
+	}
 }
 
 func runDiagnostics(path string) doctorResult {
@@ -585,6 +638,12 @@ func runDiagnostics(path string) doctorResult {
 	result.Checks = append(result.Checks, doltHooksCheck)
 	if doltHooksCheck.Status == statusError {
 		result.OverallOK = false
+	}
+
+	// Legacy macOS user config (GH#8113): host-level and store-free, so it runs
+	// before the no-.beads early return. Warning-class; never flips OverallOK.
+	if macCheck, ok := macOSLegacyUserConfigCheck(); ok {
+		result.Checks = append(result.Checks, macCheck)
 	}
 
 	// If no .beads/, skip remaining checks
@@ -838,7 +897,7 @@ func runDiagnostics(path string) doctorResult {
 
 	// Check 10b: Rekey-backfill leftovers — randomly-keyed or targetless
 	// dependency rows that survive the #4259 migration backfill (bd-6dnrw.17).
-	depKeyCheck := convertWithCategory(doctor.CheckDependencyKeysWithStore(sharedStore), doctor.CategoryMetadata)
+	depKeyCheck := convertWithCategory(doctor.CheckDependencyKeysWithStore(path, sharedStore), doctor.CategoryMetadata)
 	result.Checks = append(result.Checks, depKeyCheck)
 	if depKeyCheck.Status == statusError || depKeyCheck.Status == statusWarning {
 		result.OverallOK = false
@@ -851,7 +910,7 @@ func runDiagnostics(path string) doctorResult {
 	// patch, and is_blocked is self-healing via 'bd doctor --fix' / the next
 	// pull's recompute — surface it as actionable without turning doctor red
 	// across the fleet if an unforeseen dependency shape trips the predicate.
-	blockedConsistencyCheck := convertWithCategory(doctor.CheckBlockedConsistencyWithStore(sharedStore), doctor.CategoryData)
+	blockedConsistencyCheck := convertWithCategory(doctor.CheckBlockedConsistencyWithStore(path, sharedStore), doctor.CategoryData)
 	result.Checks = append(result.Checks, blockedConsistencyCheck)
 
 	// Check 10d: label whitespace damage (#5812) — labels written by a bd that
@@ -1010,7 +1069,7 @@ func runDiagnostics(path string) doctorResult {
 	// Don't fail overall check for untracked files, just warn
 
 	// Check 21: Orphaned dependencies (from bd repair-deps, bd validate)
-	orphanedDepsCheck := convertDoctorCheck(doctor.CheckOrphanedDependencies(path))
+	orphanedDepsCheck := convertDoctorCheck(doctor.CheckOrphanedDependencies(path, sharedStore))
 	result.Checks = append(result.Checks, orphanedDepsCheck)
 	// Don't fail overall check for orphaned deps, just warn
 
@@ -1020,7 +1079,7 @@ func runDiagnostics(path string) doctorResult {
 	// Don't fail overall check for severed clone-local FKs, just warn
 
 	// Check 22a: Child→parent dependencies (anti-pattern)
-	childParentDepsCheck := convertDoctorCheck(doctor.CheckChildParentDependencies(path))
+	childParentDepsCheck := convertDoctorCheck(doctor.CheckChildParentDependencies(path, sharedStore))
 	result.Checks = append(result.Checks, childParentDepsCheck)
 	// Don't fail overall check for child→parent deps, just warn
 

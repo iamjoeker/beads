@@ -4,6 +4,7 @@ import (
 	"errors"
 	"fmt"
 	"strings"
+	"time"
 
 	"github.com/steveyegge/beads/beadserrors"
 	"github.com/steveyegge/beads/internal/types"
@@ -131,6 +132,14 @@ var ErrPrefixMismatch = errors.New("prefix mismatch")
 // or an open blocking gate). Bypass with CloseIssueOptions.Force.
 var ErrCloseBlocked = errors.New("cannot close blocked issue")
 
+// ErrClaimBlocked is returned by a lifecycle update that claims an issue still
+// blocked by a live local blocker (an open blocks, waits-for or
+// conditional-blocks edge) — the same refusal close applies, carried by a
+// BlockedError. Bypass with UpdateRequest.ForceClaimBlocked. It is distinct
+// from the external-dependency guard's claim refusal, which wraps
+// ErrCloseBlocked and has no override.
+var ErrClaimBlocked = errors.New("cannot claim blocked issue")
+
 // Blocker is one live blocker named by a BlockedError: a local issue id, or an
 // `external:<project>:<capability>` reference, with the blocking edge's type
 // when the refusal knew it.
@@ -189,8 +198,8 @@ func ParseBlocker(s string) Blocker {
 // refusal elsewhere (the HTTP surface's `blockers` member) reads the typed list
 // instead of parsing that prose.
 //
-// Err is ErrCloseBlocked for a close-policy refusal. The type is not
-// close-specific: any refusal whose subject is "this issue is blocked by these"
+// Err is ErrCloseBlocked for a close-policy refusal and ErrClaimBlocked for a
+// blocked claim. The type is not close-specific: any refusal whose subject is "this issue is blocked by these"
 // can carry its own sentinel.
 type BlockedError struct {
 	// IssueID names the issue that was refused.
@@ -209,6 +218,15 @@ func NewCloseBlockedError(issueID string, blockers []string) *BlockedError {
 		parsed = append(parsed, ParseBlocker(blocker))
 	}
 	return &BlockedError{IssueID: issueID, Blockers: parsed, Err: ErrCloseBlocked}
+}
+
+// NewClaimBlockedError builds the blocked-claim refusal for issueID from the
+// []string blocker list a store's IsBlocked reports (see ParseBlocker). An
+// engine with the edges in hand builds BlockedError directly instead.
+func NewClaimBlockedError(issueID string, blockers []string) *BlockedError {
+	blocked := NewCloseBlockedError(issueID, blockers)
+	blocked.Err = ErrClaimBlocked
+	return blocked
 }
 
 func (e *BlockedError) Error() string {
@@ -290,6 +308,59 @@ func (e *CloseNotAssigneeError) Unwrap() error { return ErrNotOwner }
 // ErrAlreadyExists is returned when a create operation is given an ID that is
 // already occupied. The issue and wisp tables share one ID space.
 var ErrAlreadyExists = errors.New("issue already exists")
+
+// IdempotencyExpiredCode is the stable code a refused create of a retired id
+// carries off the process: the HTTP problem `code` (with status 410) and the
+// `code` member of the CLI's --json error envelope. It is declared once, here,
+// so the server, the client and the CLI cannot spell it three ways.
+//
+// A DELIBERATE DEPARTURE FROM BDP'S CODE FOR THIS SHAPE. Under BDP a
+// client-supplied identity of a deleted resource answers `identity-taken`
+// (409, retry never), and `idempotency-expired` (410) belongs to an expired
+// idempotency KEY. bd answers the latter because the ids it retires are keys:
+// the caller that pins an id names an operation that must run at most once,
+// and the tombstone is the expired key's permanent record, so "the create that
+// used this key already happened" is the answer that sends the caller the
+// right way (to its archive of outcomes, never to a new id). Both codes are
+// retry-never. bd also keeps no request fingerprint, so it never answers
+// BDP's `idempotency-conflict` either; a caller tells key reuse apart itself.
+const IdempotencyExpiredCode = "idempotency_expired"
+
+// ErrIdempotencyExpired is the sentinel every *IdempotencyExpiredError
+// matches. It is its own sentinel rather than ErrAlreadyExists because the two
+// answers send a caller in opposite directions: an occupied id still holds the
+// row the caller can read, while a retired id names a row a retention sweep
+// deleted after the create that used it had already happened. Retrying either
+// never succeeds; only the first is worth a read.
+var ErrIdempotencyExpired = errors.New("idempotency expired")
+
+// IdempotencyExpiredError refuses a create whose explicit id a RETAINING
+// retention sweep retired (SweepRequest.RetainIDs). The sweep deleted the row
+// and kept a permanent tombstone of its id, so the id behaves as an
+// idempotency key whose outcome has expired: the create that used it already
+// ran, and a create naming it never runs again. Nothing is written by the
+// refused request.
+//
+// It is never ErrAlreadyExists and never ErrValidation; it matches
+// ErrIdempotencyExpired.
+type IdempotencyExpiredError struct {
+	// ID is the retired id the refused create named.
+	ID string
+	// ClosedAt is when the swept row had closed, as its tombstone recorded it.
+	// It is the zero time when the reporting surface did not carry it.
+	ClosedAt time.Time
+}
+
+func (e *IdempotencyExpiredError) Error() string {
+	closed := ""
+	if !e.ClosedAt.IsZero() {
+		closed = " (closed " + e.ClosedAt.UTC().Format(time.RFC3339) + ")"
+	}
+	return fmt.Sprintf("idempotency expired: %s was retired by a retention sweep%s; a create of this id never runs again", e.ID, closed)
+}
+
+// Unwrap makes IdempotencyExpiredError match ErrIdempotencyExpired.
+func (e *IdempotencyExpiredError) Unwrap() error { return ErrIdempotencyExpired }
 
 // ErrAlreadyIdentified is returned by Bootstrapper.Bootstrap when the substrate
 // already carries a workspace identity. It is its own sentinel rather than

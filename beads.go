@@ -18,16 +18,19 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"strconv"
 	"time"
 
 	"github.com/steveyegge/beads/internal/beads"
 	"github.com/steveyegge/beads/internal/configfile"
 	"github.com/steveyegge/beads/internal/doltserver"
+	"github.com/steveyegge/beads/internal/proxiedopen"
 	"github.com/steveyegge/beads/internal/storage"
 	"github.com/steveyegge/beads/internal/storage/backends"
 	"github.com/steveyegge/beads/internal/storage/dolt"
 	"github.com/steveyegge/beads/internal/storage/domain"
 	"github.com/steveyegge/beads/internal/storage/schema"
+	"github.com/steveyegge/beads/internal/storage/uowstore"
 	"github.com/steveyegge/beads/internal/types"
 	"github.com/steveyegge/beads/internal/workspacegate"
 )
@@ -85,6 +88,98 @@ var ErrUserAgentWithoutOpenWith = backends.ErrUserAgentWithoutOpenWith
 // outside this module cannot import internal/storage/backends directly.
 var ErrUnsupportedCredential = backends.ErrUnsupportedCredential
 
+// ErrProxyUnavailable is returned by OpenBestAvailable and
+// OpenBestAvailableWith for a proxied-server workspace (dolt_mode
+// "proxied-server") when no bd proxy the library can use is running for its
+// server root and none can be started: either none is running and no `bd`
+// executable is on PATH to start one (run any bd command in the workspace,
+// or put bd on PATH, and retry), or the running proxy was started by a bd
+// older than 1.4, which the library cannot talk to and does not stop, since
+// every older bd on the workspace shares it (upgrade the bd on PATH and run
+// a bd command in the workspace, which replaces it, or wait for its idle
+// exit, and retry). The refused open creates no embedded store and starts or
+// stops no proxy (it may still create the server root directory and write
+// the proxied sql-server config). The library never starts the proxy from
+// the host executable. Match it with errors.Is.
+var ErrProxyUnavailable = proxiedopen.ErrProxyUnavailable
+
+// SchemaSkewError reports a database whose schema is newer than this
+// library. Match it with errors.As. Aliased here because internal/storage/schema
+// is unimportable outside this module.
+type SchemaSkewError = schema.SchemaSkewError
+
+// RemoteMigrateGateError reports an open refused because applying this
+// library's pending schema migrations in place would silently migrate a
+// database other clients share. Match it with errors.As.
+type RemoteMigrateGateError = schema.RemoteMigrateGateError
+
+// MigrateConsentError reports schema migrations that need operator consent
+// (see AllowSharedSchemaMigration). Match it with errors.As.
+type MigrateConsentError = schema.MigrateConsentError
+
+// proxiedCloseTimeout bounds the provider close on a failed proxied open,
+// matching the bound uowstore.Store.Close applies to the same call.
+const proxiedCloseTimeout = 10 * time.Second
+
+// openProxiedServer is the proxied-server arm of OpenBestAvailableWith, shared
+// verbatim by the cgo and CGO_ENABLED=0 builds: it opens the workspace through
+// the per-root bd proxy, exactly as the bd CLI does (GH#8323), and never
+// creates an embedded store or dials around the proxy.
+//
+// The posture is a root bd command's: the workspace's project identity is
+// asserted, and a managed-local root holding no Dolt database is refused
+// rather than initialized. A running proxy is adopted; with none, one is
+// started from `bd` on PATH, and with no bd there the open fails with
+// ErrProxyUnavailable. The events journal and versioned history are activated
+// under the same workspace switches as the CLI's. The returned store's Close
+// releases this handle's connections and leaves the shared proxy running.
+func openProxiedServer(ctx context.Context, beadsDir string) (Storage, error) {
+	p, err := proxiedopen.Open(ctx, beadsDir, proxiedopen.Options{
+		Identity:        proxiedopen.AssertWorkspaceIdentity,
+		FreshStore:      proxiedopen.RefuseFreshStore,
+		ProxyExecutable: proxiedopen.BDExecutableOnPath(beadsDir),
+	})
+	if err != nil {
+		return nil, err
+	}
+	st, err := uowstore.New(p)
+	if err != nil {
+		// Bounded like Store.Close: a wedged pool must not hang the open.
+		closeCtx, cancel := context.WithTimeout(context.WithoutCancel(ctx), proxiedCloseTimeout)
+		_ = p.Close(closeCtx)
+		cancel()
+		return nil, err
+	}
+	return st, nil
+}
+
+// routesThroughProxy reports whether OpenBestAvailableWith opens cfg's
+// workspace through its bd proxy (openProxiedServer): a proxied-server
+// workspace, unless the environment forces server mode and names the port
+// to dial. On a proxied workspace only BEADS_DOLT_SERVER_MODE or
+// BEADS_DOLT_SHARED_SERVER makes IsDoltServerMode true (host inference
+// exempts the mode). Such an open keeps the server arm when
+// BEADS_DOLT_SERVER_PORT names a port, parsed as dolt.ResolveServerPort
+// parses it, because that port outranks every other source the server arm
+// reads; this is the named-port exemption approved on #8476. Gas City's
+// proxied-native lane opens that way against a bd 1.3.x proxy, whose data
+// port still answers a plain MySQL client, and its env also pins what the
+// proxied arm ignores: no auto-start, the commit author, the pool bound.
+// The legacy BEADS_DOLT_PORT does not count, because a port persisted in
+// config.yaml or metadata.json outranks it. Without a named port the server
+// arm would dial a port bd resolves itself, never the proxy's data port, so
+// that open goes through the proxy.
+func routesThroughProxy(cfg *configfile.Config) bool {
+	if !cfg.IsDoltProxiedServerMode() {
+		return false
+	}
+	if !cfg.IsDoltServerMode() {
+		return true
+	}
+	port, err := strconv.Atoi(os.Getenv("BEADS_DOLT_SERVER_PORT"))
+	return err != nil || port <= 0
+}
+
 // configuredBackendUnavailable is the public open path's fail-closed refusal for
 // metadata naming a removed or unrecognized backend. beadsDir and cfg let the
 // refusal detect an already-present Dolt database and name the exact
@@ -101,15 +196,14 @@ func configuredBackendUnavailable(backend, beadsDir string, cfg *configfile.Conf
 
 // checkDiscoveredBackend refuses a workspace that OpenBestAvailableWith cannot
 // open, reading its metadata as configfile.LoadForDiscovery does, which never
-// rewrites the workspace: a format this build does not support or a historical
-// SQLite workspace (configfile.LoadDiscoveredForOpen), or a removed or
-// unrecognized backend (configuredBackendUnavailable). It runs before
-// configfile.Load, which migrates a legacy config.json into metadata.json and
-// drops the keys Config does not know, and before anything that creates a
-// database or gate file, as the CLI's command admission checks the same read
-// before any Load. Metadata that does not load is left to Load to report,
-// unless the graph format marker sits beside it; no metadata at all (and no
-// format marker or SQLite database) selects Dolt.
+// rewrites the workspace: a historical SQLite workspace
+// (configfile.LoadDiscoveredForOpen), or a removed or unrecognized backend
+// (configuredBackendUnavailable). It runs before configfile.Load, which
+// migrates a legacy config.json into metadata.json and drops the keys Config
+// does not know, and before anything that creates a database or gate file, as
+// the CLI's command admission checks the same read before any Load. Metadata
+// that does not load is left to Load to report; no metadata at all (and no
+// SQLite database) selects Dolt.
 func checkDiscoveredBackend(beadsDir string) error {
 	cfg, err := configfile.LoadDiscoveredForOpen(beadsDir)
 	if err != nil {
@@ -120,18 +214,6 @@ func checkDiscoveredBackend(beadsDir string) error {
 	}
 	return nil
 }
-
-// UnsupportedWorkspaceFormatError is returned by Open, OpenBestAvailable,
-// OpenBestAvailableWith, OpenFromConfig and OpenGated when the workspace
-// declares a data model this build cannot open: a metadata.json graph_mode
-// other than "dependency", such as the "link" workspaces graph-preview builds
-// of bd write, or the .beads/graph-preview-format marker those builds write
-// beside it (FormatMarker), whatever the metadata says. Nothing was opened,
-// created or modified. Match it with errors.As to read BeadsDir, GraphMode and
-// FormatMarker; the bd CLI refuses the same workspaces with exit code 16.
-// Aliased here because internal/configfile is unimportable outside this
-// module.
-type UnsupportedWorkspaceFormatError = configfile.UnsupportedWorkspaceFormatError
 
 // LegacyWorkspaceError is returned by Open, OpenBestAvailable,
 // OpenBestAvailableWith, OpenFromConfig and OpenGated for a workspace a
@@ -400,15 +482,17 @@ func AllowSharedSchemaMigration(allow bool) {
 	schema.SetSharedMigrateConsent(allow)
 }
 
-// Open opens a Dolt-backed beads database at the given path.
-// This always opens in embedded mode. Use OpenFromConfig to respect
-// server mode settings from metadata.json.
+// Open opens a Dolt-backed beads database at the given path, connecting to
+// a Dolt sql-server. Use OpenFromConfig to respect server mode settings
+// from metadata.json.
 //
 // The workspace holding dbPath (its parent directory) is refused, before
 // anything is written there, when bd run in it would refuse it from its
-// contents (checkDiscoveredBackend): a format this build cannot open
-// (*UnsupportedWorkspaceFormatError), a historical SQLite workspace
-// (*LegacyWorkspaceError), or a removed or unknown backend.
+// contents (checkDiscoveredBackend): a historical SQLite workspace
+// (*LegacyWorkspaceError), or a removed or unknown backend. An existing
+// database whose project ID differs from the one in that workspace's
+// metadata.json is refused as well, with an untyped PROJECT IDENTITY
+// MISMATCH error (GH#5559).
 func Open(ctx context.Context, dbPath string) (Storage, error) {
 	if err := checkDiscoveredBackend(filepath.Dir(dbPath)); err != nil {
 		return nil, err
@@ -426,9 +510,9 @@ func Open(ctx context.Context, dbPath string) (Storage, error) {
 // name configuration.
 // beadsDir is the path to the .beads directory.
 func OpenFromConfig(ctx context.Context, beadsDir string) (Storage, error) {
-	// NewFromConfigWithOptions refuses an unsupported format or backend
-	// (dolt.RequireDiscoveredDoltBackend) before its Load can migrate a
-	// legacy config.json.
+	// NewFromConfigWithOptions refuses a historical SQLite workspace or an
+	// unsupported backend (dolt.RequireDiscoveredDoltBackend) before its Load
+	// can migrate a legacy config.json.
 	st, err := dolt.NewFromConfigWithOptions(ctx, beadsDir, &dolt.Config{CreateIfMissing: true})
 	if err != nil {
 		// An untyped nil, as the other public opens return: a nil
@@ -670,9 +754,14 @@ var (
 	ErrAlreadyClaimed  = storage.ErrAlreadyClaimed
 	ErrNotClaimable    = storage.ErrNotClaimable
 	ErrCloseBlocked    = storage.ErrCloseBlocked
+	ErrClaimBlocked    = storage.ErrClaimBlocked
 	ErrVersionMismatch = storage.ErrVersionMismatch
-	ErrSelfDependency  = domain.ErrSelfDependency
-	ErrDependencyCycle = domain.ErrDependencyCycle
+	// ErrIdempotencyExpired matches a create refused because a retaining
+	// retention sweep retired its id: the create that used the id already
+	// happened and a create of it never runs again.
+	ErrIdempotencyExpired = storage.ErrIdempotencyExpired
+	ErrSelfDependency     = domain.ErrSelfDependency
+	ErrDependencyCycle    = domain.ErrDependencyCycle
 	// ErrDependencySourceNotFound and ErrDependencyTargetNotFound are the two
 	// endpoint-existence refusals AddDependency and AddDependencies raise; the
 	// typed value carrying the missing id is DependencyEndpointNotFoundError.

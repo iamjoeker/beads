@@ -3,6 +3,7 @@ package main
 import (
 	"context"
 	"fmt"
+	"github.com/steveyegge/beads/internal/remedy"
 	"os"
 	"strings"
 
@@ -130,7 +131,7 @@ func printHiddenPinnedNotice(ctx context.Context, s workapi.PinnedSearcher, p li
 	labels, _ := p.terms()
 	lines := hiddenPinnedNoticeLines(labels, countHiddenPinned(ctx, s, listing), resultCount, storeDesc)
 	for _, line := range lines {
-		fmt.Fprintln(os.Stderr, line)
+		fmt.Fprintln(os.Stderr, remedy.PrintedText(line))
 	}
 	return len(lines) > 0
 }

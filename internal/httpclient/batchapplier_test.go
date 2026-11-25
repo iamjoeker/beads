@@ -158,6 +158,9 @@ func TestApplyBatchRefusesEveryMemberTheWireExcludes(t *testing.T) {
 			{"ClosedBySession", "W-IssuePatch.ClosedBySession", issueops.IssuePatch{
 				ClosedBySession: issueops.Field[string]{Set: true, Value: "sess-1"},
 			}},
+			{"WispType", "W-IssuePatch.WispType", issueops.IssuePatch{
+				WispType: issueops.Field[issueops.WispType]{Set: true, Value: issueops.WispType("heartbeat")},
+			}},
 			// AwaitID and Waiters WERE here: both are carried behind
 			// issues.update.gates (W-IssuePatch.AwaitID retired).
 			// TestUpdateSendsTheGateMembersToAServerThatAdvertisesThem

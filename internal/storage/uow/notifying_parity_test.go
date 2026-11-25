@@ -147,6 +147,7 @@ func TestRecordingIssueUseCaseCoversItsSurface(t *testing.T) {
 			"GetEpicsEligibleForClosure":   reads,
 			"GetIssue":                     reads,
 			"GetIssuesByIDs":               reads,
+			"RetiredIssueIDs":              reads,
 			"GetMany":                      reads,
 			"GetNewlyUnblockedByClose":     reads,
 			"GetNewlyUnblockedByCloseWisp": reads,
@@ -280,6 +281,11 @@ func TestNotifyingProviderAnswersTheWholeProviderSurface(t *testing.T) {
 			"to an inner provider that can only take SetVersionedHistoryEnabled would drop the activation. " +
 			"A wrapped provider is activated through the forwarded SetVersionedHistoryEnabled instead, " +
 			"by the eager read",
+		"UnderlyingDB": "the raw-SQL escape hatch (SQLDBSource): statements on the pool bypass every " +
+			"unit of work, so there is no write to fire a hook for. Its one caller, uowstore, reaches it " +
+			"through UnwrapProvider, which peels this wrapper first",
+		"pool": "unexported guard over the concrete provider's own pool field (nil after Close), " +
+			"not a capability any caller can reach",
 		"initSchema":             "unexported provider setup, not a capability any caller can reach",
 		"initSchemaAttempt":      initBranch,
 		"verifyTeamServerSchema": initBranch,
@@ -310,9 +316,13 @@ func TestNotifyingProviderBuildsRolesOnItself(t *testing.T) {
 		// for both binds on the inner provider's transactions, and a retention
 		// pass writes no bead. None of these build a role, so none of them can
 		// build one "on itself".
-		"SetEventsJournalEnabled":    true,
-		"RunEventsMaintenanceTx":     true,
-		"SetVersionedHistoryEnabled": true,
+		"SetEventsJournalEnabled": true,
+		// EventsJournalActivationError (PR A1) forwards the inner provider's
+		// shape-probe result the same way SetEventsJournalEnabled forwards
+		// activation: a query, not a role constructor.
+		"EventsJournalActivationError": true,
+		"RunEventsMaintenanceTx":       true,
+		"SetVersionedHistoryEnabled":   true,
 	}
 
 	var checked int

@@ -104,10 +104,32 @@ func resolveAndGetIssueForMutation(ctx context.Context, localStore storage.DoltS
 }
 
 func resolveAndGetIssueWithRoutingAccess(ctx context.Context, localStore storage.DoltStorage, id string, writable bool) (*RoutedResult, error) {
+	result, _, err := resolveAndGetIssueWithRoutingScope(ctx, localStore, id, writable)
+	return result, err
+}
+
+// resolveAndGetIssueWithRoutingSearchScope resolves id for a read like
+// resolveAndGetIssueWithRouting, and also reports whether a routed tier
+// searched for it (resolveAndGetIssueWithRoutingScope). bd show uses that to
+// tell a miss in this workspace's store alone from one a routed store also
+// answered (GH#5259).
+func resolveAndGetIssueWithRoutingSearchScope(ctx context.Context, localStore storage.DoltStorage, id string) (*RoutedResult, bool, error) {
+	return resolveAndGetIssueWithRoutingScope(ctx, localStore, id, false)
+}
+
+// resolveAndGetIssueWithRoutingScope is the routed resolution cascade: the
+// local store, then the routes.jsonl prefix route, then the auto-route. Its
+// bool reports whether a routed tier reached a lookup, that is, whether a
+// routed store answered for id: true once either tier succeeds or misses,
+// and after a prefix-tier refusal; false when neither tier had a store to
+// ask. With an error other than not-found it covers only the tiers tried
+// before that error (an auto-tier refusal after no prefix search is false),
+// so read it for a miss alone. It does not mean the issue's owner was found.
+func resolveAndGetIssueWithRoutingScope(ctx context.Context, localStore storage.DoltStorage, id string, writable bool) (*RoutedResult, bool, error) {
 	// Try local store first.
 	result, err := resolveAndGetFromStore(ctx, localStore, id, false)
 	if err == nil {
-		return result, nil
+		return result, false, nil
 	}
 
 	// The first routed tier that refuses the id answers instead of the local
@@ -115,6 +137,7 @@ func resolveAndGetIssueWithRoutingAccess(ctx context.Context, localStore storage
 	// isRoutingFailure, which it would also satisfy, so the auto tier still
 	// gets its chance.
 	var refusal error
+	routedSearched := false
 
 	// If not found locally, try prefix-based routing via routes.jsonl.
 	// This handles cross-rig lookups where the ID's prefix maps to a different
@@ -123,11 +146,14 @@ func resolveAndGetIssueWithRoutingAccess(ctx context.Context, localStore storage
 	if isNotFoundErr(err) {
 		prefixResult, routeErr := resolveViaPrefixRoutingWithAccess(ctx, id, writable, false)
 		if routeErr == nil {
-			return prefixResult, nil
+			return prefixResult, true, nil
 		} else if isRoutedResolutionRefusal(routeErr) {
 			refusal = routeErr
+			routedSearched = true
 		} else if isRoutingFailure(routeErr) {
-			return nil, routeErr
+			return nil, routedSearched, routeErr
+		} else if isNotFoundErr(routeErr) {
+			routedSearched = true
 		}
 		prefixErr = routeErr
 	}
@@ -140,16 +166,18 @@ func resolveAndGetIssueWithRoutingAccess(ctx context.Context, localStore storage
 	if isNotFoundErr(err) {
 		autoResult, routeErr := resolveViaAutoRoutingWithAccess(ctx, localStore, id, writable, false)
 		if routeErr == nil {
-			return autoResult, nil
+			return autoResult, true, nil
 		} else if refusal != nil {
-			return nil, refusal
+			return nil, routedSearched, refusal
 		} else if isRoutingFailure(routeErr) {
-			return nil, routeErr
+			return nil, routedSearched, routeErr
+		} else if isNotFoundErr(routeErr) {
+			routedSearched = true
 		}
 		autoErr = routeErr
 	}
 
-	return nil, annotateLookupFailure(ctx, localStore, err, prefixErr, autoErr)
+	return nil, routedSearched, annotateLookupFailure(ctx, localStore, err, prefixErr, autoErr)
 }
 
 // isRoutedResolutionRefusal reports whether a routed tier's resolution error
@@ -500,9 +528,9 @@ func describeLocalDatabase(ctx context.Context, localStore issueCounter) string 
 // the reader compares like with like.
 func describeDatabaseAt(beadsDir string) string {
 	if database := readDoltDatabase(beadsDir); database != "" {
-		return fmt.Sprintf("database %q at %s", database, beadsDir)
+		return fmt.Sprintf("database %q at %s", database, remedy.PrintedValue(beadsDir))
 	}
-	return beadsDir
+	return remedy.PrintedValue(beadsDir)
 }
 
 // unknownIssueCount marks a store that was never counted, so a real zero — the
@@ -981,10 +1009,12 @@ func openStoreAtBeadsDir(ctx context.Context, beadsDir string, writable bool) (s
 
 	var s storage.DoltStorage
 	var err error
+	// openForeignStore admits the workspace before a store factory runs, so a
+	// foreign workspace admission refuses is refused here too.
 	if writable {
-		s, err = newDoltStoreFromConfig(ctx, beadsDir)
+		s, err = openForeignStore(ctx, beadsDir, foreignWrite)
 	} else {
-		s, err = newReadOnlyStoreFromConfig(ctx, beadsDir)
+		s, err = openForeignStore(ctx, beadsDir, foreignRead)
 	}
 	if err != nil {
 		return nil, database, err

@@ -114,7 +114,7 @@ func TestNewServerMode_AllAuthoritativeSources_FailClosed(t *testing.T) {
 // against the UX regression: bd's own port-file bookkeeping must keep
 // today's silent-retarget-with-warning behavior. Since the retargeted port
 // (54323) is not a real server either, the open still ultimately fails, but
-// via the old "auto-started but still unreachable" path, not the new
+// via the re-dial's "unreachable at" error naming the new port, not the new
 // fail-closed error — proving cfg.ServerPort was updated and a connection
 // was attempted on the new port.
 func TestNewServerMode_PortFileSource_RetargetedPort_StillRetargets(t *testing.T) {
@@ -130,8 +130,8 @@ func TestNewServerMode_PortFileSource_RetargetedPort_StillRetargets(t *testing.T
 	if strings.Contains(err.Error(), "will not silently use") {
 		t.Fatalf("port-file source must not trigger the fail-closed path, got: %v", err)
 	}
-	if !strings.Contains(err.Error(), "auto-started but still unreachable") {
-		t.Fatalf("expected the existing auto-start-unreachable error, got: %v", err)
+	if !strings.Contains(err.Error(), "unreachable at 127.0.0.1:"+strconv.Itoa(newPort)) {
+		t.Fatalf("expected the re-dial's unreachable error for port %d, got: %v", newPort, err)
 	}
 	if cfg.ServerPort != newPort {
 		t.Errorf("cfg.ServerPort = %d, want retargeted to %d", cfg.ServerPort, newPort)
@@ -780,8 +780,13 @@ func TestNewServerModeResolvedAddressDialFailureUnchanged(t *testing.T) {
 		if want := fmt.Sprintf("Dolt server unreachable at 127.0.0.1:%d: ", cfg.ServerPort); !strings.HasPrefix(msg, want) {
 			t.Errorf("error does not start with %q:\n%s", want, msg)
 		}
-		if want := "\n\nDolt server auto-start is disabled (dolt.auto-start: false).\nStart the server manually:\n  bd dolt start"; !strings.HasSuffix(msg, want) {
-			t.Errorf("error does not end with today's hint %q:\n%s", want, msg)
+		// The fork words this hint through doltserver.ExplainAutoStartDisabled
+		// (bd-8ef): it says why bd did not start a server and leaves the cause
+		// of the outage open, instead of blaming dolt.auto-start.
+		for _, want := range []string{"\n\nbd did not try to start a server: auto-start is off", "bd dolt start"} {
+			if !strings.Contains(msg, want) {
+				t.Errorf("error does not contain %q:\n%s", want, msg)
+			}
 		}
 	})
 

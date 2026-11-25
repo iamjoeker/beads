@@ -37,7 +37,7 @@ BEADS_CI_DOLT_COVERAGE_SH_LOADED=1
 # Keep this tag in sync with internal/testutil/testdoltcommon.go:DoltDockerImage
 # and scripts/ci/pull-dolt-image.sh. scripts/dolt_coverage_lib_test.go fails if
 # the three drift apart.
-BEADS_DOLT_COVERAGE_IMAGE="dolthub/dolt-sql-server:2.2.0"
+BEADS_DOLT_COVERAGE_IMAGE="dolthub/dolt-sql-server:2.6.0"
 
 # The contracts, and nothing else. `-run` is deliberately narrow: the point is
 # to run the code the change touched, not to drag each package's whole

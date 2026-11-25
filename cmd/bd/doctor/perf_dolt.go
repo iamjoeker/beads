@@ -13,6 +13,7 @@ import (
 	_ "github.com/go-sql-driver/mysql"
 	"github.com/steveyegge/beads/internal/configfile"
 	"github.com/steveyegge/beads/internal/doltserver"
+	"github.com/steveyegge/beads/internal/storage/dolt"
 	"github.com/steveyegge/beads/internal/storage/doltutil"
 )
 
@@ -105,7 +106,7 @@ func RunDoltPerformanceDiagnostics(path string, enableProfiling bool) (*DoltPerf
 		return metrics, fmt.Errorf("dolt sql-server is not running on %s; start it with 'bd dolt start'", addr)
 	}
 
-	if err := runDoltServerDiagnostics(metrics, fileCfg, host, dsCfg.Port); err != nil {
+	if err := runDoltServerDiagnostics(metrics, fileCfg, beadsDir, host, dsCfg.Port); err != nil {
 		return metrics, fmt.Errorf("server diagnostics failed: %w", err)
 	}
 
@@ -116,17 +117,18 @@ func RunDoltPerformanceDiagnostics(path string, enableProfiling bool) (*DoltPerf
 
 // databaseSizeFor is the size of the database the Dolt server at host
 // serves, read from beadsDir's data directory. That directory holds it only
-// for a server bd runs: not one on another machine, nor one at the IPv6
-// loopback, where bd's own server, which listens on 127.0.0.1 only, never
-// runs.
+// for a server bd runs (configfile.BdRunsServerAt): not one on another
+// machine, nor one at the IPv6 loopback or another loopback address, where
+// bd's own server, which listens on 127.0.0.1 only, never runs.
 func databaseSizeFor(beadsDir, host string) string {
-	switch {
-	case !configfile.IsLocalHostString(host):
+	switch configfile.ClassifyDoltHost(host) {
+	case configfile.DoltHostBdServer:
+		return getDoltDatabaseSize(getDatabasePath(beadsDir))
+	case configfile.DoltHostRemote:
 		return "n/a (server on another machine)"
-	case configfile.IsIPv6LoopbackHost(host):
+	default:
 		return "n/a (server bd does not run)"
 	}
-	return getDoltDatabaseSize(getDatabasePath(beadsDir))
 }
 
 // loadServerConfig is beadsDir's metadata.json, or, when that is missing or
@@ -141,7 +143,7 @@ func loadServerConfig(beadsDir string) *configfile.Config {
 
 // runDoltServerDiagnostics runs diagnostics via the dolt sql-server at
 // host:port, on cfg's database as cfg's user.
-func runDoltServerDiagnostics(metrics *DoltPerfMetrics, cfg *configfile.Config, host string, port int) error {
+func runDoltServerDiagnostics(metrics *DoltPerfMetrics, cfg *configfile.Config, beadsDir, host string, port int) error {
 	metrics.Backend = "dolt-server"
 	metrics.ServerMode = true
 
@@ -149,11 +151,17 @@ func runDoltServerDiagnostics(metrics *DoltPerfMetrics, cfg *configfile.Config, 
 	// GetDoltServerPasswordForPort checks BEADS_DOLT_PASSWORD env first, then
 	// falls back to ~/.config/beads/credentials keyed by [host:port] — required
 	// for externally-hosted Dolt servers (bd-h5k7).
+	password := cfg.GetDoltServerPasswordForPort(port)
+	if password != "" || cfg.GetDoltCredentialCommand() != "" {
+		if err := dolt.CheckServerEndpointTrust(beadsDir, cfg, host, port, cfg.GetDoltServerSocket()); err != nil {
+			return err
+		}
+	}
 	dsn := doltutil.ServerDSN{
 		Host:     host,
 		Port:     port,
 		User:     cfg.GetDoltServerUser(),
-		Password: cfg.GetDoltServerPasswordForPort(port),
+		Password: password,
 		Database: cfg.GetDoltDatabase(),
 		TLS:      cfg.GetDoltServerTLS(),
 	}.String()

@@ -3,11 +3,11 @@ title: Recovery Playbooks
 description: Step-by-step recovery for bd init and bd dolt push/pull refusals, including the primary-key fork playbook
 ---
 
-Last reviewed: 2026-10-01
+Last reviewed: 2026-11-10
 
 Freshness source: `cmd/bd/init.go`, `cmd/bd/init_safety.go`,
-`cmd/bd/init_safety_test.go`, `cmd/bd/init_safety_help.go`, and
-`cmd/bd/dolt.go`.
+`cmd/bd/init_safety_test.go`, `cmd/bd/init_safety_help.go`,
+`cmd/bd/dolt.go`, and `cmd/bd/dolt_drop_database.go`.
 
 This document lives next to the ADRs and matches the structure of `bd`'s
 error messages: each named refusal in `bd init` and `bd dolt push`/`pull`
@@ -23,6 +23,7 @@ See also: `bd help init-safety`, and
 ## Table of contents
 
 - [init-force-refused — `bd init --force`/`--reinit-local` refused because origin has Dolt history](#init-force-refused)
+- [init-adoption-refused — `bd init` refused to adopt the Dolt history of a remote derived from git origin](#init-adoption-refused)
 - [init-token-missing — a destructive re-init refused because `--destroy-token` is missing or wrong](#init-token-missing)
 - [init-local-exists — `bd init --reinit-local` refused because local data already exists](#init-local-exists)
 - [init-home-refused — `bd init` refused because the working directory is your home directory](#init-home-refused)
@@ -93,6 +94,115 @@ See `bd help init-safety` for the token format.
 After `bd init --reinit-local --discard-remote`, your next
 `bd dolt push` must be a history-replacing push. Coordinate with your
 team before doing this.
+
+---
+
+## init-adoption-refused
+
+**Exit code:** `1`
+
+**Symptom**
+
+```
+bd init refuses: git origin already has Dolt history, and bd will not adopt it without consent.
+
+  Derived from git origin: <url>
+  ...
+```
+
+or, after you answer anything but `y` at the `[y/N]` prompt:
+
+```
+bd init stopped: adoption of git origin's Dolt history was declined.
+```
+
+**Why this happens**
+
+No Dolt remote was configured (no `--remote`, no `sync.remote`), so `bd init`
+derived one from `git origin`, and that remote has Dolt history
+(`refs/dolt/data`). Adopting it imports the remote's entire issue history and
+project identity, adds it as Dolt remote `origin` and writes `sync.remote`. On
+a fork-less clone, `origin` is the upstream project, so `bd init` adopts only
+with consent: it asks once when it can, and otherwise refuses.
+`--non-interactive` and `--json` are not consent. A decline or a refusal
+writes nothing, unless the refusal comes from the late check (origin changed
+during init), which says the workspace was scaffolded and no history was
+imported.
+
+Consent is bound to the URL it named. `bd init` checks the origin twice:
+once before it writes anything, where it may ask, and once after it has
+scaffolded the workspace, where it never asks. A `y` at the first check
+covers only that URL. If the origin's URL changed in between, or its Dolt
+history first appeared after the first check found none (or could not
+probe), the second check refuses (exit 1) instead of adopting a remote you
+were never shown. Nothing was imported and no remote was wired; re-run with
+`--yes` or `--no-adopt`. `--yes` covers any URL. Ctrl-C at the prompt exits
+`130`.
+
+**Recovery paths**
+
+### 1. You want the remote's history
+
+```
+bd init --yes
+```
+
+`--yes` consents ahead of time; `bd init` prints the URL it adopts from
+(unless `--quiet`). `bd bootstrap` adopts it too.
+
+### 2. You want a fresh local database
+
+```
+bd init --no-adopt
+```
+
+or set `BD_NO_REMOTE_ADOPT=1`. `bd` then derives nothing from `git origin`:
+no probe, no clone, no Dolt remote and no `sync.remote`. It wins over
+`--yes`. Add a remote later with `bd dolt remote add`.
+
+### 3. You want a different remote
+
+```
+bd init --remote <url>
+```
+
+A remote you name is not derived, so `bd init` adopts its history without
+asking. The same holds for a `sync.remote` in `.beads/config.yaml`,
+including one committed to the repository you cloned (a plain `bd init` in a
+repository with a git origin writes it there): `bd init` adopts from it
+without a prompt, even with `--no-adopt`. To start fresh in such a clone,
+remove `sync.remote` from `.beads/config.yaml` and run `bd init --no-adopt`.
+
+`--yes` consents to adoption only. It does not bypass the divergence guard
+(exit `10`), the destroy-token guard (exit `12`) or the existing-workspace
+guard: a plain `bd init` over an initialized workspace still refuses, and
+declining the destroy confirmation for existing local data exits `11`.
+
+### 4. The adoption already happened and you want it gone
+
+If an earlier `bd init` (or a bd from before this consent check) already
+adopted the origin's history and wired the remote, removing the workspace is
+not enough on a server: deleting a workspace's `.beads` directory never
+removes its database from a Dolt server (see
+[Shared Server Mode](/architecture/dolt#shared-server-mode); in shared-server
+mode every project's database lives in the server's data directory). Note
+the workspace's database name first: it is `dolt_database` in
+`.beads/metadata.json`, and `bd sql 'SHOW DATABASES'` lists every database
+the server holds. Remove the workspace's `.beads` directory, then drop the
+database explicitly from another workspace on the same server:
+
+```bash
+bd dolt drop-database <database-name>          # asks for confirmation
+bd dolt drop-database <database-name> --yes    # scripts and agents
+```
+
+It refuses the databases no invocation should drop (the server's system
+databases, the shared `beads_global`, the workspace's own database, the one
+`--database` selects, and test databases, which `bd dolt clean-databases`
+owns), and it never purges: the database stays recoverable with
+`CALL DOLT_UNDROP('<database-name>')` until the server's dropped databases
+are purged. Then re-run `bd init --no-adopt` (or `bd init --remote <url>`)
+in the first workspace.
 
 ---
 
@@ -432,7 +542,14 @@ rows rarely apply there.
   Keep it there. It was previously assigned next to the guard it gates, which
   is downstream of the proxied dispatch, and the flag was therefore inert on
   that one route while the refusal still told the operator to pass it.
-- `bd bootstrap` has its own separate mode-blind create path.
+- `bd bootstrap` has its own separate create path. When the workspace's own
+  `metadata.json` selects a Dolt server (the server-mode test workspace
+  discovery uses), its init and jsonl-import actions create the database on
+  that server (resolved as later commands resolve it) and write nothing to a
+  database the server already holds; its restore action refuses in server
+  mode before creating anything, and does not restore over a database the
+  server already holds. Elsewhere, including shared-server mode named only
+  by `dolt.shared-server` in a config.yaml, it uses the embedded store.
 
 ---
 
@@ -519,13 +636,14 @@ skipping straight to `bd list`) can hit either of two live gotchas — see
 
 ### Prevention (upgrades across PK-reshaping migrations)
 
-- **Sync before upgrading**: `bd dolt push` + `bd dolt pull` on every clone
-  while all clones still run the *old* version, then stop editing. Once the new
-  binary is installed, `bd dolt push`/`bd dolt pull` are gated too, so this must
-  happen first. The one exception is the *data-behind* stop — a clone level on
-  schema but missing commits the remote has — where `bd dolt pull` **is** the
-  remedy and is allowed through (a proxied-server workspace refuses it, so
-  there the pull runs on the server host); the gate says so when it fires, and
+- **Sync before upgrading**: `bd dolt pull`, `bd dolt commit` and
+  `bd dolt push` on every clone while all clones still run the *old* version,
+  then stop editing. Once the new binary is installed,
+  `bd dolt push`/`bd dolt pull` are gated too, so this must happen first. The
+  one exception is the *data-behind* stop — a clone level on schema but
+  missing commits the remote has — where `bd dolt pull` **is** the remedy and
+  is allowed through (a proxied-server workspace refuses it, so there the pull
+  runs on the server host); the gate says so when it fires, and
   [Clone behind the remote](/getting-started/upgrading#clone-behind-the-remote)
   has the recipe. Plan for the rule, not the exception.
 - **One designated migrator**: upgrade one machine, let it migrate, then

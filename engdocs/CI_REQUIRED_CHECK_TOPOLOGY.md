@@ -172,12 +172,13 @@ Current PR-related workflow names:
   Runs on pushes to `main`. Contains only what rbe-west cannot run: the macOS
   `go test -race -short` suite and the Windows smoke build on Blacksmith, and
   the push-to-main savers of the GOCACHEs pr.yml's Windows and macOS jobs
-  restore. Every Linux check it used to repeat (migration hygiene, build
-  tags, versions, doc flags, gofmt, the PR policy wrapper, the package gates
-  and the Linux cache seeders) is gated before the merge by the merge
-  queue's `pr.yml` run of the same commit, the Nix flake check runs in
-  `pr-risk.yml`'s push run, and `bazel.yml`'s push run re-runs the Bazel
-  targets (ga-96smfk.22).
+  restore and of the Make toolchains `windows-make-shell` installs offline
+  (`windows-make-shell-toolchains`). Every Linux check it used to repeat
+  (migration hygiene, build tags, versions, doc flags, gofmt, the PR policy
+  wrapper, the package gates and the Linux cache seeders) is gated before
+  the merge by the merge queue's `pr.yml` run of the same commit, the Nix
+  flake check runs in `pr-risk.yml`'s push run, and `bazel.yml`'s push run
+  re-runs the Bazel targets (ga-96smfk.22).
 - `.github/workflows/nightly.yml`: `Nightly`
   Runs at 02:00 UTC. Calls `bazel.yml` with `fresh-test-results: true` (every
   test re-executed, no cached results) and checks the rbe-west worker-env
@@ -846,15 +847,17 @@ In mode `remote`, `bazel.yml`'s `bazel-dolt-race` job (check name
 `Bazel / dolt-race`) runs the dolt-server and proxied-server tiers in one
 `bazel test //... --config=dolt-race`, in place of the `bazel-doltserver`
 (`dolt-server lane`) and `bazel-proxied` (`proxied-server tier`) jobs.
-`--config=dolt-race` is exactly the union of `--config=doltserver` and
-`--config=doltserver-proxied`, with one tag filter for both tiers, so every
-member target's test action is unchanged (`bazel aquery` at the cutover: the
-27 + 35 = 62 `TestRunner` actions were byte-identical under the member
-configs and the union; there are 27 + 37 = 64 since
-`//cmd/bd:bd_managed_local_test` runs as 3 shards, and all must fit the
-union's `--jobs=64` at once, `scripts/bazel_dolt_race_test.go`, which leaves
-no headroom: another test action in either tier needs a `--jobs` or
-shard-count change first). One client
+`--config=dolt-race` is the union of `--config=doltserver` and
+`--config=doltserver-proxied`, with one tag filter for both tiers, plus one
+line of its own, `test:dolt-race --jobs=70` (`bazelDoltRaceJobs`); `--jobs` is
+in no action key, so every member target's test action is unchanged (`bazel
+aquery` at the cutover: the 27 + 35 = 62 `TestRunner` actions were
+byte-identical under the member configs and the union; there were 27 + 37 =
+64 once `//cmd/bd:bd_managed_local_test` ran as 3 shards, and 33 + 37 = 70
+since `//internal/httpclient:httpclient_served_provider_test`'s 6 shards
+joined the dolt-server tier). All must fit the union's `--jobs=70` at once
+(`scripts/bazel_dolt_race_test.go`), which leaves no headroom: another test
+action in either tier needs a `--jobs` or shard-count change first. One client
 waits on rbe-west for both tiers at once, so the job ends with the slower
 tier and the other tier's runner is saved.
 
@@ -891,8 +894,11 @@ In mode `remote`, `bazel.yml`'s `bazel-dolt-int` job (check name
 (`server-storage lane`) and `bazel-cmd-dolt` (`cmd-dolt tier`) jobs.
 `--config=dolt-int` is exactly the union of `--config=doltserver-integration`
 and `--config=doltserver-cmd`, with one tag filter for both tiers. The final
-argv and environment Bazel assembles for all 63 `TestRunner` actions (17
-server-storage + 46 cmd-dolt) are unchanged under the union, so the remote
+argv and environment Bazel assembles for all 63 `TestRunner` actions at the
+cutover (17 server-storage + 46 cmd-dolt; 64 since
+`//internal/storage/versioncontrolops:versioncontrolops_dolt_test` joined
+server-storage, which leaves the union no room under `--jobs=64`) are
+unchanged under the union, so the remote
 action digest -- what RBE's cache keys on -- is unaffected and cached results
 should carry over (confirmed in practice by the first merge group's
 `tests_cached == tests_total` in ci-analytics, not claimed here as already
@@ -972,7 +978,7 @@ what a pull request's gate requires.
   `bazel-server-storage`/`bazel-cmd-dolt` result today -- and the per-mode
   skips are the members' as before.
 - `check_testcases.py` runs twice over the union's BEP, once per tier
-  (`check-ss`, scoped with `--label` to server-storage's two targets; `check-cd`,
+  (`check-ss`, scoped with `--label` to server-storage's three targets; `check-cd`,
   scoped to cmd-dolt's two), each with `continue-on-error: true` so a
   zero-testcase shard in one tier reaches only that tier's classify result
   (must-fix 2 of PR #7535's review), not the other's and not the job
@@ -1681,6 +1687,7 @@ changes. They gate through `BAZEL_TEST`; pinned by
 | --- | --- |
 | fast-checks: `check-build-tags.sh` | `//scripts/repochecks:build_tags_test` |
 | fast-checks: `check-go-install-guidance.sh` | `//scripts/repochecks:go_install_guidance_test` |
+| (new, GH#3059) `check-legacy-repo-refs.sh` | `//scripts/repochecks:legacy_repo_refs_test` |
 | fast-checks: `check-winget-portable-alias.sh` | `//scripts/repochecks:winget_portable_alias_test` |
 | fast-checks: `check-versions.sh` | `//internal/versioncheck:versioncheck_test` (same `versioncheck.Check` over the release metadata) |
 | fast-checks: migration hygiene checks A and B | `//scripts/repochecks:migration_hygiene_test` (`MIGRATION_HYGIENE_SCOPE=tree`) |
@@ -1754,8 +1761,24 @@ macOS jobs; `release.yml` stays on `macos-latest`.
   `scripts/ci/warm-non-race-cache.sh`. main.yml's `test` job (the macOS
   full suite) runs on the same label and restores its caches. main.yml's
   `test-windows` seeds the Windows legs the same way.
+- **Toolchains.** `windows-make-shell` installs nothing from the network on
+  the common path (`scripts/ci/windows-make-shell/`): native GNU Make is the
+  image's MinGW-w64 `mingw32-make.exe` 4.4.1, else Chocolatey's make 4.4.1
+  binary from a cache, else `choco install` with retries, either one only
+  with its pinned SHA-256;
+  MSYS2 is the image's `C:\msys64`, with `git` and `make` installed from
+  cached, signature-checked package files resolved against the image's own
+  sync database; Cygwin installs offline from a cached package tree (signed
+  `setup.zst`, Authenticode-checked setup), else through
+  cygwin-install-action as before. main.yml's `windows-make-shell-toolchains`
+  is the only writer of those caches: same label, push-to-main-only guard,
+  keys that change only with the pinned binary, the image's MSYS2 sync
+  database and the UTC month, and a save only after its seed step proved
+  the cache holds what an install needs (for MSYS2, every package file the
+  install resolves to, even one the image already has installed).
 - **Pins.** `TestBlacksmithWindowsMacOSRunsOnEveryEvent`,
   `TestBlacksmithMacOSSaverMatchesPRLegs`,
+  `TestWindowsMakeShellToolchainSaverMatchesPRJob`,
   `TestBlacksmithSaverJobsGuardedAgainstPullRequest`,
   `TestBlacksmithSaverCacheKeysAreNotPerCommit`,
   `TestBlacksmithReachablePRJobsDisableDefaultCachingActions` and
@@ -1765,7 +1788,11 @@ macOS jobs; `release.yml` stays on `macos-latest`.
 
 Retired from `pr-risk.yml` (ga-96smfk.22): `bazel.yml`'s `bazel-server-storage`
 lane runs `//internal/storage/dolt:dolt_server_full_test` (16 shards) and
-`:dolt_server_conformance_test` against hermetic dolt sql-servers.
+`:dolt_server_conformance_test` against hermetic dolt sql-servers. It also
+runs `//internal/storage/versioncontrolops:versioncontrolops_dolt_test`, that
+package's tests against a hermetic dolt sql-server, which no PR Risk job ran.
+It is like the dolt-server lane's targets, but that lane's union with the
+proxied tier (`dolt-race`) already fills its `--jobs`.
 
 - `.github/scripts/server-storage-test-shard.sh` discovers top-level
   `Test*` functions from `internal/storage/dolt/*_test.go` (excluding

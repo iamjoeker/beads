@@ -234,12 +234,19 @@ func (s *DoltStore) GetCurrentCommit(ctx context.Context) (string, error) {
 // writes land in the working set and HEAD does not advance).
 // Implements storage.StateHasher.
 func (s *DoltStore) GetStateHash(ctx context.Context) (string, error) {
-	var hash string
-	if err := s.db.QueryRowContext(ctx, "SELECT DOLT_HASHOF_DB()").Scan(&hash); err == nil {
+	if hash, err := versioncontrolops.StateHash(ctx, s.db); err == nil {
 		return hash, nil
 	}
 	// Older servers predate DOLT_HASHOF_DB; degrade to HEAD-based detection.
 	return s.GetCurrentCommit(ctx)
+}
+
+var _ storage.HeadHasher = (*DoltStore)(nil)
+
+// GetHeadHashes returns the HEAD commit hash and the hash of its root value.
+// Implements storage.HeadHasher.
+func (s *DoltStore) GetHeadHashes(ctx context.Context) (commit, root string, err error) {
+	return versioncontrolops.HeadHashes(ctx, s.db)
 }
 
 // GetConflicts returns any merge conflicts in the current state.

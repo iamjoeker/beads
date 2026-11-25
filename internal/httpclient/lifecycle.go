@@ -90,6 +90,12 @@ func (l *httpLifecycle) Create(ctx context.Context, req issueops.CreateRequest) 
 		if req.Issue != nil && req.Issue.ID != "" && errors.Is(err, issueops.ErrAlreadyExists) {
 			return issueops.CreateResult{}, fmt.Errorf("%s: %w", req.Issue.ID, err)
 		}
+		// The same for a retired id: the 410 names the member, not the id, so
+		// the typed refusal gets the caller's own id back.
+		var expired *issueops.IdempotencyExpiredError
+		if req.Issue != nil && errors.As(err, &expired) && expired.ID == "" {
+			expired.ID = req.Issue.ID
+		}
 		return issueops.CreateResult{}, err
 	}
 	return issueops.CreateResult{Issue: issue}, nil
@@ -398,6 +404,17 @@ func (l *httpLifecycle) Update(ctx context.Context, req issueops.UpdateRequest) 
 			return issueops.UpdateResult{}, err
 		}
 	}
+	// Read BEFORE the `claim` fallback below: a force_claim_blocked request
+	// cannot ride claimIssue (the fallback serves a claim ALONE, and the
+	// member would be refused as unknown there), so a server that predates
+	// the member gets the refusal here rather than a dial that would only
+	// skew-400 — or, through a server that predates the REFUSAL too, a claim
+	// of a blocked issue nobody meant to allow.
+	if req.ForceClaimBlocked {
+		if err := l.store.requireCapabilityBeforeDial(ctx, wire.OpUpdateIssue, wire.CapIssuesUpdateForceClaimBlocked); err != nil {
+			return issueops.UpdateResult{}, err
+		}
+	}
 	if req.Claim {
 		served, err := l.store.servesCapability(ctx, wire.CapIssuesUpdateClaim)
 		if err != nil {
@@ -455,13 +472,14 @@ func updateGuards(req issueops.UpdateRequest) wire.UpdateGuards {
 	return guards
 }
 
-// updateFlags carries the claim and the three force overrides onto the wire.
+// updateFlags carries the claim and the four force overrides onto the wire.
 // The wire sends each only when true, so a request that sets none of them is
 // byte-identical to one built before any of them was carried.
 func updateFlags(req issueops.UpdateRequest) wire.UpdateFlags {
 	return wire.UpdateFlags{
 		Claim:                 req.Claim,
 		ForceAssigneeTransfer: req.ForceAssigneeTransfer,
+		ForceClaimBlocked:     req.ForceClaimBlocked,
 		ForceClosePolicy:      req.ForceClosePolicy,
 		ForceNotesOverwrite:   req.ForceNotesOverwrite,
 		AllowTemplate:         req.AllowTemplate,
@@ -875,6 +893,7 @@ func (l *httpLifecycle) claimOnlyUpdate(ctx context.Context, req issueops.Update
 func isClaimOnlyUpdate(req issueops.UpdateRequest) bool {
 	return reflect.DeepEqual(req.Patch, issueops.IssuePatch{}) &&
 		!req.ForceAssigneeTransfer &&
+		!req.ForceClaimBlocked &&
 		!req.ForceClosePolicy &&
 		!req.ForceNotesOverwrite &&
 		!req.AllowTemplate &&
@@ -898,8 +917,8 @@ func isWispIssue(issue *types.Issue) bool {
 // refuseUnwirableUpdateMembers walks the UpdateRequest members the wire's
 // updateIssue body has no place for.
 //
-// The claim and the three force overrides are NOT on this switch: updateIssue
-// publishes all four (internal/httpapi/apigen's UpdateIssueRequest), the
+// The claim and the four force overrides are NOT on this switch: updateIssue
+// publishes all five (internal/httpapi/apigen's UpdateIssueRequest), the
 // server reads them (internal/httpapi/update.go), and Update sends them beside
 // the patch as wire.UpdateFlags. Their W-UpdateRequest rows are RETIRED.
 //

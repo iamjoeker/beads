@@ -12,6 +12,7 @@ import (
 
 	"github.com/steveyegge/beads/internal/configfile"
 	"github.com/steveyegge/beads/internal/doltserver"
+	"github.com/steveyegge/beads/internal/doltversion"
 	"github.com/steveyegge/beads/internal/remedy"
 	"github.com/steveyegge/beads/internal/storage/doltutil"
 )
@@ -299,6 +300,7 @@ func checkServerReachable(host string, port int) DoctorCheck {
 }
 
 // checkDoltVersion connects to the server and checks if it's a Dolt server
+// at or above doltversion.RequiredMin.
 // Returns the DoctorCheck and an open database connection (caller must close)
 func checkDoltVersion(cfg *configfile.Config, beadsDir string) (DoctorCheck, *sql.DB) {
 	host := cfg.GetDoltServerHost()
@@ -311,6 +313,20 @@ func checkDoltVersion(cfg *configfile.Config, beadsDir string) (DoctorCheck, *sq
 	// resolved runtime port is required because the port file may differ from
 	// the metadata port (bd-h5k7).
 	password := cfg.GetDoltServerPasswordForPort(port)
+	if password != "" {
+		// Refuse to send BEADS_DOLT_PASSWORD to a shared-config host the
+		// workspace never pinned, as the store's open does (GH#7886).
+		if err := doltserver.CheckEndpointTrust(beadsDir, cfg, host, port, cfg.GetDoltServerSocket()); err != nil {
+			return DoctorCheck{
+				Name:     "Dolt Version",
+				Status:   StatusError,
+				Message:  "Dolt server endpoint not trusted",
+				Detail:   err.Error(),
+				Fix:      "Confirm the endpoint via BEADS_DOLT_SERVER_HOST or ~/.config/bd/config.yaml",
+				Category: CategoryFederation,
+			}, nil
+		}
+	}
 
 	// Build DSN without database (just to test server connectivity)
 	connStr := doltutil.ServerDSN{
@@ -380,12 +396,43 @@ func checkDoltVersion(cfg *configfile.Config, beadsDir string) (DoctorCheck, *sq
 		}, nil
 	}
 
+	return doltVersionFloorCheck(version, "dolt sql-server at "+remedy.PrintedValue(doltutil.ServerAddr(host, port))), db
+}
+
+// doltVersionFloorCheck judges the version a server's dolt_version()
+// reported against doltversion.RequiredMin, the floor every server-mode
+// open enforces. Below it is an error whose fix is the upgrade. A version
+// that does not parse stays OK, as before: the open does not refuse one
+// either (see doltversion.CheckServer), and the detail says it was not
+// checked.
+func doltVersionFloorCheck(version, subject string) DoctorCheck {
+	v, err := doltversion.ParseVersion(version)
+	if err != nil {
+		// The server supplied this text, so it is printed escaped.
+		return DoctorCheck{
+			Name:     "Dolt Version",
+			Status:   StatusOK,
+			Message:  fmt.Sprintf("Dolt %s", remedy.PrintedValue(version)),
+			Detail:   fmt.Sprintf("not a version bd recognizes; not checked against the required minimum %s", doltversion.RequiredMin),
+			Category: CategoryFederation,
+		}
+	}
+	if floorErr := doltversion.CheckRequired(v, subject, true); floorErr != nil {
+		return DoctorCheck{
+			Name:     "Dolt Version",
+			Status:   StatusError,
+			Message:  fmt.Sprintf("Dolt %s is below the required minimum %s", v, doltversion.RequiredMin),
+			Detail:   floorErr.Error(),
+			Fix:      fmt.Sprintf("Upgrade the dolt sql-server to %s or newer and restart it; bd refuses to open older servers", doltversion.RequiredMin),
+			Category: CategoryFederation,
+		}
+	}
 	return DoctorCheck{
 		Name:     "Dolt Version",
 		Status:   StatusOK,
-		Message:  fmt.Sprintf("Dolt %s", version),
+		Message:  fmt.Sprintf("Dolt %s", v),
 		Category: CategoryFederation,
-	}, db
+	}
 }
 
 // checkDatabaseExists checks if the beads database exists

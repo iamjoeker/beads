@@ -83,6 +83,11 @@ wholesale by design — a restore must not fail field-by-field — so
 --allow-stale is the single deliberate-overwrite opt-in, and
 updated_issues is where to look for what an import rewrote.
 
+Comments merge additively. A comment whose id is already stored on the
+same issue keeps its stored text, author and time, also under
+--allow-stale; a comment id stored on a different issue fails the
+import with an error naming the comment and both issues.
+
 Large imports are written in bounded transactions (a few hundred issues
 each, with a short pause between commits) with progress on stderr, so
 concurrent bd commands keep working while the import runs instead of
@@ -253,6 +258,7 @@ type importResultJSON struct {
 	UpdatedIssues       []ImportChange `json:"updated_issues,omitempty"`
 	TieKeptLocalIDs     []string       `json:"tie_kept_local_ids,omitempty"`
 	StaleSkippedIDs     []string       `json:"stale_skipped_ids,omitempty"`
+	RetiredIDs          []string       `json:"retired_ids,omitempty"`
 	SkippedDependencies []string       `json:"skipped_dependencies,omitempty"`
 	DryRun              bool           `json:"dry_run,omitempty"`
 }
@@ -503,6 +509,7 @@ func applyImportDryRunClassification(result *importResultJSON, classification *I
 	result.StaleSkippedIDs = classification.StaleSkippedIDs
 	result.UpdatedIssues = classification.UpdatedIssues
 	result.TieKeptLocalIDs = classification.TieKeptLocalIDs
+	result.RetiredIDs = classification.RetiredIDs
 }
 
 // applyImportOutcome folds a real import's outcome into the command's JSON
@@ -517,6 +524,7 @@ func applyImportOutcome(result *importResultJSON, importResult *ImportResult) {
 	result.UpdatedIssues = append(result.UpdatedIssues, importResult.UpdatedIssues...)
 	result.TieKeptLocalIDs = append(result.TieKeptLocalIDs, importResult.TieKeptLocalIDs...)
 	result.StaleSkippedIDs = append(result.StaleSkippedIDs, importResult.StaleSkippedIDs...)
+	result.RetiredIDs = append(result.RetiredIDs, importResult.RetiredIDs...)
 }
 
 // renderImportDryRun reports a dry run (JSON or stderr), identically in both
@@ -538,6 +546,9 @@ func renderImportDryRun(result importResultJSON, memoriesCount int, source strin
 	}
 	if len(result.StaleSkippedIDs) > 0 {
 		fmt.Fprintf(os.Stderr, " (%d stale skipped)", len(result.StaleSkippedIDs))
+	}
+	if len(result.RetiredIDs) > 0 {
+		fmt.Fprintf(os.Stderr, " (%d retired by a retention sweep, would not be re-created)", len(result.RetiredIDs)) //nolint:gosec // G705: stderr, not a browser context
 	}
 	fmt.Fprintln(os.Stderr)
 	return nil
@@ -563,6 +574,9 @@ func renderImportOutcome(result importResultJSON, source string, dedupHits int) 
 	}
 	if result.Unchanged > 0 {
 		fmt.Fprintf(os.Stderr, " (%d already present, unchanged)", result.Unchanged) //nolint:gosec // G705: stderr, not a browser context
+	}
+	if len(result.RetiredIDs) > 0 {
+		fmt.Fprintf(os.Stderr, " (%d retired by a retention sweep, not re-created)", len(result.RetiredIDs)) //nolint:gosec // G705: stderr, not a browser context
 	}
 	fmt.Fprintln(os.Stderr)
 	if len(result.UpdatedIssues) > 0 {

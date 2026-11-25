@@ -61,6 +61,10 @@ func (r *issueSQLRepositoryImpl) Insert(ctx context.Context, issue *types.Issue,
 	if issue.ContentHash == "" {
 		issue.ContentHash = issue.ComputeContentHash()
 	}
+	// Storage assigns arrival_seq at the journal's create seam alone; see
+	// issueops.PrepareIssueForInsert. The create record below hands the row's
+	// stamp back (issueops.RecordCreateEventInTx).
+	issue.ArrivalSeq = 0
 
 	if issue.ID == "" {
 		return errors.New("db: Insert: explicit ID required (ID generation belongs to CreateIssueUseCase)")
@@ -74,6 +78,9 @@ func (r *issueSQLRepositoryImpl) Insert(ctx context.Context, issue *types.Issue,
 		if err := issueops.InsertIssueStrictInTx(ctx, r.runner, table, issue); err != nil {
 			return err
 		}
+		if err := reserveCreatedChildSuffix(ctx, r.runner, issue.ID); err != nil {
+			return err
+		}
 		if err := r.events.Record(ctx, domain.Event{
 			IssueID: issue.ID,
 			Type:    types.EventCreated,
@@ -81,7 +88,7 @@ func (r *issueSQLRepositoryImpl) Insert(ctx context.Context, issue *types.Issue,
 		}, domain.RecordEventOpts{UseWispsTable: opts.UseWispsTable}); err != nil {
 			return err
 		}
-		if err := issueops.RecordEventInTx(ctx, r.runner, issueops.EventCreate, issue.ID, actor); err != nil {
+		if err := issueops.RecordCreateEventInTx(ctx, r.runner, issue, actor); err != nil {
 			return err
 		}
 		// EnsureIssueIDAvailableInTx above already refused a collision, so this
@@ -117,7 +124,19 @@ func (r *issueSQLRepositoryImpl) Insert(ctx context.Context, issue *types.Issue,
 			return err
 		}
 	}
+	// The upsert below would resurrect a row a retaining sweep retired; an
+	// explicit retired id with no live row is refused instead. A generated id
+	// is never retired (the generators skip tombstones), so it is not guarded,
+	// as issueops' create body does not guard one.
+	if opts.ExplicitID {
+		if err := issueops.RefuseRetiredIDInTx(ctx, r.runner, issue.ID); err != nil {
+			return err
+		}
+	}
 	if err := insertIssueRow(ctx, r.runner, table, issue); err != nil {
+		return err
+	}
+	if err := reserveCreatedChildSuffix(ctx, r.runner, issue.ID); err != nil {
 		return err
 	}
 	if err := r.events.Record(ctx, domain.Event{
@@ -127,13 +146,43 @@ func (r *issueSQLRepositoryImpl) Insert(ctx context.Context, issue *types.Issue,
 	}, domain.RecordEventOpts{UseWispsTable: opts.UseWispsTable}); err != nil {
 		return err
 	}
-	if err := issueops.RecordEventInTx(ctx, r.runner, issueops.EventCreate, issue.ID, actor); err != nil {
+	if err := issueops.RecordCreateEventInTx(ctx, r.runner, issue, actor); err != nil {
 		return err
 	}
 	if existed || opts.UseWispsTable {
 		return issueops.RecordVersionInTx(ctx, r.runner, issue.ID, actor)
 	}
 	return issueops.RecordVersionForCreateInTx(ctx, r.runner, issue.ID, actor)
+}
+
+// reserveCreatedChildSuffix raises the parent's child counter, in the
+// parent's own plane, to at least the suffix of a hierarchical id this Insert
+// just materialized (GH#4750), as issueops' singular and batch creates do. An
+// explicit child (P.8) that left the counter behind would otherwise be the
+// only record of its suffix, and its removal would let the next generated
+// child of P re-mint it. Both insert branches call it, before any version
+// return, so neither the strict create nor the upsert skips it.
+func reserveCreatedChildSuffix(ctx context.Context, runner Runner, id string) error {
+	if _, err := issueops.ReserveChildSuffixesInTx(ctx, runner, []string{id}, nil); err != nil {
+		return fmt.Errorf("db: Insert %s: reserve child suffix: %w", id, err)
+	}
+	return nil
+}
+
+// reserveRemovedChildSuffixes keeps each removed row's hierarchical suffix
+// used in its surviving parent's counter (GH#4750), so the next generated
+// child never re-mints it. A parent removed in the same call keeps no counter
+// to raise; one removed by a later call (the other plane's DeleteByIDs) takes
+// its counter row with it through the counter table's foreign key.
+func reserveRemovedChildSuffixes(ctx context.Context, runner Runner, ids []string) error {
+	departing := make(map[string]bool, len(ids))
+	for _, id := range ids {
+		departing[id] = true
+	}
+	if _, err := issueops.ReserveChildSuffixesInTx(ctx, runner, ids, departing); err != nil {
+		return fmt.Errorf("reserve child suffixes: %w", err)
+	}
+	return nil
 }
 
 func (r *issueSQLRepositoryImpl) InsertBatch(ctx context.Context, issues []*types.Issue, actor string, opts domain.InsertIssueOpts) error {
@@ -363,11 +412,11 @@ func (r *issueSQLRepositoryImpl) Update(ctx context.Context, id string, updates 
 			if aerr != nil {
 				return fmt.Errorf("db: Update %s: affected by status change: %w", id, aerr)
 			}
-			if err := issueops.RecomputeIsBlockedInTx(ctx, r.runner, affectedIssues, affectedWisps); err != nil {
+			if err := issueops.RecomputeIsBlockedInTx(ctx, r.runner, affectedIssues, affectedWisps, actor); err != nil {
 				return fmt.Errorf("db: Update %s: recompute is_blocked: %w", id, err)
 			}
 			if !newActive {
-				issueops.NoteStatusChangeBlockedRecheck(r.runner, id, string(newStatus), affectedIssues, affectedWisps)
+				issueops.NoteStatusChangeBlockedRecheck(r.runner, id, string(newStatus), actor, affectedIssues, affectedWisps)
 			}
 		}
 	}
@@ -562,6 +611,14 @@ func (r *issueSQLRepositoryImpl) Claim(ctx context.Context, id, actor string, op
 		}, nil
 	}
 
+	// The blocked-claim refusal, at the same point as the primary path's: after
+	// the CAS won, before any bookkeeping. The unit of work rolls the CAS back.
+	if opts.RefuseBlocked {
+		if err := issueops.EnforceClaimPolicyInTx(ctx, r.runner, id, false); err != nil {
+			return domain.ClaimRowResult{}, err
+		}
+	}
+
 	// Grant the lease in the ephemeral leases table, mirroring
 	// issueops.ClaimIssueInTx. Wisps are never leased. This dual must stay in
 	// lockstep with the primary path (see the row_lock comment above).
@@ -571,13 +628,14 @@ func (r *issueSQLRepositoryImpl) Claim(ctx context.Context, id, actor string, op
 		}
 	}
 
-	oldData, _ := json.Marshal(oldIssue)
-	newData, _ := json.Marshal(map[string]any{"assignee": actor, "status": "in_progress"})
+	claimUpdates := map[string]any{"assignee": actor, "status": "in_progress"}
+	oldData := issueops.ChangedFieldsPreImage(oldIssue, claimUpdates)
+	newData, _ := json.Marshal(claimUpdates)
 	if err := r.events.Record(ctx, domain.Event{
 		IssueID:  id,
 		Type:     types.EventType("claimed"),
 		Actor:    actor,
-		OldValue: string(oldData),
+		OldValue: oldData,
 		NewValue: string(newData),
 	}, domain.RecordEventOpts{UseWispsTable: opts.UseWispsTable}); err != nil {
 		return domain.ClaimRowResult{}, fmt.Errorf("db: Claim %s: record event: %w", id, err)
@@ -677,6 +735,52 @@ func (r *issueSQLRepositoryImpl) Exists(ctx context.Context, id string, opts dom
 	return true, nil
 }
 
+// Taken reports whether a fresh create may not mint id into either plane: a
+// live row of either table holds it, or a retaining sweep retired it.
+func (r *issueSQLRepositoryImpl) Taken(ctx context.Context, id string) (bool, error) {
+	if id == "" {
+		return false, errors.New("db: Taken: id must not be empty")
+	}
+	taken, err := issueops.IDTakenInTx(ctx, r.runner, id)
+	if err != nil {
+		return false, fmt.Errorf("db: Taken %s: %w", id, err)
+	}
+	return taken, nil
+}
+
+// RetiredIDs returns which of ids a tombstone in either table retired
+// (issueops.RetiredIDsInTx), in this repository's transaction.
+func (r *issueSQLRepositoryImpl) RetiredIDs(ctx context.Context, ids []string) (map[string]time.Time, error) {
+	retired, err := issueops.RetiredIDsInTx(ctx, r.runner, ids)
+	if err != nil {
+		return nil, fmt.Errorf("db: RetiredIDs: %w", err)
+	}
+	return retired, nil
+}
+
+// RetireIDs tombstones ids in the plane opts names (issueops.RetireIDsInTx),
+// in this repository's transaction.
+func (r *issueSQLRepositoryImpl) RetireIDs(ctx context.Context, ids map[string]time.Time, opts domain.IssueTableOpts) error {
+	if len(ids) == 0 {
+		return nil
+	}
+	retired := make([]issueops.RetiredID, 0, len(ids))
+	for id, closedAt := range ids {
+		retired = append(retired, issueops.RetiredID{ID: id, ClosedAt: closedAt})
+	}
+	slices.SortFunc(retired, func(a, b issueops.RetiredID) int { return strings.Compare(a.ID, b.ID) })
+	if opts.UseWispsTable {
+		return issueops.RetireIDsInTx(ctx, r.runner, retired, nil)
+	}
+	return issueops.RetireIDsInTx(ctx, r.runner, nil, retired)
+}
+
+// CoordinateCreates writes the create coordination cells of ids
+// (issueops.CoordinateIDCreatesInTx), in this repository's transaction.
+func (r *issueSQLRepositoryImpl) CoordinateCreates(ctx context.Context, ids []string) error {
+	return issueops.CoordinateIDCreatesInTx(ctx, r.runner, ids)
+}
+
 func (r *issueSQLRepositoryImpl) CountForPrefix(ctx context.Context, prefix string, opts domain.IssueTableOpts) (int, error) {
 	if prefix == "" {
 		return 0, errors.New("db: CountForPrefix: prefix must not be empty")
@@ -734,6 +838,18 @@ func (r *issueSQLRepositoryImpl) NextCounterID(ctx context.Context, prefix strin
 		return 0, fmt.Errorf("db: NextCounterID: read last_id %q: %w", prefix, err)
 	}
 	return nextID, nil
+}
+
+// AdvanceCounterPastHeld moves prefix's counter over the held run right above
+// it (issueops.AdvanceCounterPastHeldIDsTx), in this repository's transaction.
+func (r *issueSQLRepositoryImpl) AdvanceCounterPastHeld(ctx context.Context, prefix string, claimed map[string]bool) error {
+	if prefix == "" {
+		return errors.New("db: AdvanceCounterPastHeld: prefix must not be empty")
+	}
+	if err := issueops.AdvanceCounterPastHeldIDsTx(ctx, r.runner, prefix, claimed); err != nil {
+		return fmt.Errorf("db: AdvanceCounterPastHeld %s: %w", prefix, err)
+	}
+	return nil
 }
 
 func (r *issueSQLRepositoryImpl) seedCounterFromExisting(ctx context.Context, prefix string) error {
@@ -834,6 +950,10 @@ func insertIssueRow(ctx context.Context, runner Runner, table string, issue *typ
 	// RowVersion CAS token is stale-zero on read — the backend-divergent break
 	// the RowVersion contract (types.Issue.RowVersion) forbids. The duplicate-key
 	// path rewrites it too so an upsert also advances the token.
+	//
+	// arrival_seq is deliberately absent from both the column list and the
+	// upsert assignments: only the journal's create seam writes it
+	// (issueops.stampArrivalSeqInTx).
 	_, err := runner.ExecContext(ctx, fmt.Sprintf(`
 		INSERT INTO %s (
 			id, content_hash, title, description, design, acceptance_criteria, notes,
@@ -1025,6 +1145,9 @@ func (r *issueSQLRepositoryImpl) Delete(ctx context.Context, id string, opts dom
 	if err := issueops.RecordDependencyRemovalsForIssuesInTx(ctx, r.runner, []string{id}, actor); err != nil {
 		return fmt.Errorf("db: IssueSQLRepository.Delete %s: journal dependency removals: %w", id, err)
 	}
+	if err := reserveRemovedChildSuffixes(ctx, r.runner, []string{id}); err != nil {
+		return fmt.Errorf("db: IssueSQLRepository.Delete %s: %w", id, err)
+	}
 	//nolint:gosec // G201: table is a hardcoded constant.
 	res, err := r.runner.ExecContext(ctx, fmt.Sprintf("DELETE FROM %s WHERE id = ?", table), id)
 	if err != nil {
@@ -1065,6 +1188,9 @@ func (r *issueSQLRepositoryImpl) DeleteByIDs(ctx context.Context, ids []string, 
 	// still be read.
 	if err := issueops.RecordDependencyRemovalsForIssuesInTx(ctx, r.runner, actualIDs, actor); err != nil {
 		return 0, fmt.Errorf("db: IssueSQLRepository.DeleteByIDs journal dependency removals: %w", err)
+	}
+	if err := reserveRemovedChildSuffixes(ctx, r.runner, actualIDs); err != nil {
+		return 0, fmt.Errorf("db: IssueSQLRepository.DeleteByIDs: %w", err)
 	}
 	total := 0
 	for start := 0; start < len(ids); start += deleteBatchSize {
@@ -1113,8 +1239,8 @@ func (r *issueSQLRepositoryImpl) PartitionWispIDs(ctx context.Context, ids []str
 	return issueops.PartitionWispIDsInTx(ctx, r.runner, ids)
 }
 
-func (r *issueSQLRepositoryImpl) FindAllDependents(ctx context.Context, ids []string) ([]string, error) {
-	set, err := issueops.FindAllDependentsInTx(ctx, r.runner, ids)
+func (r *issueSQLRepositoryImpl) FindCascadeClosure(ctx context.Context, ids []string) ([]string, error) {
+	set, err := issueops.FindCascadeClosureInTx(ctx, r.runner, ids)
 	if err != nil {
 		return nil, err
 	}
@@ -1137,11 +1263,11 @@ func (r *issueSQLRepositoryImpl) AffectedByDeletion(ctx context.Context, issueID
 	return issueops.AffectedByDeletionInTx(ctx, r.runner, issueIDs, wispIDs)
 }
 
-func (r *issueSQLRepositoryImpl) RecomputeIsBlockedAfterDelete(ctx context.Context, deletedIDs, issueIDs, wispIDs []string) error {
-	if err := issueops.RecomputeIsBlockedInTx(ctx, r.runner, issueIDs, wispIDs); err != nil {
+func (r *issueSQLRepositoryImpl) RecomputeIsBlockedAfterDelete(ctx context.Context, deletedIDs, issueIDs, wispIDs []string, actor string) error {
+	if err := issueops.RecomputeIsBlockedInTx(ctx, r.runner, issueIDs, wispIDs, actor); err != nil {
 		return err
 	}
-	issueops.NoteDeleteBlockedRecheck(r.runner, deletedIDs, "", issueIDs, wispIDs)
+	issueops.NoteDeleteBlockedRecheck(r.runner, deletedIDs, "", actor, issueIDs, wispIDs)
 	return nil
 }
 

@@ -18,11 +18,11 @@ import (
 // way in the same run. The control being GONE is what proves the sweep ran;
 // without it a command that silently did nothing would pass.
 
-// TestWispGCClosedForceKeepsMergeRequestRecords is bd-czf itself:
+// TestEmbeddedWispGCClosedForceKeepsMergeRequestRecords is bd-czf itself:
 // `bd mol wisp gc --closed --force` against a merge-request wisp that was
 // CLOSED WITHOUT MERGING. The closed purge has no age window, so before this
 // protection the record died on the next patrol cycle of any agent in the rig.
-func TestWispGCClosedForceKeepsMergeRequestRecords(t *testing.T) {
+func TestEmbeddedWispGCClosedForceKeepsMergeRequestRecords(t *testing.T) {
 	if os.Getenv("BEADS_TEST_EMBEDDED_DOLT") != "1" {
 		t.Skip("set BEADS_TEST_EMBEDDED_DOLT=1 to run embedded dolt integration tests")
 	}
@@ -53,10 +53,10 @@ func TestWispGCClosedForceKeepsMergeRequestRecords(t *testing.T) {
 	}
 }
 
-// TestWispGCAgeKeepsMergeRequestRecords covers the other sweep. An OPEN merge
+// TestEmbeddedWispGCAgeKeepsMergeRequestRecords covers the other sweep. An OPEN merge
 // request older than the age threshold sat in the abandoned set with the stale
 // patrol steps beside it.
-func TestWispGCAgeKeepsMergeRequestRecords(t *testing.T) {
+func TestEmbeddedWispGCAgeKeepsMergeRequestRecords(t *testing.T) {
 	if os.Getenv("BEADS_TEST_EMBEDDED_DOLT") != "1" {
 		t.Skip("set BEADS_TEST_EMBEDDED_DOLT=1 to run embedded dolt integration tests")
 	}
@@ -78,11 +78,11 @@ func TestWispGCAgeKeepsMergeRequestRecords(t *testing.T) {
 	}
 }
 
-// TestPurgeKeepsMergeRequestRecords covers the OTHER front door onto the same
+// TestEmbeddedPurgeKeepsMergeRequestRecords covers the OTHER front door onto the same
 // rows. `bd purge` sweeps closed ephemeral beads through issueops.Sweeper —
 // a different code path from `bd mol wisp gc` — so a fix in one of them would
 // leave the record destructible through the other while reading as fixed.
-func TestPurgeKeepsMergeRequestRecords(t *testing.T) {
+func TestEmbeddedPurgeKeepsMergeRequestRecords(t *testing.T) {
 	if os.Getenv("BEADS_TEST_EMBEDDED_DOLT") != "1" {
 		t.Skip("set BEADS_TEST_EMBEDDED_DOLT=1 to run embedded dolt integration tests")
 	}
@@ -105,10 +105,10 @@ func TestPurgeKeepsMergeRequestRecords(t *testing.T) {
 	}
 }
 
-// TestWispGCClosedForceHonorsConfiguredLabels proves the mechanism belongs to
+// TestEmbeddedWispGCClosedForceHonorsConfiguredLabels proves the mechanism belongs to
 // the WORKSPACE rather than to beads' own vocabulary: a configured list
 // replaces the defaults, on the shipped binary.
-func TestWispGCClosedForceHonorsConfiguredLabels(t *testing.T) {
+func TestEmbeddedWispGCClosedForceHonorsConfiguredLabels(t *testing.T) {
 	if os.Getenv("BEADS_TEST_EMBEDDED_DOLT") != "1" {
 		t.Skip("set BEADS_TEST_EMBEDDED_DOLT=1 to run embedded dolt integration tests")
 	}
@@ -135,7 +135,7 @@ func TestWispGCClosedForceHonorsConfiguredLabels(t *testing.T) {
 	bdShowFail(t, bd, dir, defaulted)
 }
 
-// TestWispGCAgeKeepsOpenEscalations is bd-724 on the shipped binary, and it is
+// TestEmbeddedWispGCAgeKeepsOpenEscalations is bd-724 on the shipped binary, and it is
 // here rather than only in the unit suite because the kind has to survive the
 // same three hops the label does: `bd create --wisp-type escalation` has to
 // store it, the sweep's query has to hydrate it onto the row, and the filter
@@ -143,7 +143,7 @@ func TestWispGCClosedForceHonorsConfiguredLabels(t *testing.T) {
 //
 // --age 0 makes every wisp old enough, so the control's deletion proves the
 // sweep ran rather than found nothing.
-func TestWispGCAgeKeepsOpenEscalations(t *testing.T) {
+func TestEmbeddedWispGCAgeKeepsOpenEscalations(t *testing.T) {
 	if os.Getenv("BEADS_TEST_EMBEDDED_DOLT") != "1" {
 		t.Skip("set BEADS_TEST_EMBEDDED_DOLT=1 to run embedded dolt integration tests")
 	}
@@ -166,11 +166,11 @@ func TestWispGCAgeKeepsOpenEscalations(t *testing.T) {
 	}
 }
 
-// TestWispGCKeepsEscalationsWhenLabelsAreConfiguredAway is the claim that the
+// TestEmbeddedWispGCKeepsEscalationsWhenLabelsAreConfiguredAway is the claim that the
 // guard is not configuration. The label list is set to something no bead
 // carries — which is what an unset list against unlabelled wisps amounts to —
 // and the escalation still has to survive both sweeps.
-func TestWispGCKeepsEscalationsWhenLabelsAreConfiguredAway(t *testing.T) {
+func TestEmbeddedWispGCKeepsEscalationsWhenLabelsAreConfiguredAway(t *testing.T) {
 	if os.Getenv("BEADS_TEST_EMBEDDED_DOLT") != "1" {
 		t.Skip("set BEADS_TEST_EMBEDDED_DOLT=1 to run embedded dolt integration tests")
 	}
@@ -195,10 +195,10 @@ func TestWispGCKeepsEscalationsWhenLabelsAreConfiguredAway(t *testing.T) {
 	}
 }
 
-// TestPurgeKeepsEscalations covers the other front door, for the same reason
-// TestPurgeKeepsMergeRequestRecords does: `bd purge` reaches these rows
+// TestEmbeddedPurgeKeepsEscalations covers the other front door, for the same reason
+// TestEmbeddedPurgeKeepsMergeRequestRecords does: `bd purge` reaches these rows
 // through issueops.Sweeper rather than through `bd mol wisp gc`.
-func TestPurgeKeepsEscalations(t *testing.T) {
+func TestEmbeddedPurgeKeepsEscalations(t *testing.T) {
 	if os.Getenv("BEADS_TEST_EMBEDDED_DOLT") != "1" {
 		t.Skip("set BEADS_TEST_EMBEDDED_DOLT=1 to run embedded dolt integration tests")
 	}

@@ -32,12 +32,16 @@ var (
 	ErrNotInitialized    = issueops.ErrNotInitialized
 	ErrPrefixMismatch    = issueops.ErrPrefixMismatch
 	ErrCloseBlocked      = issueops.ErrCloseBlocked
+	ErrClaimBlocked      = issueops.ErrClaimBlocked
 	ErrCloseOpenChildren = issueops.ErrCloseOpenChildren
 	ErrAlreadyExists     = issueops.ErrAlreadyExists
-	ErrAlreadyIdentified = issueops.ErrAlreadyIdentified
-	ErrVersionMismatch   = issueops.ErrVersionMismatch
-	ErrStatusMismatch    = issueops.ErrStatusMismatch
-	ErrNotesOverwrite    = issueops.ErrNotesOverwrite
+	// ErrIdempotencyExpired matches a create refused because a retaining
+	// retention sweep retired its id (issueops.IdempotencyExpiredError).
+	ErrIdempotencyExpired = issueops.ErrIdempotencyExpired
+	ErrAlreadyIdentified  = issueops.ErrAlreadyIdentified
+	ErrVersionMismatch    = issueops.ErrVersionMismatch
+	ErrStatusMismatch     = issueops.ErrStatusMismatch
+	ErrNotesOverwrite     = issueops.ErrNotesOverwrite
 )
 
 // CloseOpenChildrenError reports the issue and open-child count that refused a
@@ -415,6 +419,16 @@ type Storage interface {
 	MoleculeStepper() (issueops.MoleculeStepper, error)
 
 	// Issue CRUD
+
+	// CreateIssue and CreateIssues write back to the caller's structs the IDs
+	// they fill: a minted issue.ID for an empty one and a fresh comment's ID.
+	// CreateIssues also backfills each dependency's empty IssueID from its
+	// owning issue; CreateIssue does not persist Dependencies. On success the
+	// fields hold the created rows' IDs. When the create fails and its
+	// transaction rolled back, every one of those fields the caller left
+	// empty is empty again, so retrying the same struct mints afresh; an
+	// error wrapping ErrCommitIndeterminate keeps them, since the rows may
+	// exist. Caller-supplied IDs are never changed.
 	CreateIssue(ctx context.Context, issue *types.Issue, actor string) error
 	CreateIssues(ctx context.Context, issues []*types.Issue, actor string) error
 	GetIssue(ctx context.Context, id string) (*types.Issue, error)
@@ -862,8 +876,10 @@ type SchemaMigrator interface {
 
 // Compactor squashes old Dolt commits while preserving recent ones.
 // Callers should type-assert to this interface for selective history compaction.
+// headHash is main's HEAD in the log the plan was read from; the replay is
+// verified against it (see versioncontrolops.Compact).
 type Compactor interface {
-	Compact(ctx context.Context, initialHash, boundaryHash string, oldCommits int, recentHashes []string) error
+	Compact(ctx context.Context, initialHash, boundaryHash, headHash string, oldCommits int, recentHashes []string) error
 }
 
 // BlockedRecomputer recomputes the denormalized is_blocked column for every
@@ -878,15 +894,28 @@ type BlockedRecomputer interface {
 	RecomputeAllBlocked(ctx context.Context) (int, error)
 }
 
-// StateHasher returns a hash covering committed history plus the working set.
-// Unlike GetCurrentCommit (HEAD only), the hash moves on uncommitted writes.
-// Change detection against a SQL server must use this when available: server
-// mode runs with dolt auto-commit off, so writes sit in the working set and
-// HEAD does not advance.
+// StateHasher returns a hash of the working root (DOLT_HASHOF_DB()). Unlike
+// GetCurrentCommit (HEAD only), the hash moves on uncommitted writes, and it
+// stays put across reads and across a commit that leaves the working data as
+// it was. Change detection must use this when available: server mode runs
+// with dolt auto-commit off, and embedded batch or off auto-commit leaves
+// writes in the working set too, so HEAD does not advance. The server store
+// falls back to HEAD on servers that predate DOLT_HASHOF_DB.
 // Callers should type-assert to this interface and fall back to
 // GetCurrentCommit when the store does not implement it.
 type StateHasher interface {
 	GetStateHash(ctx context.Context) (string, error)
+}
+
+// HeadHasher reads the hash of the HEAD commit and of the root value it
+// records: DOLT_HASHOF('HEAD') and DOLT_HASHOF_DB('HEAD'). They are the two
+// chunks of a push that a remote can report missing while it is still
+// registering them, so the guidance for Dolt's "Found dangling references"
+// push refusal prints them beside the hash the refusal names. Both Dolt
+// stores implement it, the embedded one included, where bd sql does not run.
+// Callers type-assert.
+type HeadHasher interface {
+	GetHeadHashes(ctx context.Context) (commit, root string, err error)
 }
 
 // The durable mutation journal's vocabulary lives in the journalops leaf, and
@@ -964,6 +993,36 @@ type EventsJournalAccessor interface {
 // config, and a consumer holding the read role has no business changing it.
 type EventsJournalConfigurer interface {
 	SetEventsJournalEnabled(enabled bool)
+}
+
+// EventsJournalShapeChecker reports whether the LAST SetEventsJournalEnabled
+// call on this instance found a table shape the journal cannot run against.
+//
+// It exists because SetEventsJournalEnabled itself stays void: dozens of
+// tests across three backends already call it as a bare statement, and
+// adaptive I/O (PR A1) must not force every one of them to start checking an
+// error it never had before. Instead, enabling the journal probes the table's
+// shape internally and caches the verdict; this is the seam a factory's open
+// path checks immediately afterward. Only a typed shape verdict
+// (issueops.JournalShapeError: a missing required column, or a missing table)
+// is reported. A probe that could not run at all says nothing about the
+// table, so it degrades to the canonical shape with a warning and reports nil.
+//
+// The journal stays enabled either way, and an enabled store with an
+// unsupported shape is NOT a no-op for writes: it writes with the canonical
+// column list, so each journaled write fails loudly on its INSERT and rolls
+// back with the mutation it records — never a mutation committed with no
+// journal row. eventsjournal.Apply turns the verdict into a refused open for
+// an open that is going to write beads, so that path fails once, at open,
+// instead of on every write (the gci failure mode this interface exists to
+// avoid); an open that writes no beads is not refused. Reads are never gated
+// by the enabled flag: a table that cannot answer fails the read with a loud
+// SQL error, never a silently wrong answer.
+//
+// A store that does not implement it is assumed never to fail activation
+// (today, every implementation does).
+type EventsJournalShapeChecker interface {
+	EventsJournalActivationError() error
 }
 
 // VersionedHistoryConfigurer controls dual-write issue-version history
@@ -1055,6 +1114,12 @@ type BackupStore interface {
 	BackupDatabase(ctx context.Context, dir string) error
 	// RestoreDatabase restores the database from a Dolt backup at dir.
 	// When force is true, the existing database is dropped before restoring.
+	// dir must be a directory on the caller's filesystem holding a Dolt
+	// backup, at a path Dolt reads literally: anything else is refused before
+	// the existing database is touched. A store served by a Dolt SQL server
+	// hands the path to the server, which opens it on its own filesystem, so
+	// that check speaks for the directory restored from only when the server
+	// shares the caller's filesystem at that path.
 	RestoreDatabase(ctx context.Context, dir string, force bool) error
 }
 

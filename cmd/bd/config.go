@@ -23,6 +23,7 @@ import (
 	"github.com/steveyegge/beads/internal/storage"
 	"github.com/steveyegge/beads/internal/tracker"
 	"github.com/steveyegge/beads/internal/types"
+	"github.com/steveyegge/beads/internal/workapi"
 	"github.com/steveyegge/beads/issueops"
 )
 
@@ -1219,11 +1220,6 @@ Examples:
 					return HandleError("invalid role %q (valid values: maintainer, contributor)", p.value)
 				}
 			}
-			if p.key == "status.custom" && p.value != "" {
-				if _, err := types.ParseCustomStatusConfig(p.value); err != nil {
-					return HandleError("invalid status.custom value: %v", err)
-				}
-			}
 			if strings.HasPrefix(p.key, "storage-class.") {
 				if err := validateStorageClassConfig(p.key, p.value); err != nil {
 					return HandleError("%v", err)
@@ -1248,6 +1244,16 @@ Examples:
 				gitPairs = append(gitPairs, p)
 			} else {
 				dbPairs = append(dbPairs, p)
+			}
+		}
+
+		// Every database-bound pair passes the settings plane's write
+		// validation before ANY pair is written, on both routes, so the batch
+		// refuses what `bd config set` refuses (a malformed types.retained, an
+		// unprojectable status.custom) and a refusal leaves nothing half-set.
+		for _, p := range dbPairs {
+			if _, err := workapi.ValidateSettingWrite(p.key, p.value); err != nil {
+				return HandleError("%v", err)
 			}
 		}
 
@@ -1424,7 +1430,7 @@ func allRecognizedConfigPrefixes() []string {
 
 // recognizedConfigKeys lists valid non-namespaced config keys.
 var recognizedConfigKeys = map[string]bool{
-	"no-db": true, "json": true, "db": true, "actor": true,
+	"json": true, "db": true, "actor": true,
 	"identity": true, "no-push": true, "no-git-ops": true,
 	"node_id":                    true, // replica identity for the lease guard (read from yaml/env, never the DB)
 	"create.require-description": true, "beads.role": true,
@@ -1466,13 +1472,22 @@ func isRecognizedConfigKey(key string) bool {
 // dash or underscore form silently produces a write that looks like it
 // succeeded but is never visible to 'bd create'. Reject both and point the
 // user at the right command.
+//
+// no-db is refused for a different reason: the JSONL-only mode it selected
+// is gone, so any value would be a setting nothing reads (GH#7387). 'bd config
+// unset no-db' still clears an old entry.
 func rejectProtectedConfigKey(key string) (string, bool) {
 	switch key {
 	case "issue_prefix", "issue-prefix":
 		return "Error: issue_prefix cannot be set via 'bd config set'.\n" +
 			"  - New project:       bd init --prefix <prefix>\n" +
 			"  - Fresh clone:       bd bootstrap\n" +
-			"  - Rename existing:   bd rename-prefix <new-prefix>", true
+			"  - Rename existing:   bd rename-prefix <new-prefix>\n" +
+			"  - New IDs only:      bd rename-prefix <new-prefix> --mint-only", true
+	case "no-db":
+		return "Error: no-db is obsolete and cannot be set.\n" +
+			"  bd keeps issues in its Dolt database; .beads/issues.jsonl is only an export of them.\n" +
+			"  - Remove an old entry:   bd config unset no-db", true
 	}
 	return "", false
 }

@@ -499,7 +499,7 @@ func mustEvalGHRunsOn(t *testing.T, expr string, ctx map[string]string) string {
 // `||`, a wrong field name) fails this test even if a hand-rolled Go mirror
 // would have been edited to match it.
 func TestSameRepoBlacksmithExpressionSemantics(t *testing.T) {
-	const ownRepo = "steveyegge/beads"
+	const ownRepo = "gastownhall/beads"
 	type tc struct {
 		name       string
 		event      string
@@ -554,7 +554,7 @@ func TestSameRepoBlacksmithExpressionSemantics(t *testing.T) {
 // resolve to Blacksmith on every event shape, forks and Dependabot included;
 // there is no GitHub-hosted fallback left to drift to.
 func TestBlacksmithWindowsMacOSRunsOnEveryEvent(t *testing.T) {
-	const ownRepo = "steveyegge/beads"
+	const ownRepo = "gastownhall/beads"
 	events := []struct{ name, event, headRepo, actor string }{
 		{"same-repo PR", "pull_request", ownRepo, "alice"},
 		{"merge_group", "merge_group", "", ""},
@@ -584,6 +584,73 @@ func TestBlacksmithWindowsMacOSRunsOnEveryEvent(t *testing.T) {
 	for _, leg := range []string{blacksmithMacOSLabel, blacksmithWindowsLabel} {
 		if got := mustEvalGHRunsOn(t, platformsMatrixRunsOn, map[string]string{"matrix.runner": leg}); got != leg {
 			t.Errorf("%s with matrix.runner %q = %q", platformsMatrixRunsOn, leg, got)
+		}
+	}
+}
+
+// TestBazelRBERunnerOutsideGastownhall evaluates bazel.yml's real rbe job
+// runs-on: in gastownhall (github.repository_owner_id gastownhallOwnerID,
+// whatever the org is called) the same-repo events get Blacksmith and fork,
+// Dependabot and pull_request_target runs GitHub-hosted; in a fork
+// repository's own CI, which has no Blacksmith, every event is
+// GitHub-hosted, so its pushes and dispatches reach mode local instead of
+// queueing for a day. (The lanes follow the decided mode, local there:
+// TestBlacksmithBazelRunnerSizes.)
+func TestBazelRBERunnerOutsideGastownhall(t *testing.T) {
+	rbe := readCIWorkflow(t, bazelWorkflowName).job(t, bazelRBEJobName)
+	runsOn := rbe.RunsOn
+	forkRepo := rbe.step(t, "Decide remote execution").Env["FORK_REPO"]
+	events := []struct {
+		name, event, headRepo, actor string
+		blacksmith                   bool // in gastownhall
+	}{
+		{"push", "push", "", "alice", true},
+		{"workflow_dispatch", "workflow_dispatch", "", "alice", true},
+		{"schedule", "schedule", "", "", true},
+		{"merge_group", "merge_group", "", "github-merge-queue[bot]", true},
+		{"same-repo PR", "pull_request", "<own>", "alice", true},
+		{"fork PR", "pull_request", "someone-else/beads", "alice", false},
+		{"Dependabot PR", "pull_request", "<own>", "dependabot[bot]", false},
+		{"pull_request_target", "pull_request_target", "someone-else/beads", "alice", false},
+	}
+	for _, owner := range []struct {
+		repo, name, id string
+		upstream       bool
+	}{
+		{"gastownhall/beads", "gastownhall", gastownhallOwnerID, true},
+		{"gastowntown/beads", "gastowntown", gastownhallOwnerID, true}, // renamed org
+		{"someone/beads", "someone", "31337", false},
+		{"gastownhall/beads-fork", "gastownhall", "31337", false}, // a look-alike name
+	} {
+		// The decision's FORK_REPO reads the same id: mode local exactly
+		// outside gastownhall.
+		v, err := evalGHExpr(forkRepo, map[string]string{"github.repository_owner": owner.name, "github.repository_owner_id": owner.id})
+		if err != nil {
+			t.Fatalf("FORK_REPO %q: %v", forkRepo, err)
+		}
+		if got, want := ghTruthy(v), !owner.upstream; got != want {
+			t.Errorf("%s (owner id %s): FORK_REPO %q = %v, want %v", owner.repo, owner.id, forkRepo, got, want)
+		}
+		for _, e := range events {
+			head := e.headRepo
+			if head == "<own>" {
+				head = owner.repo
+			}
+			ctx := map[string]string{
+				"github.event_name":                             e.event,
+				"github.event.pull_request.head.repo.full_name": head,
+				"github.repository":                             owner.repo,
+				"github.repository_owner":                       owner.name,
+				"github.repository_owner_id":                    owner.id,
+				"github.actor":                                  e.actor,
+			}
+			want := "ubuntu-latest"
+			if owner.upstream && e.blacksmith {
+				want = "blacksmith-2vcpu-ubuntu-2404"
+			}
+			if got := mustEvalGHRunsOn(t, runsOn, ctx); got != want {
+				t.Errorf("%s in %s (owner id %s): rbe runs-on %q, want %q", e.name, owner.repo, owner.id, got, want)
+			}
 		}
 	}
 }

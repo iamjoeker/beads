@@ -847,12 +847,14 @@ paths:
         depth-first pre-order, so a subtree is contiguous.
 
 
-        EVERY NODE APPEARS AT MOST ONCE PER WALK, at the depth and parent of the
-        first path that reached it. That single rule is both the cycle policy
-        and the diamond policy: a cycle TERMINATES rather than failing the call
-        or being reported (`GET /v0/beads/dependencies/cycles` is where a cycle
-        is an answer), and a shared subtree is shown under one parent only, with
-        no option to show it twice.
+        EVERY NODE IS EXPANDED AT MOST ONCE PER WALK, at the depth and parent of
+        the first path that reached it. A cycle TERMINATES rather than failing
+        the call or being reported (`GET /v0/beads/dependencies/cycles` is where
+        a cycle is an answer): the edge back into the current path adds no
+        element. A shared subtree is expanded under one parent only, with no
+        option to expand it twice, and every later parent's edge into it is a
+        stub element carrying `deduped: true`, so ids repeat; drop the stubs to
+        get each issue once.
 
 
         EDGES ARE WIDER THAN THEY ARE ON THE CYCLE REPORT. This walk follows
@@ -2211,6 +2213,12 @@ paths:
         mints one.
 
 
+        An id a retaining sweep RETIRED (`issues:sweep` with `retain_ids`) is
+        a `410 idempotency_expired`: the bead that held it was deleted after
+        the create that used the id had already happened, and a create of that
+        id never runs again. A minted id is never a retired one.
+
+
         ## What this operation deliberately cannot set
 
 
@@ -2343,6 +2351,24 @@ paths:
             its `dependency_cycle` never carries the hierarchy members; the
             discriminator is meaningful here and absent there.
           x-bd-codes: [already_exists, dependency_cycle]
+          content:
+            application/problem+json:
+              schema:
+                $ref: '#/components/schemas/Problem'
+        '410':
+          description: >-
+            `idempotency_expired`: the explicit `id` names a bead a retaining
+            sweep retired (`issues:sweep` with `retain_ids`). The create that
+            used the id already happened, the bead it made has since been swept,
+            and NOTHING WAS WRITTEN. `param` is `id` and `closed_at` is when the
+            swept bead had closed.
+
+
+            A `410` rather than a `409` because retrying can never succeed and
+            there is no row to look at: the id is gone for good, which is what
+            `410` means. Recovery is to treat the earlier create as the one
+            that counted — never to mint a fresh id for the same intent.
+          x-bd-codes: [idempotency_expired]
           content:
             application/problem+json:
               schema:
@@ -3148,6 +3174,19 @@ paths:
         that dropped the claim.
 
 
+        A refused claim also covers the LOCAL-BLOCKED case: a claim that
+        would take an issue with a live local blocker is refused with `409
+        not_claimable` naming `claim`, with the blockers in the problem's
+        `blockers` member — `bd close`'s live-blocker refusal, on the claim.
+        The check runs only once the claim's compare-and-set has won, so the
+        holder's idempotent re-claim is never refused and a status that is
+        not claimable gets the status refusal instead.
+        `force_claim_blocked` bypasses it (and nothing else); the
+        external-dependency claim refusals are NOT local blockers and no force
+        member bypasses them. `POST /v0/beads/issues/{id}:claim` does not
+        apply this refusal.
+
+
         `labels` is COMPLETE REPLACEMENT. It is the only shape whose result the
         client already knows without a read-back; an additive
         `labels_add`/`labels_remove` pair can join the vocabulary later without
@@ -3297,8 +3336,12 @@ paths:
             answers them: `already_claimed` when another actor holds the issue
             (with the `assignee` extension member when the refusing transaction
             reported the holder), `not_claimable` when its status is not
-            claimable (with `issue_status`). Nothing was written, the patch
-            included.
+            claimable (with `issue_status`). A `not_claimable` whose
+            `blockers` member is present is the third refusal: the issue has a
+            LIVE local blocker, so the claim would put in-progress work behind
+            it; the member names those blockers, and `issue_status` is absent.
+            `force_claim_blocked` is the bypass. None of these write anything,
+            the patch included.
 
 
             `precondition_failed` is `expected_version`, `expected_status` or
@@ -3665,6 +3708,11 @@ paths:
         `assignee` extension member, read inside the same transaction; an issue
         in a non-claimable state is 409 `not_claimable` and carries
         `issue_status`. Neither needs the client to parse prose.
+
+
+        This claim does not refuse an issue for its blockers: the
+        live-local-blocker refusal is `PATCH /v0/beads/issues/{id}`'s, on its
+        `claim` member (see `force_claim_blocked`).
       parameters:
         - $ref: '#/components/parameters/IssueID'
       security:
@@ -4621,8 +4669,8 @@ paths:
       operationId: deleteIssues
       summary: Delete named beads
       description: >-
-        Erases the beads this request NAMES, and — under `cascade` — everything
-        that depends on them. It is the operation behind `bd delete`, the other
+        Erases the beads this request NAMES, and — under `cascade` — their
+        parent-child descendants. It is the operation behind `bd delete`, the other
         DESTRUCTIVE operation on this surface alongside `issues:sweep`, and
         nothing it deletes comes back.
 
@@ -4650,9 +4698,14 @@ paths:
         the request depends on is REFUSED with `400` / `invalid_argument`, and
         nothing is deleted. `force` deletes the named beads and leaves those
         dependents ORPHANED — they keep their rows, lose their edges, and come
-        back in `orphaned`. `cascade` deletes the transitive closure instead,
-        so nothing is left outside it to orphan; a request carrying both
-        behaves as `cascade`.
+        back in `orphaned`. `cascade` deletes the named beads' parent-child
+        descendants as well, and every other dependent of that set survives
+        ORPHANED and comes back in `orphaned`, as under `force`; a request
+        carrying both behaves as `cascade`. A server announces this
+        containment-only cascade with the `issues.delete.containmentCascade`
+        behavior token: an older server's `cascade` deleted every transitive
+        dependent, so a client must not send `cascade` to a server that does
+        not advertise it.
 
 
         The refusal is the LIBRARY's, not this handler's — the same surface
@@ -5362,6 +5415,19 @@ paths:
             application/problem+json:
               schema:
                 $ref: '#/components/schemas/Problem'
+        '410':
+          description: >-
+            `idempotency_expired`: a `create` item's EXPLICIT `id` names a bead
+            a retaining sweep retired (`issues:sweep` with `retain_ids`). The
+            WHOLE request is refused and nothing is written, exactly as for
+            every other item refusal. `param` is `items[i].create.id`, the item
+            members name which item carried it, and `closed_at` is when the
+            swept bead had closed.
+          x-bd-codes: [idempotency_expired]
+          content:
+            application/problem+json:
+              schema:
+                $ref: '#/components/schemas/Problem'
         '500':
           $ref: '#/components/responses/InternalError'
         '503':
@@ -5900,6 +5966,20 @@ paths:
         ## What this plane refuses, and what it does not
 
 
+        A key `config.yaml` owns is a `400` and NOTHING is written: the
+        startup settings and the tracker secrets (`github.token`,
+        `linear.api_key`, `jira.api_token`, `gitlab.token`, `ado.pat`,
+        `notion.token`, ...) and every key under `export.`, `dolt.`,
+        `routing.`, `sync.` and the rest of the yaml-only list. This plane's
+        table is replicated by `bd dolt push`, `pull` and clone, so a secret
+        stored here would reach every remote, and a non-secret yaml-only key
+        stored here is a row no reader consults. The `detail` names the key and
+        `config.yaml` and never the value; set the key with
+        `bd config set <key> <value>` in the workspace instead. A row an older
+        server stored under such a key is still removed by
+        `DELETE /v0/beads/config/{key}`.
+
+
         `issue_prefix` — in either spelling — is a `400` and NOTHING is written.
         The prefix is owned by `bd init --prefix`, `bd bootstrap` and
         `bd rename-prefix`, each of which does work this plane cannot: rewriting
@@ -5918,15 +5998,16 @@ paths:
         and the projection are one durable act or neither happens.
 
 
-        A KEY WHOSE NAME MARKS IT CREDENTIAL-BEARING IS WRITABLE, and that is
+        A KEY WHOSE NAME MARKS IT CREDENTIAL-BEARING AND THAT `config.yaml`
+        DOES NOT OWN IS WRITABLE, and that is
         deliberate rather than an oversight in the redaction posture. Redaction
         is a rule about DISCLOSURE: it withholds a value from a reader because a
         bearer on this surface is shared and surface-wide and cannot decide that
         one caller may read a credential and another may not. A writer supplies
         the value, so refusing the write protects nothing that is not already in
         the caller's hand — and it would leave a workspace whose credentials can
-        be seen to EXIST and never configured. The role refuses no such key
-        either; `bd config set`'s own secret guard is about writing a credential
+        be seen to EXIST and never configured. The role refuses no key for being
+        credential-bearing either; `bd config set`'s own secret guard is about writing a credential
         into a git-tracked `config.yaml`, which is a different plane with a
         different hazard, and it returns clean for every key this operation
         reaches.
@@ -5942,14 +6023,12 @@ paths:
         two different things about `redacted`.
 
 
-        A key belonging to another SOURCE is not refused here and is worth
-        knowing about: `export.*`, `dolt.*`, `federation.*`, `storage-class.*`
-        and the rest of the yaml-only list live in `config.yaml`, and
-        `beads.role` lives in git config. Written through this operation they
-        land a row no reader consults. The role does not police that routing and
-        neither can this server — three of the five sources `bd config show`
-        reads are files on the CLIENT's machine, which is the same reason that
-        command has no operation here.
+        This server cannot ROUTE a key to another source — three of the five
+        sources `bd config show` reads are files on the CLIENT's machine, which
+        is the same reason that command has no operation here — so a yaml-only
+        key is refused rather than redirected. `beads.role`, which lives in git
+        config, is not refused: written through this operation it lands a row no
+        reader consults, and carries no secret.
 
 
         Hooks do not fire, as for every write on this surface — and on this plane
@@ -5983,12 +6062,13 @@ paths:
             is not a string or is longer than the 65535-byte column, a `key`
             that is empty after trimming, carries a
             control character or is longer than the 255-character column — or a
-            value this workspace's own validation refuses, which is `issue_prefix`
-            in either spelling and a `status.custom` that does not parse. NOTHING
-            IS WRITTEN in any of these cases.
+            value this workspace's own validation refuses, which is a key
+            `config.yaml` owns, `issue_prefix` in either spelling and a
+            `status.custom` that does not parse. NOTHING IS WRITTEN in any of
+            these cases.
 
 
-            The role's two refusals carry no `param`, unlike the transport's
+            The role's refusals carry no `param`, unlike the transport's
             above: telling them apart would take a second copy of the protected-key
             vocabulary on this side of the seam, and `detail` carries the role's
             own sentence, which names what to send instead.
@@ -7810,6 +7890,29 @@ components:
             The record's history/replication contract. Empty means unset, which
             resolves to ephemeral for wisp-plane records and versioned
             otherwise.
+        arrival_seq:
+          type: integer
+          format: int64
+          description: >-
+            The row's commit-ordered create sequence: the events-journal `seq`
+            of the `create` record written by the transaction that inserted
+            the row, stamped on the row in that same transaction
+            (`issues.arrivalSeq`). Sorting rows by it reproduces the order
+            their creates committed in, also after those journal records are
+            pruned; read it from the row or a journal post-image, never infer
+            it from a record's `seq` (a rename or an import upsert journals a
+            synthetic create for a row that already exists). Only wisp-plane
+            records (ephemeral or no_history) carry one: a record created while
+            the workspace journals is stamped by its own insert, and one
+            created while it did not is stamped by the first create record
+            journaled for it later, so it sorts by that commit rather than its
+            insert's; a record moved onto the wisp plane (`persistence`) has
+            none until such a record either. Absent means none. Values are
+            local to the workspace that assigned them — unique, not reused
+            unless the server's seq counter is lost after the journal records
+            that held them are pruned, never changed while the record stays on
+            the wisp plane, never written to JSONL interchange, and never
+            settable by a client.
         pinned:
           type: boolean
         is_template:
@@ -8019,6 +8122,10 @@ components:
             The record's history/replication contract. Empty means unset, which
             resolves to ephemeral for wisp-plane records and versioned
             otherwise.
+        arrival_seq:
+          type: integer
+          format: int64
+          description: As on Issue.
         pinned:
           type: boolean
         is_template:
@@ -8141,6 +8248,7 @@ components:
         no_history: { type: boolean }
         wisp_type: { type: string }
         storage_class: { type: string }
+        arrival_seq: { type: integer, format: int64 }
         pinned: { type: boolean }
         is_template: { type: boolean }
         bonded_from:
@@ -8240,6 +8348,7 @@ components:
         no_history: { type: boolean }
         wisp_type: { type: string }
         storage_class: { type: string }
+        arrival_seq: { type: integer, format: int64 }
         pinned: { type: boolean }
         is_template: { type: boolean }
         bonded_from:
@@ -8485,6 +8594,7 @@ components:
         no_history: { type: boolean }
         wisp_type: { type: string }
         storage_class: { type: string }
+        arrival_seq: { type: integer, format: int64 }
         pinned: { type: boolean }
         is_template: { type: boolean }
         bonded_from:
@@ -8571,6 +8681,7 @@ components:
         no_history: { type: boolean }
         wisp_type: { type: string }
         storage_class: { type: string }
+        arrival_seq: { type: integer, format: int64 }
         pinned: { type: boolean }
         is_template: { type: boolean }
         bonded_from:
@@ -8603,9 +8714,9 @@ components:
           type: string
           description: >-
             The node this one was reached FROM, empty on the root. A node is
-            reached ONCE per walk, by the first path that got there, so a shared
-            child of two parents names only the first of them here and the
-            second has no visible edge to it.
+            expanded ONCE per walk, under the first path that got there; each
+            later parent of a shared child gets its own stub element (`deduped:
+            true`) naming that parent here.
         edge_from_parent:
           type: string
           description: >-
@@ -8619,6 +8730,13 @@ components:
             is ABSENT from the answer rather than present and flagged, so a
             client cannot tell a tree that ended from one that was cut. It is
             documented rather than removed because it is on the wire today.
+        deduped:
+          type: boolean
+          description: >-
+            True on a STUB: a row that records only the edge from `parent_id`
+            into an issue already expanded earlier in the same answer, with no
+            descendants of its own. Absent, never false, on every other row.
+            Drop the rows carrying it to get each issue once.
 
     Dependency:
       type: object
@@ -9108,6 +9226,16 @@ components:
             `unknown_parameter`, `issues.sweep.limit`, which announces
             that it accepts `limit` and answers `remaining` rather than
             silently answering `unknown_parameter`,
+            `issues.sweep.retainIds`, which announces that the same operation
+            accepts `retain_ids` and answers `retain_ids` rather than silently
+            answering `unknown_parameter` — and, with it, that EVERY create on
+            this surface refuses an id a retaining sweep retired with `410`
+            `idempotency_expired` rather than re-creating it,
+            `issues.sweep.retainedTypes`, which announces that the same
+            operation holds back every candidate whose issue type the
+            workspace's types.retained setting names unless the request sets
+            `retain_ids`, and answers `skipped.retention_required` — an older
+            server deletes those beads without retiring their ids,
             `issues.batchApply.depAddLineage`, which announces that a
             `dep_add` item on `POST /v0/beads/issues:batchApply` accepts
             `has_spawner` and `thread_id` (see `ApplyDepAddItem`) rather than
@@ -9161,7 +9289,25 @@ components:
             no-labels, no-parent, exclude-type, exclude-status, pinned,
             no-pinned, deferred, overdue, mol-type and wisp-type filters;
             see those parameters) rather than answering
-            `unknown_parameter`. One behavior token is
+            `unknown_parameter`, and `issues.arrivalSeq`, which announces that
+            every Issue-shaped schema carries `arrival_seq`, the
+            commit-ordered create sequence storage stamps on a wisp-plane
+            record (see `Issue.arrival_seq`; build-level like the others —
+            records are stamped only while the workspace journals, which
+            `GET /v0/beads/events` reports by answering `409
+            events_journal_disabled` when it does not), and
+            `issues.delete.containmentCascade`, which announces that
+            `issues:delete`'s `cascade` deletes only the named beads'
+            parent-child descendants and orphans every other dependent (see
+            `DeleteIssuesRequest.cascade`; a server without it deletes every
+            transitive dependent, so a client refuses to send `cascade` to
+            one), and `issues.update.forceClaimBlocked`, which announces
+            that `PATCH /v0/beads/issues/{id}` refuses a `claim` of an issue
+            with a live local blocker — `409 not_claimable` naming `claim`
+            with the blockers in the problem's `blockers` member — and
+            accepts `force_claim_blocked` as that refusal's bypass (see
+            `UpdateIssueRequest`) rather than a `400` naming the member
+            unknown. One behavior token is
             CONDITIONAL rather than build-level: `policy.external_dependencies`
             announces that this server's ready, blocked-listing, claim,
             claim-next, close, blocking and dependency-tree operations already
@@ -9508,11 +9654,14 @@ components:
           type: boolean
           default: false
           description: >-
-            Also delete the transitive closure of everything that depends on
-            the named beads. With `cascade` there is nothing left outside the
-            set to orphan, so it makes `force` moot rather than conflicting
-            with it: a request carrying both behaves as `cascade` and
-            `orphaned` comes back empty.
+            Also delete the named beads' parent-child descendants, at every
+            depth. Every other dependent of the deleted set — a bead joined by
+            any edge type other than parent-child — survives with its edges to
+            the set removed and comes back in `orphaned`, so `cascade` makes
+            `force` moot rather than conflicting with it: a request carrying
+            both behaves as `cascade`. Announced by the
+            `issues.delete.containmentCascade` behavior token; a server
+            without it deletes every transitive dependent instead.
         force:
           type: boolean
           default: false
@@ -9641,12 +9790,27 @@ components:
           type: array
           description: >-
             The surviving beads that depended on something this request
-            deleted, in ascending id order. Present exactly when the request
-            carried `force` without `cascade`, which is the only mode in which
-            orphaning is possible; absent otherwise.
+            deleted, in ascending id order. Present when the request carried
+            `cascade` (a cascade follows parent-child edges only, so a bead
+            joined to the deleted tree by any other edge survives it) or
+            `force` without `cascade`, and some bead was orphaned; absent
+            otherwise.
 
 
             DIRECT dependents only. A bead two edges away lost no edge.
+          items:
+            type: string
+        deleted_ids:
+          type: array
+          description: >-
+            The beads `deleted` counts, in ascending id order without
+            duplicates: under `cascade`, the whole parent-child closure. Under
+            `dry_run` it names the beads that would go, so a preview and the
+            deletion that follows it can be compared id for id.
+
+
+            Optional, because a server older than this member does not send
+            it; a client reading such a server gets no names, never wrong ones.
           items:
             type: string
 
@@ -9933,6 +10097,32 @@ components:
             invalid_argument, the same as the role's own ErrValidation. Behind
             the `issues.sweep.limit` behavior token: an older server answers
             `unknown_parameter` for this name.
+        retain_ids:
+          type: boolean
+          default: false
+          description: >-
+            RETIRE every id this sweep deletes. In the same transaction as the
+            delete, the server writes one permanent tombstone per deleted bead
+            — its id and its `closed_at`, nothing else — and from then on no
+            write path creates a bead with that id again: a create naming it
+            is refused with `410` `idempotency_expired` (on
+            `POST /v0/beads/issues` and on an `issues:batchApply` create item),
+            an import skips the row and reports it, and id generation never
+            produces it. It is what lets a caller sweep beads whose ids are
+            idempotency keys without a late retry re-creating the bead the
+            first attempt created.
+
+
+            Opt-in: absent or `false` sweeps exactly as before and leaves the
+            swept ids reusable. Tombstones are permanent; nothing on this
+            surface removes one. A tombstone is exactly as durable as the bead
+            it replaces — a bead on the ephemeral plane leaves a clone-local
+            one. `dry_run` writes none.
+
+
+            Behind the `issues.sweep.retainIds` behavior token: an older server
+            answers `unknown_parameter` for this name, and a client that needs
+            the guarantee must not sweep at all without the token.
 
     SweepResult:
       type: object
@@ -9988,6 +10178,12 @@ components:
             absent, zero, or at least as large as the matching set — never a
             dropped count, a 0 here means nothing was left over. Present only
             behind the `issues.sweep.limit` behavior token.
+        retain_ids:
+          type: boolean
+          description: >-
+            Echoes the request's `retain_ids`: `true` means every bead `swept`
+            counts is now a retired id (under `dry_run`, would be). Present
+            only behind the `issues.sweep.retainIds` behavior token.
 
     SweepSkips:
       type: object
@@ -10002,9 +10198,9 @@ components:
       description: >-
         The candidates a sweep declined to delete, bucketed by WHY. They are
         separate counters rather than one number because they mean different
-        things: `label_protected`, `pinned`, `referenced` and `live_dependent` are
-        PROTECTIONS, and the other four are the sweep declining to trust its own
-        input.
+        things: `label_protected`, `pinned`, `referenced`, `live_dependent` and
+        `retention_required` are PROTECTIONS, and the other four are the sweep
+        declining to trust its own input.
       properties:
         label_protected:
           type: integer
@@ -10053,6 +10249,16 @@ components:
             Candidates protected by `protect_live_dependents`. Always 0 when
             that member is false or absent. Present only behind the
             `issues.sweep.liveDependents` behavior token.
+        retention_required:
+          type: integer
+          description: >-
+            Candidates held back because their issue type is named in the
+            workspace's `types.retained` setting and the request did not set
+            `retain_ids`: such a bead's id is an idempotency key, so only a
+            retaining sweep may delete it. Always 0 when `retain_ids` is true.
+            A PROTECTION, like `pinned`; a caller that wants those beads gone
+            re-runs with `retain_ids`. Present only behind the
+            `issues.sweep.retainedTypes` behavior token.
 
     ReadyPage:
       type: object
@@ -10133,6 +10339,7 @@ components:
         no_history: { type: boolean }
         wisp_type: { type: string }
         storage_class: { type: string }
+        arrival_seq: { type: integer, format: int64 }
         pinned: { type: boolean }
         is_template: { type: boolean }
         bonded_from:
@@ -10299,18 +10506,34 @@ components:
           description: >-
             The acting identity that performed the mutation, as resolved for
             the audit-events table; on a `comment` record it is the comment's
-            author (the same value as `comment.author`). Absent when the
-            mutation path has no actor — derived maintenance, deletes (other
-            than a rename's synthetic `delete` record), and records written
-            before the journal recorded actors. An absent actor is never user
-            attribution: read it as system/unknown, not as a conflicting
-            writer.
+            author (the same value as `comment.author`). A `delete`, and the
+            `dep_remove` records a cascading delete produces, carry the
+            identity that requested the delete. A derived `update` (the
+            `is_blocked` recompute a mutation causes, on its own subject or on
+            a dependent or descendant) carries the actor of the request whose
+            mutation caused it, the same value that mutation's own record
+            carries. Absent when no actor is behind the record: no request at
+            all (system maintenance such as a pull's or merge's recompute,
+            `bd recompute-blocked` or `bd doctor --fix`; system cleanup such as
+            the Decay-phase deletes of `bd gc` outside proxied-server mode,
+            or `bd repo remove`); a request that named no actor (a `delete` or
+            `sweep` sent without `actor`); a delete made through a storage
+            delete call that takes no actor (a local `bd mol burn` or
+            `bd mol squash`, or `bd cook`'s proto delete), and the
+            `dep_remove` and derived `update` records it causes; a derived
+            `update` from the post-commit blocked recheck when the writes it
+            settles in one transaction were made by different actors; and
+            records written before the journal recorded actors. An absent
+            actor is never user attribution: read it as system/unknown, not as
+            a conflicting writer.
         issue:
           type: object
           nullable: true
           description: >-
             The full issue state after the mutation — the same object shape
-            `Issue` describes — or `null` on a delete. Always present.
+            `Issue` describes — or `null` on a delete. Always present. A
+            post-image of a wisp-plane record carries its `arrival_seq`, and
+            the `create` record that stamped it has `seq` equal to it.
         dep:
           type: object
           description: >-
@@ -12975,11 +13198,14 @@ components:
             `bd update <id> --claim`, served by the same role. The claim sets
             `assignee` to `actor` and `status` to `in_progress`, then the patch
             applies, so a `patch.assignee` or `patch.status` overrides the
-            claim's value. Eligibility is `{id}:claim`'s: a claimable status,
-            and unassigned, already held by `actor`, or held by a configured
-            claim pool. Held by `actor` and `in_progress` already is an
-            idempotent success. A refusal is `409 already_claimed` or `409
-            not_claimable` naming `claim`, and writes nothing — the patch
+            claim's value. Eligibility is `{id}:claim`'s — a claimable
+            status, and unassigned, already held by `actor`, or held by a
+            configured claim pool — plus one refusal `{id}:claim` does not
+            make: an issue with a live local blocker (see
+            `force_claim_blocked`). Held by `actor` and `in_progress` already
+            is an idempotent success, blocker or not. A refusal is `409
+            already_claimed`, `409 not_claimable`, or `409 not_claimable` with
+            a `blockers` member, naming `claim`, and writes nothing — the patch
             included. With `claim: true` the `patch` may be empty. It must not
             be combined with `expected_assignee`, `expected_status` or
             `force_assignee_transfer`; a request that does is a `400` naming
@@ -13061,6 +13287,23 @@ components:
             `expected_assignee` exemption: there is no compare-and-set that
             authorizes a notes overwrite, so combining the two is legal and
             each answers its own question.
+        force_claim_blocked:
+          type: boolean
+          default: false
+          description: >-
+            Bypasses ONLY the live local-blocker refusal on `claim`: a
+            claim of an issue that has a live blocker (a
+            blocks/waits-for/conditional-blocks edge from a live issue or
+            wisp) is otherwise refused with `409 not_claimable` naming
+            `claim`, with the blockers in the problem's `blockers` member.
+            It requires `claim: true` — a request setting it without one is a
+            `400` — and it bypasses nothing else: not `already_claimed`, not
+            a non-claimable status, and not the EXTERNAL claim refusals
+            (`bd close`'s external-dependency policy, which
+            `force_close_policy` does not bypass either). An issue with a
+            stale `is_blocked` flag and no live blocker is never refused.
+            Advertised by the behavior token
+            `issues.update.forceClaimBlocked`.
         allow_template:
           type: boolean
           default: false
@@ -13718,7 +13961,7 @@ components:
             `dependency_cycle` (409), `dependency_exists` (409),
             `already_exists` (409), `precondition_failed` (409),
             `events_journal_disabled` (409), `events_journal_truncated` (410),
-            `busy` (503),
+            `idempotency_expired` (410), `busy` (503),
             `db_unavailable` (503), `events_watch_saturated` (503),
             `internal` (500). Renaming or removing a status+code pair is a
             breaking change; ADDING one is not, so clients MUST default-branch
@@ -13749,6 +13992,11 @@ components:
             missed. It is the same spelling a 400 on the same operation would
             use, so a client reads one member to find the offending input
             whichever way the request was refused.
+
+
+            With `idempotency_expired`: the body member that named the retired
+            id — `id` on `POST /v0/beads/issues`, `items[i].create.id` on
+            `issues:batchApply`.
         reason:
           type: string
           description: >-
@@ -13794,7 +14042,8 @@ components:
           type: string
           description: >-
             With `already_claimed` or `not_claimable`: the issue's status at
-            the moment of refusal.
+            the moment of refusal. Absent on the `not_claimable` that carries
+            `blockers`, a claim refused for a live local blocker.
         open_children:
           type: integer
           description: >-
@@ -13812,15 +14061,18 @@ components:
           items:
             $ref: '#/components/schemas/Blocker'
           description: >-
-            With `not_closable`, and ONLY on the live-blocker refusal: the live
-            blockers that refused the close, in the order the refusing check
-            reported them, read from the refusal's typed list rather than
-            parsed out of any message. Never present together with
-            `open_children`.
+            With `not_closable`, ONLY on the live-blocker refusal, and with
+            `not_claimable`, ONLY on a claim refused for a live local blocker
+            (the refusal `force_claim_blocked` bypasses): the live blockers
+            that refused the close or the claim, in the order the refusing
+            check reported them, read from the refusal's typed list rather
+            than parsed out of any message. Never present together with
+            `open_children` or `issue_status`.
 
 
             A client renders the direct CLI's sentence from it: `cannot close
-            blocked issue: <id> is blocked by [<b1> <b2> …]`, each blocker
+            blocked issue: <id> is blocked by [<b1> <b2> …]` (`cannot claim
+            blocked issue: …` for the claim), each blocker
             spelled `id` when its `type` is absent or `blocks` and `id (type)`
             otherwise — the sentence `detail` already begins with when this
             member is present.
@@ -14017,6 +14269,13 @@ components:
             ever assigned. It never decreases under a prune, so `floor > head`
             means the journal was pruned empty and the caller is at the end of
             its history. Emitted even when zero.
+        closed_at:
+          type: string
+          format: date-time
+          description: >-
+            With `idempotency_expired`: when the bead a retaining sweep retired
+            had closed, as its tombstone recorded it. It dates the create that
+            used the id, which already happened and never runs again.
         request_id:
           type: string
           description: >-

@@ -22,6 +22,7 @@ import (
 	"github.com/steveyegge/beads/internal/storage/embeddeddolt"
 	"github.com/steveyegge/beads/internal/storage/issueops"
 	"github.com/steveyegge/beads/internal/types"
+	publicops "github.com/steveyegge/beads/issueops"
 )
 
 // bdMigratePersonal runs "bd migrate-personal" with the given args.
@@ -551,6 +552,53 @@ func TestDeleteMovedIssuesFollowsAutoCommitPolicy(t *testing.T) {
 		if !slices.Equal(project.deferred, []bool{tc.deferred}) {
 			t.Errorf("dolt.auto-commit %s: DeleteIssues calls deferring the version commit = %v, want [%v]", tc.mode, project.deferred, tc.deferred)
 		}
+	}
+}
+
+// dependentsGuardStore is a project store whose DeleteIssues records the ids
+// and the cascade, force and dryRun flags of each call and answers err.
+type dependentsGuardStore struct {
+	storage.DoltStorage
+	err   error
+	ids   [][]string
+	flags [][3]bool
+}
+
+func (s *dependentsGuardStore) DeleteIssues(_ context.Context, ids []string, cascade, force, dryRun bool) (*types.DeleteIssuesResult, error) {
+	s.ids = append(s.ids, ids)
+	s.flags = append(s.flags, [3]bool{cascade, force, dryRun})
+	return &types.DeleteIssuesResult{}, s.err
+}
+
+// TestRefuseDependentsLeftBehind verifies that the pre-flight asks the project
+// store what phase 2's delete would do, as a dry run of the same delete
+// (cascade and force off), and turns its dependents refusal into a refusal
+// that names the issue and the dependents left behind and says nothing was
+// moved. Any other error fails the move too: phase 1 must not start on a
+// guard that did not answer.
+func TestRefuseDependentsLeftBehind(t *testing.T) {
+	t.Parallel()
+	personal := []*types.Issue{{ID: "mp-1"}, {ID: "mp-2"}}
+
+	clean := &dependentsGuardStore{}
+	if err := refuseDependentsLeftBehind(context.Background(), clean, personal); err != nil {
+		t.Fatalf("refuseDependentsLeftBehind with no dependent outside the move: %v", err)
+	}
+	if len(clean.ids) != 1 || !slices.Equal(clean.ids[0], []string{"mp-1", "mp-2"}) || clean.flags[0] != [3]bool{false, false, true} {
+		t.Errorf("DeleteIssues calls = %v with cascade, force, dryRun = %v, want one dry run of [mp-1 mp-2] with cascade and force off", clean.ids, clean.flags)
+	}
+
+	blocked := &dependentsGuardStore{err: fmt.Errorf("delete: %w", &publicops.DependentsOutsideRequestError{IssueID: "mp-1", Dependents: []string{"mp-1.1", "team-3"}})}
+	err := refuseDependentsLeftBehind(context.Background(), blocked, personal)
+	for _, want := range []string{"issue mp-1 has dependents that would stay in the project database (mp-1.1, team-3)", "bd dep remove", "nothing was moved"} {
+		if err == nil || !strings.Contains(err.Error(), want) {
+			t.Errorf("refuseDependentsLeftBehind = %v, want a refusal containing %q", err, want)
+		}
+	}
+
+	failing := &dependentsGuardStore{err: errors.New("connection refused")}
+	if err := refuseDependentsLeftBehind(context.Background(), failing, personal); err == nil || !strings.Contains(err.Error(), "connection refused") {
+		t.Errorf("refuseDependentsLeftBehind = %v, want the store's error", err)
 	}
 }
 
@@ -1419,6 +1467,56 @@ func TestEmbeddedMigratePersonal_refusesIssueAlreadyInPlanningRepo(t *testing.T)
 	}
 }
 
+// TestEmbeddedMigratePersonal_refusesDependentsLeftInTheProject verifies that a
+// move is refused before anything is copied when an issue it takes has a
+// dependent it leaves in the project database: someone else's bead that
+// depends on a personal one. Phase 2's delete refuses such an issue, but only
+// after phase 1 has committed the copy, which left it in both databases. Once
+// the dependency is removed, as the refusal says, a rerun moves the issue and
+// the dependent stays. A run after that moves nothing: none of the issues
+// left there is the caller's.
+func TestEmbeddedMigratePersonal_refusesDependentsLeftInTheProject(t *testing.T) {
+	if os.Getenv("BEADS_TEST_EMBEDDED_DOLT") != "1" {
+		t.Skip("set BEADS_TEST_EMBEDDED_DOLT=1 to run embedded dolt integration tests")
+	}
+	t.Parallel()
+
+	bd := buildEmbeddedBD(t)
+	dir, beadsDir, _ := bdInit(t, bd, "--prefix", "mpe")
+	planningDir := setupContributorRouting(t, bd, dir)
+	mustRun := func(args ...string) {
+		t.Helper()
+		if out, err := bdRunWithFlockRetry(t, bd, dir, args...); err != nil {
+			t.Fatalf("bd %s: %v\n%s", strings.Join(args, " "), err, out)
+		}
+	}
+	const parentTitle = "Personal parent"
+	parent := bdCreate(t, bd, dir, parentTitle)
+	dependent := bdCreate(t, bd, dir, "Team issue", "--actor", "other-person").ID
+	mustRun("dep", "add", dependent, parent.ID)
+
+	requireMigratePersonalRefused(t, bd, dir, "issue "+parent.ID+" has dependents that would stay in the project database ("+dependent+")")
+	requireStillInProject(t, beadsDir, "mpe", parent.ID)
+	requireStillInProject(t, beadsDir, "mpe", dependent)
+	planningStore := openStore(t, filepath.Join(planningDir, ".beads"), migratePersonalPlanningDatabase)
+	if _, err := planningStore.GetIssue(t.Context(), parent.ID); !errors.Is(err, storage.ErrNotFound) {
+		t.Errorf("issue %s in the planning database after a refused migrate-personal: err = %v, want storage.ErrNotFound", parent.ID, err)
+	}
+
+	mustRun("dep", "remove", dependent, parent.ID)
+	if out := requireMigratePersonal(t, bd, dir); !strings.Contains(out, "Moved 1 issue") {
+		t.Errorf("migrate-personal after bd dep remove does not report moving 1 issue:\n%s", out)
+	}
+	requireMovedToPlanning(t, beadsDir, "mpe", planningDir, parent.ID, parentTitle)
+	if _, err := openStore(t, beadsDir, "mpe").GetIssue(t.Context(), dependent); err != nil {
+		t.Errorf("issue %s left the project database with the move: %v", dependent, err)
+	}
+
+	if out := requireMigratePersonal(t, bd, dir); !strings.Contains(out, "Nothing to migrate — no issues in the project database were created by") {
+		t.Errorf("migrate-personal with nothing of the caller's left does not say so:\n%s", out)
+	}
+}
+
 // TestEmbeddedMigratePersonal_repoSyncMirrorHint verifies the phase-0 refusal
 // for a project copy that bd repo sync imported from the planning repo: the
 // error names bd repo remove, and once the mirror is removed a rerun moves the
@@ -1456,8 +1554,8 @@ func TestEmbeddedMigratePersonal_repoSyncMirrorHint(t *testing.T) {
 	if !ok {
 		t.Fatalf("remedy.ShellQuotedFor(%q, %q) cannot quote the planning repo's path", runtime.GOOS, planningDir)
 	}
-	requireMigratePersonalRefused(t, bd, dir, "by `bd repo sync` (remove those copies with `bd repo remove "+quoted+
-		"`, then rerun, and run `bd repo add "+quoted+"` again if you want them hydrated); nothing was moved")
+	requireMigratePersonalRefused(t, bd, dir, "by bd repo sync (remove those copies with bd repo remove "+quoted+
+		", then rerun, and run bd repo add "+quoted+" again if you want them hydrated); nothing was moved")
 	requireStillInProject(t, beadsDir, "mps", personal.ID)
 
 	if out, err := bdRunWithFlockRetry(t, bd, dir, "repo", "remove", planningDir); err != nil {
@@ -1658,10 +1756,8 @@ func TestEmbeddedMigratePersonal_refusesUninitializablePlanningRepos(t *testing.
 		want   string
 		// setup shapes planningBeadsDir, which exists and is empty.
 		setup func(t *testing.T, planningBeadsDir string)
-		// wantStderr, when set, is the refusal's whole stderr, which exits
-		// wantCode, or 1 when wantCode is 0.
+		// wantStderr, when set, is the refusal's whole stderr, which exits 1.
 		wantStderr func(planningDir string) string
-		wantCode   int
 	}{
 		{name: "redirect stub", prefix: "mps", want: "; set routing.contributor to that repository instead", setup: writeRedirect},
 		{name: "redirect stub with metadata", prefix: "mpr", want: "; set routing.contributor to that repository instead", setup: func(t *testing.T, planningBeadsDir string) {
@@ -1705,18 +1801,6 @@ func TestEmbeddedMigratePersonal_refusesUninitializablePlanningRepos(t *testing.
 			writeServerModeWorkspace(t, planningBeadsDir)
 			createDatabase(t, planningBeadsDir, "beads", "")
 		}},
-		// A planning repo in a format this build cannot open is refused as
-		// that, exactly as bd's own admission refuses it, whatever mode its
-		// config selects: the format fence runs before the config is read.
-		{name: "graph format marker beside a server-mode config.yaml", prefix: "mpf", want: "graph-preview-format", setup: func(t *testing.T, planningBeadsDir string) {
-			writeServerModeWorkspace(t, planningBeadsDir)
-			if err := os.WriteFile(filepath.Join(planningBeadsDir, configfile.GraphFormatMarkerFile), nil, 0o600); err != nil {
-				t.Fatalf("write planning graph format marker: %v", err)
-			}
-		}, wantStderr: func(planningDir string) string {
-			formatErr := &configfile.UnsupportedWorkspaceFormatError{BeadsDir: filepath.Join(planningDir, ".beads"), FormatMarker: true}
-			return "Error: " + formatErr.Error() + "\nHint: " + formatErr.Hint() + "\n"
-		}, wantCode: ExitUnsupportedWorkspaceFormat},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			t.Parallel()
@@ -1734,87 +1818,20 @@ func TestEmbeddedMigratePersonal_refusesUninitializablePlanningRepos(t *testing.
 			before := planningDirListing(t, planningBeadsDir)
 
 			out := requireMigratePersonalRefused(t, bd, dir, tc.want)
-			if tc.wantCode != ExitUnsupportedWorkspaceFormat {
-				// The format refusal names the planning repo's .beads, as bd's
-				// own admission does there; its wantStderr pins it whole.
-				requireCleanPlanningRefusal(t, out, planningDir)
-			}
+			requireCleanPlanningRefusal(t, out, planningDir)
 			requireStillInProject(t, beadsDir, tc.prefix, personal.ID)
 			if after := planningDirListing(t, planningBeadsDir); !slices.Equal(after, before) {
 				t.Errorf("planning .beads after a refused migrate-personal = %v, want unchanged %v", after, before)
 			}
 			requireInNoPlanningDatabase(t, planningBeadsDir, personal.ID)
 			if tc.wantStderr != nil {
-				wantCode := tc.wantCode
-				if wantCode == 0 {
-					wantCode = 1
-				}
 				stderr, code := migratePersonalStderr(t, bd, dir)
-				if want := tc.wantStderr(planningDir); stderr != want || code != wantCode {
-					t.Errorf("bd migrate-personal --yes exit %d, stderr:\n%s\nwant exit %d, stderr exactly:\n%s", code, stderr, wantCode, want)
+				if want := tc.wantStderr(planningDir); stderr != want || code != 1 {
+					t.Errorf("bd migrate-personal --yes exit %d, stderr:\n%s\nwant exit 1, stderr exactly:\n%s", code, stderr, want)
 				}
 			}
 		})
 	}
-}
-
-// TestEmbeddedMigratePersonal_unsupportedPlanningFormatExit16 verifies that a
-// planning repo in a format this build cannot open is refused the way bd's own
-// admission refuses it: exit ExitUnsupportedWorkspaceFormat, with only the
-// Error and Hint lines on stderr.
-func TestEmbeddedMigratePersonal_unsupportedPlanningFormatExit16(t *testing.T) {
-	if os.Getenv("BEADS_TEST_EMBEDDED_DOLT") != "1" {
-		t.Skip("set BEADS_TEST_EMBEDDED_DOLT=1 to run embedded dolt integration tests")
-	}
-	t.Parallel()
-
-	bd := buildEmbeddedBD(t)
-	dir, beadsDir, _ := bdInit(t, bd, "--prefix", "mpg")
-	planningDir := setupContributorRouting(t, bd, dir)
-	metadataPath := filepath.Join(planningDir, ".beads", "metadata.json")
-	raw, err := os.ReadFile(metadataPath)
-	if err != nil {
-		t.Fatalf("read planning metadata.json: %v", err)
-	}
-	var doc map[string]any
-	if err := json.Unmarshal(raw, &doc); err != nil {
-		t.Fatalf("parse planning metadata.json: %v", err)
-	}
-	doc["graph_mode"] = "graph"
-	raw, err = json.Marshal(doc)
-	if err != nil {
-		t.Fatalf("encode planning metadata.json: %v", err)
-	}
-	if err := os.WriteFile(metadataPath, raw, 0o600); err != nil {
-		t.Fatalf("write planning metadata.json: %v", err)
-	}
-	personal := bdCreate(t, bd, dir, "Personal issue for a graph-format planning repo")
-
-	out := requireMigratePersonalRefused(t, bd, dir, "use a bd build that supports graph_mode")
-	if strings.Contains(out, "initialize planning repo") {
-		t.Errorf("format refusal carries the initialize prefix:\n%s", out)
-	}
-	cmd := exec.Command(bd, "migrate-personal", "--yes")
-	cmd.Dir = dir
-	cmd.Env = bdEnv(dir)
-	var stderr strings.Builder
-	cmd.Stderr = &stderr
-	err = cmd.Run()
-	var exitErr *exec.ExitError
-	if !errors.As(err, &exitErr) || exitErr.ExitCode() != ExitUnsupportedWorkspaceFormat {
-		t.Errorf("bd migrate-personal --yes err = %v, want exit %d", err, ExitUnsupportedWorkspaceFormat)
-	}
-	// stderr is exactly bd's own admission refusal: the Error and Hint lines,
-	// with no "Error: exit code 16" placeholder from cobra and no usage dump.
-	formatErr := &configfile.UnsupportedWorkspaceFormatError{
-		BeadsDir:  filepath.Join(planningDir, ".beads"),
-		GraphMode: "graph",
-	}
-	wantStderr := "Error: " + formatErr.Error() + "\nHint: " + formatErr.Hint() + "\n"
-	if got := stderr.String(); got != wantStderr {
-		t.Errorf("bd migrate-personal --yes stderr:\n%s\nwant exactly:\n%s", got, wantStderr)
-	}
-	requireStillInProject(t, beadsDir, "mpg", personal.ID)
 }
 
 // TestIsPlanningRepoMirror pins which project copies the phase-0 refusal
@@ -1860,12 +1877,12 @@ func TestIsPlanningRepoMirror(t *testing.T) {
 func TestRepoSyncMirrorRefusal(t *testing.T) {
 	t.Parallel()
 	const prefix = "issue mps-1 already exists in the planning repo P; the project copy was imported from "
-	const placeholders = "`bd repo sync` (remove those copies with `bd repo remove <path>`, then rerun, and run `bd repo add <path>` again if you want them hydrated, with that path for <path>); nothing was moved"
+	const placeholders = "bd repo sync (remove those copies with bd repo remove <path>, then rerun, and run bd repo add <path> again if you want them hydrated, with that path for <path>); nothing was moved"
 	for _, tc := range []struct {
 		goos, sourceRepo, want string
 	}{
-		{"linux", "/home/me/planning", prefix + "/home/me/planning by `bd repo sync` (remove those copies with `bd repo remove '/home/me/planning'`, then rerun, and run `bd repo add '/home/me/planning'` again if you want them hydrated); nothing was moved"},
-		{"windows", `C:\planning`, prefix + `C:\planning by ` + "`bd repo sync` (remove those copies with `bd repo remove \"C:\\planning\"`, then rerun, and run `bd repo add \"C:\\planning\"` again if you want them hydrated); nothing was moved"},
+		{"linux", "/home/me/planning", prefix + "/home/me/planning by bd repo sync (remove those copies with bd repo remove '/home/me/planning', then rerun, and run bd repo add '/home/me/planning' again if you want them hydrated); nothing was moved"},
+		{"windows", `C:\planning`, prefix + `C:\planning by ` + "bd repo sync (remove those copies with bd repo remove \"C:\\planning\", then rerun, and run bd repo add \"C:\\planning\" again if you want them hydrated); nothing was moved"},
 		{"windows", `C:\planning\`, prefix + `"C:\\planning\\" by ` + placeholders},
 		{"windows", `C:\Users\me\$work\planning`, prefix + `"C:\\Users\\me\\\x24work\\planning" by ` + placeholders},
 		{"windows", `C:\x" & calc & "$(calc)`, prefix + `"C:\\x\x22 \x26 calc \x26 \x22\x24(calc)" by ` + placeholders},

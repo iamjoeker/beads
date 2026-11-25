@@ -192,6 +192,82 @@ func TestNotClosableUsesOpenChildrenPresenceAsTheDiscriminator(t *testing.T) {
 	})
 }
 
+// TestNotClaimableUsesBlockersPresenceAsTheDiscriminator is not_closable's
+// rule on the claim's code: one code, two refusals, and the `blockers` member
+// is what tells them apart. Present means the LOCAL-BLOCKER refusal — a claim
+// of an issue with a live blocker — and the typed BlockedError comes back
+// whole, wrapping ErrClaimBlocked exactly as the embedded store's own claim
+// refusal does; absent is the status's own not_claimable and stays the
+// ClaimConflictError.
+func TestNotClaimableUsesBlockersPresenceAsTheDiscriminator(t *testing.T) {
+	t.Run("present means a live local blocker", func(t *testing.T) {
+		err := refuseWith(t, 409, `{"status":409,"code":"not_claimable","param":"claim",`+
+			`"blockers":[{"id":"ga-2","kind":"local","type":"blocks"},{"id":"ga-3","kind":"local","type":"waits-for"}]}`, nil, Request{
+			Op: OpUpdateIssue, Method: http.MethodPatch,
+			Path: "/v0/beads/issues/ga-1", IssueID: "ga-1",
+		})
+		var blocked *issueops.BlockedError
+		if !errors.As(err, &blocked) {
+			t.Fatalf("err is %T (%v), want *issueops.BlockedError", err, err)
+		}
+		if blocked.IssueID != "ga-1" {
+			t.Errorf("IssueID = %q, want ga-1, which the request supplied", blocked.IssueID)
+		}
+		if len(blocked.Blockers) != 2 {
+			t.Fatalf("Blockers = %v, want the two the wire named", blocked.Blockers)
+		}
+		if blocked.Blockers[0].ID != "ga-2" || blocked.Blockers[0].Type != types.DepBlocks {
+			t.Errorf("blockers[0] = %+v, want ga-2 blocks", blocked.Blockers[0])
+		}
+		if blocked.Blockers[1].ID != "ga-3" || blocked.Blockers[1].Type != types.DepWaitsFor {
+			t.Errorf("blockers[1] = %+v, want ga-3 waits-for", blocked.Blockers[1])
+		}
+		if !errors.Is(err, issueops.ErrClaimBlocked) {
+			t.Error("the wrapped sentinel does not match ErrClaimBlocked")
+		}
+		if errors.Is(err, issueops.ErrNotClaimable) {
+			t.Error("the local-blocker refusal classified as the status refusal")
+		}
+	})
+
+	// Presence, not length: an empty `blockers` member is still the
+	// local-blocker refusal, never the status refusal a len>0 test would
+	// fall through to.
+	t.Run("present but empty still means the local-blocker refusal", func(t *testing.T) {
+		err := refuseWith(t, 409, `{"status":409,"code":"not_claimable","param":"claim","blockers":[]}`, nil, Request{
+			Op: OpUpdateIssue, Method: http.MethodPatch,
+			Path: "/v0/beads/issues/ga-1", IssueID: "ga-1",
+		})
+		var blocked *issueops.BlockedError
+		if !errors.As(err, &blocked) {
+			t.Fatalf("err is %T (%v), want *issueops.BlockedError", err, err)
+		}
+		if blocked.IssueID != "ga-1" || len(blocked.Blockers) != 0 {
+			t.Errorf("BlockedError = %+v, want ga-1 with no blockers", blocked)
+		}
+		if !errors.Is(err, issueops.ErrClaimBlocked) || errors.Is(err, issueops.ErrNotClaimable) {
+			t.Errorf("err = %v, want ErrClaimBlocked and not ErrNotClaimable", err)
+		}
+	})
+
+	t.Run("absent means the status refusal", func(t *testing.T) {
+		err := refuseWith(t, 409, `{"status":409,"code":"not_claimable","param":"claim","issue_status":"closed"}`, nil, Request{
+			Op: OpUpdateIssue, Method: http.MethodPatch,
+			Path: "/v0/beads/issues/ga-1", IssueID: "ga-1",
+		})
+		var conflict *issueops.ClaimConflictError
+		if !errors.As(err, &conflict) {
+			t.Fatalf("err is %T (%v), want *issueops.ClaimConflictError", err, err)
+		}
+		if !errors.Is(err, issueops.ErrNotClaimable) {
+			t.Errorf("the wrapped sentinel does not match ErrNotClaimable: %v", err)
+		}
+		if errors.Is(err, issueops.ErrClaimBlocked) {
+			t.Error("the status refusal classified as the local-blocker refusal")
+		}
+	})
+}
+
 func TestDependencyCycleUsesIssueIDPresenceAsTheDiscriminator(t *testing.T) {
 	// The hierarchy refusal and the scheduling cycle share one code because they
 	// share one recovery. The typed distinction rides on the extension members.
@@ -787,3 +863,29 @@ func TestBatchItemMembersSurviveTheDecode(t *testing.T) {
 }
 
 func problemBoolPtr(b bool) *bool { return &b }
+
+// TestIdempotencyExpiredReconstructsTheTypedRefusal pins the 410: the code maps
+// to *issueops.IdempotencyExpiredError, built from `item_issue_id` and
+// `closed_at`, matching ErrIdempotencyExpired and never ErrAlreadyExists — so a
+// caller classifies a retired id over http exactly as it does locally. A 410
+// without the optional members still maps, with the zero time.
+func TestIdempotencyExpiredReconstructsTheTypedRefusal(t *testing.T) {
+	body := `{"status":410,"code":"idempotency_expired","param":"items[1].create.id","item_index":1,` +
+		`"item_kind":"create","item_issue_id":"bd-op-1","closed_at":"2026-03-01T12:00:00Z","request_id":"r1"}`
+	err := refuseWith(t, 410, body, nil, listIssues())
+	if !errors.Is(err, issueops.ErrIdempotencyExpired) || errors.Is(err, issueops.ErrAlreadyExists) {
+		t.Fatalf("err = %v, want ErrIdempotencyExpired and not ErrAlreadyExists", err)
+	}
+	var expired *issueops.IdempotencyExpiredError
+	if !errors.As(err, &expired) {
+		t.Fatalf("err is %T, want *issueops.IdempotencyExpiredError", err)
+	}
+	if expired.ID != "bd-op-1" || !expired.ClosedAt.Equal(time.Date(2026, 3, 1, 12, 0, 0, 0, time.UTC)) {
+		t.Errorf("IdempotencyExpiredError = %+v, want bd-op-1 closed 2026-03-01T12:00:00Z", expired)
+	}
+
+	bare := refuseWith(t, 410, `{"status":410,"code":"idempotency_expired","param":"id","request_id":"r2"}`, nil, listIssues())
+	if !errors.As(bare, &expired) || !expired.ClosedAt.IsZero() || expired.ID != "" {
+		t.Errorf("bare 410 = %+v, want an IdempotencyExpiredError with no id and the zero time", expired)
+	}
+}

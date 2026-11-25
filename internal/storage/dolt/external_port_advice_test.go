@@ -218,7 +218,7 @@ func TestNewServerModeUnreachableAdviceOutsideNamedPorts(t *testing.T) {
 		}, false, doltserver.PortSourceEnv, "The Dolt server may not be running"},
 		{"owned, auto-start off", func(t *testing.T, _ string, _ int) {
 			t.Setenv("BEADS_DOLT_AUTO_START", "0")
-		}, false, doltserver.PortSourcePortFile, "auto-start is disabled"},
+		}, false, doltserver.PortSourcePortFile, "auto-start is off"},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {

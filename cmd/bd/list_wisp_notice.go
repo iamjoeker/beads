@@ -3,6 +3,7 @@ package main
 import (
 	"context"
 	"fmt"
+	"github.com/steveyegge/beads/internal/remedy"
 	"os"
 	"sort"
 	"strings"
@@ -174,7 +175,7 @@ func printEmptyLabelledListNotice(ctx context.Context, s workapi.WispSearcher, p
 	count := countMatchingWisps(ctx, s, p)
 	lines := emptyLabelledListNoticeLines(labels, wispOnly, count, storeDesc)
 	for _, line := range lines {
-		fmt.Fprintln(os.Stderr, line)
+		fmt.Fprintln(os.Stderr, remedy.PrintedText(line))
 	}
 	return len(lines) > 0
 }

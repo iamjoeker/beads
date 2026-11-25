@@ -53,7 +53,7 @@ This project uses bd (beads) for issue tracking.
 
 - Run `bd prime` for workflow context and command guidance.
 - Use `bd ready`, `bd show <id>`, `bd update <id> --claim`, and `bd close <id>`.
-- Use `bd remember "insight"` for durable project facts; keep per-operator preferences in your harness's own memory.
+- Use `bd remember "a project insight"` for durable project facts; keep per-operator preferences in your harness's own memory.
 - Do not use markdown TODO lists for task tracking.
 ```
 
@@ -76,7 +76,8 @@ This project uses bd (beads) for issue tracking.
 | `bd dep add <child> <parent>` | Link tasks (blocks, related, parent-child). |
 | `bd show <id>` | View task details and audit trail. |
 | `bd prime` | Print agent workflow context and persistent memories. |
-| `bd remember "insight"` | Store project memory that `bd prime` injects later. |
+| `bd remember "a project insight"` | Store project memory that `bd prime` injects later. |
+| `bd remember some-key` | Recall an exact key, including long and dotted ones like `api.v2`; a missing key fails without storing anything. Use `--key some-key` to write single-word content, and `bd recall` for keys with other characters. |
 
 ## 🔗 Hierarchy & Workflow
 
@@ -85,6 +86,14 @@ Beads supports hierarchical IDs for epics:
 * `bd-a3f8` (Epic)
 * `bd-a3f8.1` (Task)
 * `bd-a3f8.1.1` (Sub-task)
+
+Deferring a parent hides its direct children from `bd ready` too, whether it
+was deferred to a date (`bd defer --until`) or indefinitely (plain `bd defer`).
+`bd ready --include-deferred` lists those children again; the deferred parent
+itself still stays out of the listing. Once a dated deferral's date passes, the
+next `bd ready` returns the parent to open, and its children with it. A read
+that cannot write that change, such as `bd --readonly ready`, keeps the
+children hidden until a writable read has woken the parent.
 
 **Stealth Mode:** Run `bd init --stealth` to use Beads locally without committing files to the main repo. Perfect for personal use on shared projects. See [Git-Free Usage](#-git-free-usage) below.
 
@@ -115,6 +124,30 @@ binary and run `bd bootstrap`. See the full
 or [docs/getting-started/installation.md](docs/getting-started/installation.md#updating-bd).
 
 ### Security And Verification
+
+Command and credential-target settings must come from your shell environment or
+user configuration, not `.beads/.env`. `.beads/.env` only admits non-command
+`BEADS_*` and `BD_*` variables plus the two Dolt remote credential variables
+(`DOLT_REMOTE_USER`, `DOLT_REMOTE_PASSWORD`); Beads ignores credential commands,
+mail delegates, editor, pager, Dolt executable/host/credential-file/root-path
+overrides, the rest of the dolt-owned `DOLT_*` namespace (such as
+`DOLT_SSH_COMMAND` and `DOLT_PAGER`), and non-Beads process variables (such as
+`GIT_*`, `SSH_*`, `LD_*`, and `DYLD_*`) in that file and prints a warning for
+each. Any `BEADS_*` or `BD_*` key named as a command or executable (ending in
+`_COMMAND`, `_BIN` or `_BINARY`) is ignored the same way, as are the http
+backend's bearer token `BEADS_HTTP_TOKEN` and plaintext grant
+`BEADS_HTTP_ALLOW_INSECURE`, the token file `bd serve` accepts bearers from
+(`BEADS_SERVE_TOKEN_FILE`), and the files bd writes to: the heap profile and
+MemStats summary (`BEADS_MEM_PROFILE`, `BEADS_MEM_STATS`) and the proxied Dolt
+server's log (`BEADS_PROXIED_SERVER_LOG`). Values in `.beads/.env` are taken
+literally: a value that uses `$VAR` or `${VAR}` is ignored with a warning
+instead of being filled in from your environment, so a committed file cannot
+copy a secret out of your environment into a setting the workspace sends
+elsewhere. Write the value out, or set it in your shell.
+`bd config set mail.delegate "gt mail"` writes to user-global YAML rather than
+the replicated database; the workspace settings API rejects `mail.delegate`.
+Mail delegation also ignores project `.beads/config.yaml`; only shell environment
+variables and user-global YAML can select the delegate.
 
 Before trusting any downloaded binary, verify its checksum against the release `checksums.txt`.
 
@@ -169,7 +202,11 @@ schema version mismatch: database is at v45, binary knows up to v42 (3 migration
 **When this fires:** only when the database schema is *ahead* of the binary
 (a newer binary migrated the database; this binary doesn't know those
 migrations). Normal upgrades, where the binary migrates the database forward,
-are unaffected.
+are unaffected. The check runs whenever a store opens: embedded, server mode,
+a proxied-server workspace, and `bd serve` at startup. A `bd serve` that was
+already running when a newer `bd` migrated the database keeps serving until it
+is restarted, and proxied `--dry-run`/`--inspect` previews don't check, so
+restart long-running servers after migrating with a newer `bd`.
 
 **Escape hatch:** `BD_IGNORE_SCHEMA_SKEW=1` (or `--ignore-schema-skew`) bypasses
 the guard with a warning on stderr. Use this only if you know the forward
@@ -322,6 +359,51 @@ workspace with a credential scoped to one caller via
 `beads.OpenBestAvailableWith` — see that package's doc comment for the
 multi-tenant case. This surface is EXPERIMENTAL: pin an exact beads version.
 
+## 🧹 Compacting Claude Rules
+
+`bd rules audit` scans `.claude/rules/*.md` for contradictions and
+near-duplicates; `bd rules compact` merges related rules into one composite.
+
+```bash
+bd rules compact --auto           # Preview: composite, dropped lines, backups, deletes
+bd rules compact --auto --force   # Apply
+```
+
+Compact only previews unless you pass `--force`. A composite keeps only the
+`**Do:**` and `**Don't:**` lines of its sources, and the preview lists every
+other line it drops. Applying writes the composite, copies each source to
+`<name>.md.backup`, then deletes the sources; it refuses a group whose
+composite or backup path already exists. To undo a merge, delete the composite
+and rename each `<name>.md.backup` back to `<name>.md`.
+
+## 🔁 GitHub Issues Sync
+
+`bd github sync` (and `bd github pull`/`push`) syncs the one repository named
+by `github.owner` and `github.repo`, but a database can hold beads from
+several repositories. In releases after v1.3.2, sync matches, fetches and
+updates only beads whose issue URL points at the configured repository, so
+pulling issue 1313 from a second repository creates a new bead instead of
+overwriting the bead linked to the first repository's issue 1313. A
+`github:<number>` ref has no repository and is always read as the configured
+one. A repository you renamed or transferred keeps syncing whichever of its
+names the config holds: GitHub redirects a former name to the repository, and
+sync asks GitHub which repository each other name your beads link under
+belongs to now (one request per name), so beads linked under the old name and
+under the new one stay matched to their issues, and a pull relinks them to the
+current URL. If the old name now belongs to another repository, beads still
+linked under it count as another repository's: relink them
+(`bd update <id> --external-ref <new-url>`), or the next pull imports their
+issues again as new beads. If GitHub gives no answer to one of these requests
+(any failure but a 404: an outage, a dropped connection, a rate limit, a
+refused token), the command stops with an error that names the repository,
+instead of syncing without knowing which beads are the configured
+repository's: a sync that skipped them would move its cursor past their edits,
+and a later sync could overwrite those edits with no conflict. If the failure
+is temporary, run the command again. If the error names another repository
+your beads link to and GitHub refuses the token for it (a 403), give the token
+read access to it. If the name is a former name of the configured repository,
+relinking those beads to their issues' current URLs also ends the lookup.
+
 ## 🌐 Community Tools
 
 See [docs/community-tools.md](docs/community-tools.md) for a curated list of community-built UIs, extensions, and integrations—including terminal interfaces, web UIs, editor extensions, and native apps.
@@ -348,7 +430,8 @@ bd close bd-a1b2 "Fixed"
 
 `BEADS_DIR` tells bd where to put the `.beads/` database directory,
 bypassing git repo discovery. `--stealth` sets `no-git-ops: true` in
-config, disabling all git hook installation and git operations.
+config, disabling bd's own git hook installation and git commands. It
+does not stop Dolt network sync; set `dolt.local-only: true` for that.
 
 This is useful for:
 - **Non-git VCS** (Sapling, Jujutsu, Piper) — no `.git/` directory needed

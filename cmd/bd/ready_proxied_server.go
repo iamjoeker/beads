@@ -9,6 +9,7 @@ import (
 
 	"github.com/spf13/cobra"
 
+	"github.com/steveyegge/beads/internal/audit"
 	"github.com/steveyegge/beads/internal/debug"
 	"github.com/steveyegge/beads/internal/storage/uow"
 	"github.com/steveyegge/beads/internal/types"
@@ -139,16 +140,7 @@ func runReadyProxiedList(ctx context.Context, uw uow.UnitOfWork, in readyInput) 
 	maybeShowUpgradeNotification()
 
 	if len(issues) == 0 {
-		hasOpenIssues := false
-		if stats, statsErr := uw.IssueUseCase().GetStatistics(ctx); statsErr == nil {
-			hasOpenIssues = stats.OpenIssues > 0 || stats.InProgressIssues > 0
-		}
-		if hasOpenIssues {
-			fmt.Printf("\n%s No ready work found (all issues have blocking dependencies)\n\n",
-				ui.RenderWarn("✨"))
-		} else {
-			fmt.Printf("\n%s No open issues\n\n", ui.RenderPass("✨"))
-		}
+		printReadyEmptyState(ctx, in, uw.IssueUseCase())
 		return nil
 	}
 
@@ -206,6 +198,8 @@ func runReadyProxiedClaim(ctx context.Context, in readyInput) error {
 		return nil
 	}
 
+	// As on the direct route: the claimed post-state, no pre-image (GH#6146).
+	audit.LogClaimed(res.Claimed.ID, currentActor(), string(res.Claimed.Status), res.Claimed.Assignee)
 	SetLastTouchedID(res.Claimed.ID)
 
 	if in.jsonOut {

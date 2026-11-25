@@ -151,6 +151,11 @@ func TestContextRepository_ServerPort(t *testing.T) {
 
 	t.Run("ReadsPortFile", func(t *testing.T) {
 		_, beadsDir, repo := newContextRepoForTest(t)
+		// The package TestMain's production-port guard (testenv.GuardProductionDolt)
+		// points both port variables at a dead port, and the environment
+		// outranks the port file; clear them to exercise the file.
+		t.Setenv("BEADS_DOLT_SERVER_PORT", "")
+		t.Setenv("BEADS_DOLT_PORT", "")
 		require.NoError(t, os.WriteFile(filepath.Join(beadsDir, "dolt-server.port"), []byte("4567"), 0o600))
 
 		got, err := repo.ServerPort(context.Background())

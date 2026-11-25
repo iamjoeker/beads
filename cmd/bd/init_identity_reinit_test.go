@@ -43,7 +43,7 @@ func readMetadataProjectID(t *testing.T, beadsDir string) string {
 // after this same repair; reads are exactly what the identity check does not
 // guard, which is why it passed throughout the regression. This is the other
 // half: the repaired workspace must still be the same project.
-func TestReinitLocalRepairAdoptsSurvivingDatabaseIdentity(t *testing.T) {
+func TestEmbeddedReinitLocalRepairAdoptsSurvivingDatabaseIdentity(t *testing.T) {
 	if os.Getenv("BEADS_TEST_EMBEDDED_DOLT") != "1" {
 		t.Skip("set BEADS_TEST_EMBEDDED_DOLT=1 to run embedded dolt tests")
 	}
@@ -92,7 +92,7 @@ func TestReinitLocalRepairAdoptsSurvivingDatabaseIdentity(t *testing.T) {
 // in embedded mode without touching the workspace, so following the advice reads
 // as a successful repair and the operator is left with the override as the only
 // thing that changes anything.
-func TestIdentityMismatchRecoveryIsActionableInEmbeddedMode(t *testing.T) {
+func TestEmbeddedIdentityMismatchRecoveryIsActionableInEmbeddedMode(t *testing.T) {
 	if os.Getenv("BEADS_TEST_EMBEDDED_DOLT") != "1" {
 		t.Skip("set BEADS_TEST_EMBEDDED_DOLT=1 to run embedded dolt tests")
 	}

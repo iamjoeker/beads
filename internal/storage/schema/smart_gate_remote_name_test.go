@@ -23,6 +23,7 @@ func expectRemoteNames(mock sqlmock.Sqlmock, names ...string) {
 // remotes are `names` — asserting the remote-tracking ref is built from
 // `wantRemote`, the RESOLVED name.
 func expectSmartReadResolving(mock sqlmock.Sqlmock, names []string, wantRemote string, local, remote map[int]string) {
+	expectHeadContentHashProbes(mock)
 	mock.ExpectQuery(`SELECT version, content_hash FROM schema_migrations$`).
 		WillReturnRows(hashRows(local))
 	expectRemoteNames(mock, names...)

@@ -13,6 +13,7 @@ import (
 	"log"
 	"os"
 	"regexp"
+	"slices"
 	"sort"
 	"strconv"
 	"strings"
@@ -237,6 +238,11 @@ func checkSchemaSkew(ctx context.Context, db DBConn) error {
 	if err != nil {
 		return fmt.Errorf("schema skew check: %w", err)
 	}
+	return forwardDriftError(currentVersion)
+}
+
+// forwardDriftError is checkSchemaSkew's verdict on a version already read.
+func forwardDriftError(currentVersion int) error {
 	if currentVersion == 0 || currentVersion <= LatestVersion() {
 		return nil
 	}
@@ -266,10 +272,31 @@ func CheckForwardDrift(ctx context.Context, db DBConn) error {
 type SchemaBehindError struct {
 	DBVersion     int
 	BinaryVersion int
+	// Gateway marks a database a gateway server serves. The gateway owns its
+	// schema and bd never migrates it, so the remedy is the server
+	// administrator's rather than `bd migrate schema`, the same line
+	// uow.checkTeamServerSchema draws for a beads-team-server schema.
+	Gateway bool
+	// ProxiedRemote marks a database a proxied-server workspace reads that
+	// syncs with a Dolt remote (bd-5hl9dg). There the bare
+	// `bd migrate schema` is refused, by the remote-migrate gate on a
+	// remote-backed database (#4259) and by the proxied front door
+	// (gastownhall/beads#6656), so the remedy names the forced verb and the
+	// one-clone rule it confirms. Set by
+	// the proxied provider, which knows both facts; the version check does not.
+	ProxiedRemote bool
 }
 
 func (e *SchemaBehindError) Error() string {
-	return fmt.Sprintf("schema version mismatch: database is at v%d, binary expects v%d; bd does not migrate a database without explicit consent — run `bd migrate schema` in that workspace to migrate, keep using a bd release that matches schema v%d, or set BD_IGNORE_SCHEMA_SKEW=1 to read anyway (queries touching newer schema may fail)",
+	if e.Gateway {
+		return fmt.Sprintf("schema version mismatch: database is at v%d, binary expects v%d; the gateway server owns this database's schema and bd never migrates it — ask the server administrator to upgrade the database, or keep using a bd release that matches schema v%d",
+			e.DBVersion, e.BinaryVersion, e.DBVersion)
+	}
+	if e.ProxiedRemote {
+		return fmt.Sprintf("schema version mismatch: database is at v%d, binary expects v%d; bd does not migrate a database without explicit consent — this proxied-server workspace's database syncs with a Dolt remote, so the bare `bd migrate schema` refuses here: run `bd migrate schema --force` on ONE clone of that remote only, keep using a bd release that matches schema v%d, or set BD_IGNORE_SCHEMA_SKEW=1 to open it anyway (queries that need what the pending migrations add still fail)",
+			e.DBVersion, e.BinaryVersion, e.DBVersion)
+	}
+	return fmt.Sprintf("schema version mismatch: database is at v%d, binary expects v%d; bd does not migrate a database without explicit consent — run `bd migrate schema` in that workspace to migrate, keep using a bd release that matches schema v%d, or set BD_IGNORE_SCHEMA_SKEW=1 to open it anyway (queries that need what the pending migrations add still fail)",
 		e.DBVersion, e.BinaryVersion, e.DBVersion)
 }
 
@@ -292,16 +319,104 @@ func CheckBehindDrift(ctx context.Context, db *sql.DB) error {
 	if err != nil {
 		return fmt.Errorf("schema behind-drift check: %w", err)
 	}
+	return behindDriftError(currentVersion)
+}
+
+// behindDriftError is CheckBehindDrift's verdict on a version already read.
+func behindDriftError(currentVersion int) error {
 	if currentVersion >= LatestVersion() {
 		return nil
 	}
 	if os.Getenv("BD_IGNORE_SCHEMA_SKEW") == "1" {
 		fmt.Fprintf(os.Stderr,
-			"Warning: schema skew ignored — database (v%d) is behind binary (v%d) and was opened read-only; some queries may fail\n",
+			"Warning: schema skew ignored — database (v%d) is behind binary (v%d) and is opened without migrating; some queries may fail\n",
 			currentVersion, LatestVersion())
 		return nil
 	}
 	return &SchemaBehindError{DBVersion: currentVersion, BinaryVersion: LatestVersion()}
+}
+
+// CheckReadableDrift is the drift check for an open that reads a database at
+// its current schema instead of migrating it: a read-only open, or one through
+// a gateway server, which owns its schema. From one version read it refuses
+// forward drift as CheckForwardDrift does, and a database BEHIND the binary
+// only when table lacks one of columns, the columns the caller's reads
+// select, with CheckBehindDrift's *SchemaBehindError and escape hatch.
+//
+// A behind database that has all of them stays open: it keeps serving reads
+// at its current schema until its operator consents to the migration
+// (bd-578h9.5, gastownhall/beads#5920). One that lacks any of them cannot
+// answer a single such read, and without this check it would open fine and
+// then fail every read with an unknown-column error. A database at the
+// binary's version costs only the version read CheckForwardDrift makes.
+func CheckReadableDrift(ctx context.Context, db DBConn, table string, columns []string) error {
+	currentVersion, err := CurrentVersion(ctx, db)
+	if err != nil {
+		return fmt.Errorf("schema drift check: %w", err)
+	}
+	if currentVersion >= LatestVersion() {
+		return forwardDriftError(currentVersion)
+	}
+	missing, err := missingColumns(ctx, db, table, columns)
+	if err != nil {
+		return fmt.Errorf("schema drift check: %w", err)
+	}
+	if len(missing) == 0 {
+		return nil
+	}
+	return behindDriftError(currentVersion)
+}
+
+// missingColumns returns the entries of columns that table lacks, all of them
+// when the table does not exist. Names compare case-insensitively, as MySQL
+// compares column names. It lists the one table with SHOW COLUMNS for
+// showColumnExists's reason (Dolt answers INFORMATION_SCHEMA.COLUMNS by
+// scanning every database on the server), and only after
+// tableInCurrentDatabase has found the table, because a SHOW COLUMNS that
+// fails pins the pooled session to its catalog snapshot (be-bv7x). table is
+// a hardcoded identifier, never user input.
+func missingColumns(ctx context.Context, db DBConn, table string, columns []string) ([]string, error) {
+	exists, err := tableInCurrentDatabase(ctx, db, table)
+	if err != nil {
+		return nil, fmt.Errorf("checking table %s: %w", table, err)
+	}
+	present := map[string]bool{}
+	if exists {
+		//nolint:gosec // G201: table is a hardcoded identifier, never user input.
+		rows, err := db.QueryContext(ctx, "SHOW COLUMNS FROM "+table)
+		if err != nil {
+			return nil, fmt.Errorf("listing %s columns: %w", table, err)
+		}
+		defer func() { _ = rows.Close() }()
+		cols, err := rows.Columns()
+		if err != nil {
+			return nil, fmt.Errorf("listing %s columns: %w", table, err)
+		}
+		// The first of SHOW COLUMNS' cells (Field, Type, Null, ...) is the name.
+		cells := make([]sql.RawBytes, len(cols))
+		dest := make([]any, len(cols))
+		for i := range cells {
+			dest[i] = &cells[i]
+		}
+		for rows.Next() {
+			if err := rows.Scan(dest...); err != nil {
+				return nil, fmt.Errorf("listing %s columns: %w", table, err)
+			}
+			if len(cells) > 0 {
+				present[strings.ToLower(string(cells[0]))] = true
+			}
+		}
+		if err := rows.Err(); err != nil {
+			return nil, fmt.Errorf("listing %s columns: %w", table, err)
+		}
+	}
+	var missing []string
+	for _, column := range columns {
+		if !present[strings.ToLower(column)] {
+			missing = append(missing, column)
+		}
+	}
+	return missing, nil
 }
 
 type dirtyTableState struct {
@@ -370,7 +485,19 @@ type schemaSentinelTable struct {
 	// schemaSentinelColumn.replayFloor, applied to a whole table's presence
 	// instead of one column's.
 	replayFloor int
+	// lossNotice, when set, is the operator warning migrate prints when the
+	// replay is about to re-create this table EMPTY on a clone whose cursor
+	// says it was already created (cursor above replayFloor): the table was
+	// lost, not never made, and what it held is gone. Empty for a table whose
+	// re-creation loses nothing anyone relies on.
+	lossNotice string
 }
+
+// lostTableNoticeOut is where migrate writes a sentinel table's lossNotice.
+// Like watchdogStderr it is deliberately NOT terminal-gated: a lost table is
+// a data loss an operator must see on every surface, piped or not.
+// Overridable in tests.
+var lostTableNoticeOut io.Writer = os.Stderr
 
 type schemaSentinelColumn struct {
 	table  string
@@ -400,6 +527,13 @@ type schemaSentinelColumn struct {
 	// files, so a future renumbering breaks CI rather than users.
 	replayFloor int
 }
+
+// wispIDTombstonesLossNotice is wisp_id_tombstones' lossNotice.
+const wispIDTombstonesLossNotice = "WARNING: wisp_id_tombstones was missing and is being re-created EMPTY. " +
+	"The ids retaining retention sweeps (--retain-ids) retired on the wisps plane of this clone are " +
+	"creatable again: a create naming one is no longer refused, so an operation keyed by such an id can run " +
+	"twice. Treat this clone as a new logical scope for wisps-plane idempotency keys (reset the producers' keys) " +
+	"before relying on them."
 
 var (
 	mainSource = migrationSource{
@@ -437,6 +571,17 @@ var (
 			{table: "events", replayFloor: 18},
 			{table: "bd_events_journal", replayFloor: 21},
 			{table: "bd_events_seq", replayFloor: 21},
+			// wisp_id_tombstones is created by ignored/0030 (floor 29, same
+			// reasoning). A clone that lost it would otherwise fail every
+			// create closed — the retired-id probe reads it — with no path
+			// back short of a hand repair; the replay re-creates it on the
+			// next write-intent open. Re-created EMPTY, which is a loss of
+			// the wisps-plane tombstones: a new logical scope for anything
+			// that relied on them (see migrations/ignored/0030). The wisps
+			// rows can survive the loss, so nothing else on the clone shows
+			// it; the notice is the only signal, and it is printed on every
+			// surface rather than recorded where a consumer could read it.
+			{table: "wisp_id_tombstones", replayFloor: 29, lossNotice: wispIDTombstonesLossNotice},
 		},
 		// A historical ignored-v16 ordinal collision can leave the local
 		// leases table present but without the column frozen 0016 adds; a
@@ -494,13 +639,17 @@ var doltIgnorePatterns = []string{
 	// excludeIgnored, existingCommittableTables), so no migration commit
 	// stages it, and dolt pull refuses the uncommitted non-add delta until
 	// the store is repaired by hand. And it must be asserted before the
-	// ignored series runs: on a
-	// @@dolt_transaction_commit=1 server an unignored CREATE __temp__X
-	// auto-commits a real table at HEAD, and the rename to the ignored final
-	// name then leaves an unstageable "__temp__X -> X" rename half in
-	// dolt_status that wedges the store for every open behind the
-	// dirty-table guard. dolt matches ignore patterns with ? * % only —
-	// underscores are literal — so this covers exactly the __temp__ prefix.
+	// ignored series runs: under @@dolt_transaction_commit=1 an unignored
+	// CREATE __temp__X auto-commits a real table at HEAD, and the rename to
+	// the ignored final name then leaves an unstageable "__temp__X -> X"
+	// rename half in dolt_status that wedges the store for every open behind
+	// the dirty-table guard. This binary's own pass turns that setting off
+	// for its session (suspendTransactionCommit, GH#4470), so the pattern
+	// now guards the passes of binaries without the suspension, and keeps
+	// another auto-commit session on a shared server from sweeping an
+	// intermediate into its commit. dolt matches ignore patterns with ? * %
+	// only — underscores are literal — so this covers exactly the __temp__
+	// prefix.
 	"__temp__%",
 	// The events journal tables (bd-opisf) are seeded here rather than
 	// version-gated: they have never existed on the versioned plane, so
@@ -759,6 +908,32 @@ func IgnoredMigrationSQL(name string) (string, error) {
 	return string(data), nil
 }
 
+// PlannedMigrationSQL returns the SQL the runner executes for a main-source
+// migration file: its frozen bytes, or those bytes with the file's registered
+// execution plan applied (migration_body_plans.go). For tests outside this
+// package that compare the executed body with the frozen one.
+func PlannedMigrationSQL(name string) (string, error) {
+	return mainSource.plannedMigrationSQL(name)
+}
+
+// PlannedIgnoredMigrationSQL is PlannedMigrationSQL's ignored-lane
+// counterpart.
+func PlannedIgnoredMigrationSQL(name string) (string, error) {
+	return ignoredSource.plannedMigrationSQL(name)
+}
+
+func (m migrationSource) plannedMigrationSQL(name string) (string, error) {
+	data, err := m.files.ReadFile(m.dir + "/" + name)
+	if err != nil {
+		return "", err
+	}
+	version, err := parseVersion(name)
+	if err != nil {
+		return "", fmt.Errorf("parsing version of %s: %w", name, err)
+	}
+	return m.plannedMigrationBody(version, name, data)
+}
+
 func parseVersion(name string) (int, error) {
 	parts := strings.SplitN(name, "_", 2)
 	if len(parts) == 0 {
@@ -779,6 +954,22 @@ func MigrateUpTo(ctx context.Context, db DBConn, maxVersion int) (int, error) {
 	return applied, err
 }
 
+// MigrateIgnoredUpTo is MigrateUpTo for the dolt-ignored source: it applies
+// ignored-source migrations up to and including maxVersion and nothing else.
+// Test support only, for reconstructing a historical clone-local schema;
+// production code must use MigrateUp.
+func MigrateIgnoredUpTo(ctx context.Context, db DBConn, maxVersion int) (int, error) {
+	applied, _, err := ignoredSource.migrate(ctx, db, maxVersion)
+	return applied, err
+}
+
+// MigrateUp brings both migration sources (main and dolt-ignored) to the
+// binary's latest versions, with all open-time reconciles, guards, backfills
+// and rekeys. db must be a single session held for the whole call — pin a
+// connection (database/sql *sql.Conn) the way the production callers do: the
+// pass suspends and restores @@SESSION.dolt_transaction_commit on it
+// (suspendTransactionCommit), and a pooled *sql.DB would let the SET land on
+// one connection while the migrations run on another.
 func MigrateUp(ctx context.Context, db DBConn) (int, error) {
 	// Consent gate first, before ANY write — dolt_ignore seeding included: an
 	// existing database with pending main-sequence migrations must stay
@@ -841,7 +1032,7 @@ func migrateUpConsented(ctx context.Context, db DBConn) (int, error) {
 // migrateUpAfterReconcile is MigrateUp's migration pass proper, split out so
 // the open-time reconciles above it have exactly one place to contribute to
 // the reported total.
-func migrateUpAfterReconcile(ctx context.Context, db DBConn, seedChanged bool) (int, error) {
+func migrateUpAfterReconcile(ctx context.Context, db DBConn, seedChanged bool) (applied int, err error) {
 	needed, err := migrationWorkNeeded(ctx, db)
 	if err != nil {
 		return 0, fmt.Errorf("checking schema migration work: %w", err)
@@ -859,6 +1050,16 @@ func migrateUpAfterReconcile(ctx context.Context, db DBConn, seedChanged bool) (
 		}
 		return 0, nil
 	}
+
+	// Past the converged early return so a no-work open issues no extra
+	// statements; ahead of every write the pass makes. Restored on every
+	// return below; a failed restore is joined to, never replaces, the
+	// pass's own result.
+	restoreTransactionCommit, err := suspendTransactionCommit(ctx, db)
+	if err != nil {
+		return 0, err
+	}
+	defer func() { err = joinRestoreError(err, restoreTransactionCommit()) }()
 
 	dirtyBeforeAll, err := dirtyTables(ctx, db, false)
 	if err != nil {
@@ -930,8 +1131,32 @@ func migrateUpAfterReconcile(ctx context.Context, db DBConn, seedChanged bool) (
 	if err != nil {
 		return 0, fmt.Errorf("checking dirty tables against pending migrations: %w", err)
 	}
-	if len(touchedDirtyTables) > 0 {
-		return 0, &DirtyTablesError{Tables: touchedDirtyTables}
+	// The ignored series is checked here too, before any numbered migration
+	// or rekey runs, so its refusal applies none of them (the seed and
+	// cursor-heal preparations above may already have run) and can be the
+	// same *DirtyTablesError the working-set-reconcile opens tolerate
+	// (gastownhall/beads#5816). The ignored cursor is read before the main
+	// series runs; no main migration advances it, but a sentinel table that
+	// goes missing mid-pass can leave more ignored migrations pending, so a
+	// plain-error backstop re-checks just before ignoredSource.migrate
+	// (gastownhall/beads#5168). It reads the same committable set: rows in
+	// dolt-ignored tables (wisps, wisp_comments, ...) are clone-local
+	// working-set data that stageSchemaTables never stages and
+	// unstageIgnoredTables keeps out of the migration commit, so the
+	// ignored migrations may alter them in place. Committable tables the
+	// ignored series touches (0002 deletes child_counters rows) still refuse.
+	touchedIgnoredDirtyTables, err := ignoredSource.pendingMigrationDirtyTables(ctx, db, dirtyBefore)
+	// A failed ignored read must not mask a main-series refusal: that typed
+	// error is what the reconcile opens recover from, and the open after the
+	// recovery reads the ignored series again. So the read error returns only
+	// when the main series has nothing to refuse.
+	if err != nil && len(touchedDirtyTables) == 0 {
+		return 0, fmt.Errorf("checking dirty tables against pending ignored migrations: %w", err)
+	}
+	if len(touchedDirtyTables) > 0 || len(touchedIgnoredDirtyTables) > 0 {
+		tables := append(touchedDirtyTables, touchedIgnoredDirtyTables...)
+		sort.Strings(tables)
+		return 0, &DirtyTablesError{Tables: slices.Compact(tables)}
 	}
 	dirtyBeforeSignatures, err := dirtyTableSignatures(ctx, db, dirtyBefore)
 	if err != nil {
@@ -997,22 +1222,22 @@ func migrateUpAfterReconcile(ctx context.Context, db DBConn, seedChanged bool) (
 	}
 	backfilled = backfilled || auxRekeyed
 
-	touchedIgnoredDirtyTables, err := ignoredSource.pendingMigrationDirtyTables(ctx, db, dirtyBeforeAll)
+	// Backstop for the ignored-series check before the migrations: that read
+	// came before the main series ran, and the ignored cursor is clamped by
+	// sentinel tables, so anything that removes one mid-pass (a main step, a
+	// rekey, a concurrent writer) can leave ignored migrations newly pending
+	// that touch a dirty committable table. Refuse before they apply. This is
+	// deliberately a plain error, not *DirtyTablesError: main steps have
+	// already committed, and the working-set-reconcile opens that tolerate
+	// that type must not let a commit checkpoint a half-applied pass. The
+	// next open re-reads the ignored cursor before migrating and so returns
+	// the typed, recoverable refusal (gastownhall/beads#5168).
+	lateIgnoredDirtyTables, err := ignoredSource.pendingMigrationDirtyTables(ctx, db, dirtyBefore)
 	if err != nil {
 		return applied, fmt.Errorf("checking dirty tables against pending ignored migrations: %w", err)
 	}
-	if len(touchedIgnoredDirtyTables) > 0 {
-		// Deliberately a plain, untyped error (unlike the main-source guard
-		// above, which returns *DirtyTablesError): this check fires mid-pass,
-		// after the main-source migrations have already applied. A lenient
-		// caller (embeddeddolt's openReadOnlyCommand / openWorkingSetReconcile
-		// intents) skipping this and returning as if the open succeeded would
-		// let a reconcile commit checkpoint a half-applied migration pass.
-		// The ignored source also tracks bd-internal state (dolt_ignore'd
-		// tables like ignored_schema_migrations), not expected user data, so
-		// there is no dirty-commit recovery story to support here the way
-		// there is for the main-source guard (#4566 scope).
-		return applied, fmt.Errorf("pending ignored schema migrations alter pre-existing dirty tables: %s", strings.Join(touchedIgnoredDirtyTables, ", "))
+	if len(lateIgnoredDirtyTables) > 0 {
+		return applied, fmt.Errorf("ignored schema migrations that became pending during the migration pass alter pre-existing dirty tables: %s (the main migrations already applied; re-run the open to refuse before any migration runs)", strings.Join(lateIgnoredDirtyTables, ", "))
 	}
 
 	appliedIgnored, ignoredColumnAdded, err := ignoredSource.migrate(ctx, db, 0)
@@ -1541,6 +1766,15 @@ func (m migrationSource) atLatest(ctx context.Context, db DBConn) bool {
 }
 
 func (m migrationSource) currentVersion(ctx context.Context, db DBConn) (int, error) {
+	current, _, err := m.readCursor(ctx, db)
+	return current, err
+}
+
+// readCursor is currentVersion that also reports the sentinel tables with a
+// lossNotice that the cursor claims were created (cursor above their
+// replayFloor) and that are absent: the tables the replay that follows will
+// re-create empty after a loss.
+func (m migrationSource) readCursor(ctx context.Context, db DBConn) (int, []schemaSentinelTable, error) {
 	// Probe existence with a query that always SUCCEEDS before ever issuing one
 	// that can fail. A Dolt session that issues a failing statement stays
 	// pinned to its pre-statement catalog snapshot, so a bare SELECT against a
@@ -1549,22 +1783,22 @@ func (m migrationSource) currentVersion(ctx context.Context, db DBConn) (int, er
 	// the rest of its life in the pool (be-bv7x).
 	cursorExists, err := tableInCurrentDatabase(ctx, db, m.cursorTable)
 	if err != nil {
-		return 0, fmt.Errorf("probing %s existence: %w", m.cursorTable, err)
+		return 0, nil, fmt.Errorf("probing %s existence: %w", m.cursorTable, err)
 	}
 	if !cursorExists {
-		return 0, nil
+		return 0, nil, nil
 	}
 
 	var current int
 	err = db.QueryRowContext(ctx, "SELECT COALESCE(MAX(version), 0) FROM "+m.cursorTable).Scan(&current)
 	if err != nil && err != sql.ErrNoRows {
 		if dberrors.IsTableNotExist(err) {
-			return 0, nil
+			return 0, nil, nil
 		}
-		return 0, fmt.Errorf("reading %s version: %w", m.cursorTable, err)
+		return 0, nil, fmt.Errorf("reading %s version: %w", m.cursorTable, err)
 	}
 	if current == 0 {
-		return 0, nil
+		return 0, nil, nil
 	}
 	// A missing cursor TABLE already meant "nothing applied". A cursor whose
 	// tables are absent means the same thing and was previously believed
@@ -1581,14 +1815,20 @@ func (m migrationSource) currentVersion(ctx context.Context, db DBConn) (int, er
 	// is evidence about the migration that creates it and everything after,
 	// and nothing at all about what ran before. Zeroing anyway replays the
 	// whole series, which is not a no-op (see schemaSentinelColumn.replayFloor).
-	floor, limited, ferr := m.cursorRealityFloor(ctx, db)
+	floor, limited, missing, ferr := m.cursorReality(ctx, db)
 	if ferr != nil {
-		return 0, ferr
+		return 0, nil, ferr
+	}
+	var lost []schemaSentinelTable
+	for _, st := range missing {
+		if st.lossNotice != "" && current > st.replayFloor {
+			lost = append(lost, st)
+		}
 	}
 	if limited && floor < current {
 		current = floor
 	}
-	return current, nil
+	return current, lost, nil
 }
 
 // cursorRealityFloor reports how much of this series' cursor the live schema
@@ -1612,24 +1852,35 @@ func (m migrationSource) currentVersion(ctx context.Context, db DBConn) (int, er
 // tables are then probed together with columns, each clamping floor to the
 // lowest replayFloor of anything found absent.
 func (m migrationSource) cursorRealityFloor(ctx context.Context, db DBConn) (int, bool, error) {
+	floor, limited, _, err := m.cursorReality(ctx, db)
+	return floor, limited, err
+}
+
+// cursorReality is cursorRealityFloor that also returns the sentinel floored
+// tables it found absent. A missing sentinel table short-circuits before the
+// floored tables are probed, so on that path none are reported: the whole
+// series replays, re-creating them along with everything else.
+func (m migrationSource) cursorReality(ctx context.Context, db DBConn) (int, bool, []schemaSentinelTable, error) {
 	for _, table := range m.sentinelTables {
 		present, err := sentinelTableExists(ctx, db, table)
 		if err != nil {
-			return 0, false, fmt.Errorf("checking %s sentinel table %s: %w", m.cursorTable, table, err)
+			return 0, false, nil, fmt.Errorf("checking %s sentinel table %s: %w", m.cursorTable, table, err)
 		}
 		if !present {
-			return 0, true, nil
+			return 0, true, nil, nil
 		}
 	}
 	floor, limited := 0, false
+	var missing []schemaSentinelTable
 	for _, st := range m.sentinelFlooredTables {
 		present, err := sentinelTableExists(ctx, db, st.table)
 		if err != nil {
-			return 0, false, fmt.Errorf("checking %s sentinel floored table %s: %w", m.cursorTable, st.table, err)
+			return 0, false, nil, fmt.Errorf("checking %s sentinel floored table %s: %w", m.cursorTable, st.table, err)
 		}
 		if present {
 			continue
 		}
+		missing = append(missing, st)
 		if !limited || st.replayFloor < floor {
 			floor = st.replayFloor
 		}
@@ -1638,7 +1889,7 @@ func (m migrationSource) cursorRealityFloor(ctx context.Context, db DBConn) (int
 	for _, column := range m.sentinelColumns {
 		present, err := sentinelColumnExists(ctx, db, column.table, column.column)
 		if err != nil {
-			return 0, false, fmt.Errorf("checking %s sentinel column %s.%s: %w", m.cursorTable, column.table, column.column, err)
+			return 0, false, nil, fmt.Errorf("checking %s sentinel column %s.%s: %w", m.cursorTable, column.table, column.column, err)
 		}
 		if present {
 			continue
@@ -1648,7 +1899,7 @@ func (m migrationSource) cursorRealityFloor(ctx context.Context, db DBConn) (int
 		}
 		limited = true
 	}
-	return floor, limited, nil
+	return floor, limited, missing, nil
 }
 
 // sentinelTableExists is a function variable for the same reason
@@ -2005,8 +2256,10 @@ func scanRowByColumn(rows *sql.Rows) (CallRow, error) {
 // consumed; all other migrations keep the unchanged ExecContext path.
 //
 // sqlText is always a compile-time embedded migration body (go:embed above;
-// frozen once merged per scripts/check-migration-hygiene.sh) — never runtime
-// or user input. Executing it verbatim is the migration contract, so SAST
+// frozen once merged per scripts/check-migration-hygiene.sh), or that body
+// with a compile-time, hash-gated execution plan applied
+// (migration_body_plans.go) — never runtime or user input. Executing it
+// unaltered apart from those plans is the migration contract, so SAST
 // "SQL injection" findings on this call are accepted by design.
 func execMigrationBody(ctx context.Context, db DBConn, sqlText string) error {
 	if !procedureCallRe.MatchString(sqlText) {
@@ -2043,13 +2296,19 @@ func (m migrationSource) migrate(ctx context.Context, db DBConn, upTo int) (int,
 	// would decide "work needed" on every open, run the whole pass, and then
 	// apply nothing, leaving the missing tables missing and the pass to repeat
 	// forever. The heal only happens if the applier disbelieves the cursor too.
-	current, err := m.currentVersion(ctx, db)
+	current, lost, err := m.readCursor(ctx, db)
 	if err != nil {
 		return 0, columnAdded, err
 	}
 
 	if current >= target {
 		return 0, columnAdded, nil
+	}
+	// The replay below re-creates every lost table empty; say so first.
+	for _, st := range lost {
+		if upTo == 0 || upTo > st.replayFloor {
+			fmt.Fprintln(lostTableNoticeOut, st.lossNotice)
+		}
 	}
 
 	// commitEachStep gates the per-migration commit to the production path
@@ -2074,7 +2333,22 @@ func (m migrationSource) migrate(ctx context.Context, db DBConn, upTo int) (int,
 // its commitMigrationStep still leaves that one step's debris in the working
 // set for the dirty-table guard to refuse. The window shrinks from the whole
 // pass tail to one step; it does not close entirely.
-func runMigrations(ctx context.Context, db DBConn, src migrationSource, minVersion, upTo int, commitEachStep bool) (int, error) {
+//
+// An error returned while a numbered step is selected, from its snapshots,
+// pre-repair, body, updated_at restore, cursor row or step commit, that carries
+// a schema-encoding-drift signature comes back as a *SchemaEncodingDriftError
+// naming that step (gastownhall/beads#5699). The pass still stops where it did:
+// nothing is skipped, retried or rolled back, and a raw panic is not caught.
+func runMigrations(ctx context.Context, db DBConn, src migrationSource, minVersion, upTo int, commitEachStep bool) (count int, err error) {
+	// selected is the numbered step in progress, nil outside one, so a drift
+	// error is never attributed to a step it did not come from.
+	var selected *migrationFile
+	defer func() {
+		if selected != nil {
+			err = classifyMigrationDrift(err, src, *selected)
+		}
+	}()
+
 	if upTo == 0 {
 		upTo = src.latest()
 	}
@@ -2095,14 +2369,22 @@ func runMigrations(ctx context.Context, db DBConn, src migrationSource, minVersi
 		emitLargeRigNotice(stderr, rowCount, rowCountErr)
 	}
 
-	count := 0
 	for _, mf := range src.list() {
 		if mf.version <= minVersion || mf.version > upTo {
 			continue
 		}
+		selected = &mf
 		data, err := src.files.ReadFile(src.dir + "/" + mf.name)
 		if err != nil {
 			return count, fmt.Errorf("reading migration %s: %w", mf.name, err)
+		}
+		// Resolve the executed body before anything of this step runs, so a
+		// plan that no longer matches its frozen file fails the step before
+		// its repair, body or cursor row (#6520). The cursor below still
+		// hashes data, the frozen bytes.
+		body, err := src.plannedMigrationBody(mf.version, mf.name, data)
+		if err != nil {
+			return count, fmt.Errorf("planning migration %s: %w", mf.name, err)
 		}
 
 		// Snapshot the working set BEFORE the pre-migration repair runs, not
@@ -2125,6 +2407,14 @@ func runMigrations(ctx context.Context, db DBConn, src migrationSource, minVersi
 			if err != nil {
 				return count, fmt.Errorf("snapshotting dirty tables before %s: %w", mf.name, err)
 			}
+		}
+
+		// Snapshot updated_at before the repair and the body can stamp it,
+		// for the frozen migrations registered in updatedAtGuards (#5981);
+		// nil and query-free for every other step.
+		stamps, err := snapshotUpdatedAtForStep(ctx, db, src, mf.version)
+		if err != nil {
+			return count, fmt.Errorf("snapshotting updated_at before migration %s: %w", mf.name, err)
 		}
 
 		if err := src.preMigrationRepair(ctx, db, mf.version); err != nil {
@@ -2153,9 +2443,14 @@ func runMigrations(ctx context.Context, db DBConn, src migrationSource, minVersi
 		// should carry. So a wedge inside the per-step commit is still silent;
 		// CHANGELOG.md scopes the user-facing promise to match.
 		if err := runMigrationWithWatchdog(ctx, watchdogStderr, mf.version, humanMigrationName(mf.name), migrationWatchdogIntervalDuration(),
-			func(ctx context.Context) error { return execMigrationBody(ctx, db, string(data)) },
+			func(ctx context.Context) error { return execMigrationBody(ctx, db, body) },
 		); err != nil {
 			return count, fmt.Errorf("migration %s: %w", mf.name, err)
+		}
+		// Restore before the cursor row and the per-step commit, so neither
+		// the step's commit nor a later pass ever records the stamped values.
+		if err := stamps.restore(ctx, db); err != nil {
+			return count, fmt.Errorf("restoring updated_at after migration %s: %w", mf.name, err)
 		}
 		sum := sha256.Sum256(data)
 		contentHash := hex.EncodeToString(sum[:])
@@ -2177,6 +2472,7 @@ func runMigrations(ctx context.Context, db DBConn, src migrationSource, minVersi
 			}
 		}
 		fmt.Fprintf(stderr, "  done (%.1fs)\n", time.Since(start).Seconds())
+		selected = nil
 
 		if migrateStepFaultHook != nil {
 			if err := migrateStepFaultHook(ctx, db, mf.version); err != nil {

@@ -6,9 +6,11 @@ import (
 
 	"github.com/spf13/cobra"
 	"github.com/steveyegge/beads/internal/metrics"
+	"github.com/steveyegge/beads/internal/storage"
 	"github.com/steveyegge/beads/internal/types"
 	"github.com/steveyegge/beads/internal/ui"
 	"github.com/steveyegge/beads/internal/workapi"
+	"github.com/steveyegge/beads/issueops"
 )
 
 // cleanupSkips counts the closed beads `bd admin cleanup` held back, by
@@ -59,6 +61,9 @@ type CleanupEmptyResponse struct {
 	Message      string `json:"message"`
 	Filter       string `json:"filter,omitempty"`
 	Ephemeral    bool   `json:"ephemeral,omitempty"`
+	// RetentionRequired counts the closed issues kept because their type is
+	// one the workspace retains (types.retained); absent when none were.
+	RetentionRequired int `json:"retention_required,omitempty"`
 }
 
 var cleanupCmd = &cobra.Command{
@@ -85,7 +90,12 @@ SAFETY:
   (` + "`gc.protected_labels`" + `) and beads of a GC-protected wisp kind
   (escalations). No flag overrides those — delete one with ` + "`bd delete <id>`" + `.
 - Requires --force flag to actually delete (unless --dry-run)
-- Supports --cascade to delete dependents
+- Skips pinned issues, and issues of a type the workspace's types.retained
+  setting names (their ids are idempotency keys; only bd prune/purge
+  --retain-ids deletes them); --json reports the latter as retention_required
+- Supports --cascade, which also deletes
+  parent-child descendants; other dependents survive (refused while
+  types.retained names a type, since a cascade could reach a retained issue)
 - Shows preview of what will be deleted
 - Use --json for programmatic output
 
@@ -121,6 +131,7 @@ SEE ALSO:
 		}
 
 		ctx := rootCtx
+		warnIgnoredYAMLRetainedTypes()
 
 		// Build filter for closed issues. Cleanup is a scripted sweep — opt out
 		// of BEADS_MAX_ROWS (designer §4.1) so a misconfigured env doesn't abort
@@ -142,31 +153,39 @@ SEE ALSO:
 			filter.Ephemeral = &wispTrue
 		}
 
-		closedIssues, err := store.SearchIssues(ctx, "", filter)
+		// The closed issues and types.retained come from one snapshot, so the
+		// hold-back and the --cascade refusal use the setting it held.
+		closedIssues, retainedSetting, err := storage.SearchIssuesWithConfig(ctx, store, "", filter, issueops.SettingKeyTypesRetained)
 		if err != nil {
 			return HandleError("listing issues: %v", err)
 		}
 
 		protected := resolveGCProtectedLabels(ctx, store)
-		var skips cleanupSkips
-		closedIssues, skips = filterCleanupCandidates(closedIssues, protected)
+		selection, err := selectCleanupCandidates(closedIssues, retainedSetting, cascade, protected)
+		if err != nil {
+			return HandleError("%v", err)
+		}
 
 		// stderr, and unconditional, so it survives --json and so "nothing to
 		// clean up" and "nothing to clean up except the record you came for"
 		// are not the same output.
-		if skips.Protected > 0 {
+		if selection.Protected > 0 {
 			WarnError("kept %d protected bead(s) (%s); delete one deliberately with `bd delete <id>`",
-				skips.Protected, protected.Describe())
+				selection.Protected, protected.Describe())
 		}
-		if skips.Pinned > 0 && !jsonOutput {
-			fmt.Printf("Skipping %d pinned issue(s) (protected from cleanup)\n", skips.Pinned)
+		if selection.Pinned > 0 && !jsonOutput {
+			fmt.Printf("Skipping %d pinned issue(s) (protected from cleanup)\n", selection.Pinned)
+		}
+		if selection.RetentionRequired > 0 && !jsonOutput {
+			fmt.Println(retainedTypesKeptLine(selection.RetentionRequired, "closed issue(s)"))
 		}
 
-		if len(closedIssues) == 0 {
+		if len(selection.IDs) == 0 {
 			if jsonOutput {
 				result := CleanupEmptyResponse{
-					DeletedCount: 0,
-					Message:      "No closed issues to delete",
+					DeletedCount:      0,
+					Message:           "No closed issues to delete",
+					RetentionRequired: selection.RetentionRequired,
 				}
 				if olderThanDays > 0 {
 					result.Filter = fmt.Sprintf("older than %d days", olderThanDays)
@@ -191,10 +210,7 @@ SEE ALSO:
 			return nil
 		}
 
-		issueIDs := make([]string, len(closedIssues))
-		for i, issue := range closedIssues {
-			issueIDs[i] = issue.ID
-		}
+		issueIDs := selection.IDs
 
 		if !force && !dryRun {
 			issueType := "closed"
@@ -212,9 +228,9 @@ SEE ALSO:
 				issueType = "closed wisp"
 			}
 			if olderThanDays > 0 {
-				fmt.Printf("Found %d %s issue(s) older than %d days\n", len(closedIssues), issueType, olderThanDays)
+				fmt.Printf("Found %d %s issue(s) older than %d days\n", len(issueIDs), issueType, olderThanDays)
 			} else {
-				fmt.Printf("Found %d %s issue(s)\n", len(closedIssues), issueType)
+				fmt.Printf("Found %d %s issue(s)\n", len(issueIDs), issueType)
 			}
 			if dryRun {
 				fmt.Println(ui.RenderWarn("DRY RUN - no changes will be made"))
@@ -222,7 +238,7 @@ SEE ALSO:
 			fmt.Println()
 		}
 
-		if err := deleteBatch(cmd, issueIDs, force, dryRun, cascade, jsonOutput, false, nil, "cleanup"); err != nil {
+		if err := deleteBatchReporting(issueIDs, force, dryRun, cascade, jsonOutput, nil, retentionReport(selection.RetentionRequired)); err != nil {
 			return HandleError("%v", err)
 		}
 		return nil
@@ -232,8 +248,46 @@ SEE ALSO:
 func init() {
 	cleanupCmd.Flags().BoolP("force", "f", false, "Actually delete (without this flag, shows error)")
 	cleanupCmd.Flags().Bool("dry-run", false, "Preview what would be deleted without making changes")
-	cleanupCmd.Flags().Bool("cascade", false, "Recursively delete all dependent issues")
+	cleanupCmd.Flags().Bool("cascade", false, "Also delete parent-child descendants; other dependents survive")
 	cleanupCmd.Flags().Int("older-than", 0, "Only delete issues closed more than N days ago (0 = all closed issues)")
 	cleanupCmd.Flags().Bool("ephemeral", false, "Only delete closed wisps (transient molecules)")
 	// Note: cleanupCmd is added to adminCmd in admin.go
+}
+
+// cleanupSelection is what `bd admin cleanup` deletes and what it held back.
+type cleanupSelection struct {
+	IDs               []string
+	Pinned            int
+	Protected         int
+	RetentionRequired int
+}
+
+// selectCleanupCandidates narrows the closed issues `bd admin cleanup` found
+// to the ones it may delete: pinned issues are protected, and so are issues
+// of a type the workspace retains (retainedSetting is the stored value of
+// types.retained). Cleanup deletes through the Deleter role, which writes no
+// tombstone, so a retained issue is never its to take.
+//
+// --cascade is refused while anything is retained: the role expands a cascade
+// to every parent-child descendant past this selection, so it could delete a
+// retained issue the selection just held back.
+func selectCleanupCandidates(closed []*types.Issue, retainedSetting string, cascade bool, protected workapi.GCProtectedLabels) (cleanupSelection, error) {
+	var selection cleanupSelection
+	if cascade && len(workapi.RetainedTypesFromSetting(retainedSetting)) > 0 {
+		return selection, fmt.Errorf("--cascade is refused while %s names a type (%q): a cascade deletes dependents past the selection, "+
+			"including issues of a retained type, without retiring their ids; run without --cascade",
+			issueops.SettingKeyTypesRetained, retainedSetting)
+	}
+	// The GC protection is applied first and is not overridable here: see
+	// filterCleanupCandidates.
+	unpinned, skips := filterCleanupCandidates(closed, protected)
+	selection.Pinned = skips.Pinned
+	selection.Protected = skips.Protected
+	kept, retained := holdBackRetainedTypes(unpinned, retainedSetting)
+	selection.RetentionRequired = retained
+	selection.IDs = make([]string, len(kept))
+	for i, issue := range kept {
+		selection.IDs[i] = issue.ID
+	}
+	return selection, nil
 }

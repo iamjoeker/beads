@@ -57,6 +57,44 @@ const asOfReadNoHTTPWireWaiverReason = "the read under test has no form on the h
 	"instant/version-address selector nor a gone/unknown refusal, and the client's only point-in-time read, " +
 	"DoltStorage.AsOf, is a Dolt commit-ref read on its unsupported allowlist (D8)"
 
+// idRetentionNoTransactionWaiverReason is why the in-transaction retired-id
+// case stops short of the http leg: it drives storage.Transaction.CreateIssue,
+// and the http client serves no transaction surface (RunInTransaction cannot
+// span requests; internal/httpclient/completeness_test.go). The refusal it
+// asserts is the shared create guard's, which runs on every store leg, and the
+// wire's own create doors refuse a retired id on this leg's createIssue and
+// applyBatch cases.
+const idRetentionNoTransactionWaiverReason = "IDRetentionFixture.TxCreate is storage.Transaction.CreateIssue, and the " +
+	"http client has no transaction surface: RunInTransaction cannot span requests. The retired-id guard it would " +
+	"exercise is the shared create body's and runs on every store leg; this leg's wire create doors run their own cases"
+
+// idRetentionNoUpsertDoorWaiverReason is why the two retired-id cases that
+// drive IDRetentionFixture.UpsertCreate stop short of the http leg: the wire
+// serves no upsert-shaped single create. createIssue is create-only (a live id
+// is a 409), so there is no overwrite-or-insert door on this leg to guard. The
+// guard both cases pin is the shared create body's and runs on every store leg.
+const idRetentionNoUpsertDoorWaiverReason = "IDRetentionFixture.UpsertCreate is a store's overwrite-or-insert " +
+	"CreateIssue, and the wire serves no such door: createIssue is create-only. The guard both cases pin is the " +
+	"shared create body's and runs on every store leg"
+
+// idRetentionNoImportDoorWaiverReason is why the two retired-id cases that
+// drive IDRetentionFixture.Importer stop short of the http leg: the wire
+// publishes no import operation, so the client hands out no Importer and this
+// leg has no import door to skip a retired row. Both cases run on every store
+// leg, through the seam `bd import` writes through there.
+const idRetentionNoImportDoorWaiverReason = "IDRetentionFixture.Importer is the Importer role, and the http client " +
+	"hands out none: the wire publishes no import operation. Both import cases run on every store leg"
+
+// idRetentionNoRenameDoorWaiverReason is why the rename-onto-a-retired-id case
+// stops short of the uow and http legs: it drives the storage-level identity
+// change (storage.Storage.UpdateIssueID), and neither leg serves one. The unit
+// of work has no rename use case, and the http client answers UpdateIssueID
+// with its typed unsupported error (unsupported_gen.go). The guard it asserts lives in the
+// shared rename body, issueops.UpdateIssueIDInTx, which the store legs run.
+const idRetentionNoRenameDoorWaiverReason = "IDRetentionFixture.Rename is storage.Storage.UpdateIssueID, and this " +
+	"leg serves no identity change: the unit of work has no rename use case and the http client refuses it as " +
+	"unsupported. The guard is the shared rename body's (issueops.UpdateIssueIDInTx) and runs on every store leg"
+
 // The waivers of the three legs registered here. Each is registered beside its
 // leg rather than written into one literal, so a leg registered elsewhere
 // brings its waivers the same way; see unwiredContractEntrypoints.
@@ -79,6 +117,7 @@ func init() {
 		"RunBootstrapperRecordsNoHistoryEntryOfItsOwn":                   bootstrapSplitWaiverReason,
 		"RunIssueOperationsCreateReverseNonBlockingStagesConcreteTables": stagingWaiverReason,
 		"RunIssueOperationsCreateParentChildRecomputesWaitsForClosure":   stagingWaiverReason,
+		"RunIDRetentionRefusesARenameOntoARetiredID":                     idRetentionNoRenameDoorWaiverReason,
 	})
 	registerContractLegWaivers("http", map[string]string{
 		"RunAsOfReadIsCompleteOnlyForTheAnsweringStoresHoldings":              asOfReadNoHTTPWireWaiverReason,
@@ -86,6 +125,13 @@ func init() {
 		"RunAsOfReadReportsTheAddressItServed":                                asOfReadNoHTTPWireWaiverReason,
 		"RunAsOfReadReturnsTheLatestVersionAtOrBeforeTStrictlyExcludingLater": asOfReadNoHTTPWireWaiverReason,
 		"RunAsOfReadSelectorAcceptsEitherAnInstantOrAVersionAddress":          asOfReadNoHTTPWireWaiverReason,
+
+		"RunIDRetentionRefusesInsideATransaction":        idRetentionNoTransactionWaiverReason,
+		"RunIDRetentionRefusesThroughTheStorageSeam":     idRetentionNoUpsertDoorWaiverReason,
+		"RunIDRetentionARacingUpsertNeverResurrects":     idRetentionNoUpsertDoorWaiverReason,
+		"RunIDRetentionImportSkipsAndReportsARetiredRow": idRetentionNoImportDoorWaiverReason,
+		"RunIDRetentionARacingImportNeverResurrects":     idRetentionNoImportDoorWaiverReason,
+		"RunIDRetentionRefusesARenameOntoARetiredID":     idRetentionNoRenameDoorWaiverReason,
 
 		"RunCycleDetectorIncludeTracksFindsTheMoleculeRootShape":         cycleTracksWireGapWaiverReason,
 		"RunCycleDetectorIncludeTracksIgnoresAPureTracksLoop":            cycleTracksWireGapWaiverReason,
@@ -722,10 +768,18 @@ func finalParamTypeName(fn *ast.FuncDecl) string {
 // reason instead of a bare t.Skip: a reviewer reading a wiring diff that adds
 // a conformance.RunX reference should expect it to pass for real, or to carry
 // a waiver in unwiredContractEntrypoints instead — not to compile a skip and
-// call it adopted. As of this lock's current counts, no leg does this: every
-// entrypoint a leg's sources name either has every hook that entrypoint's own
-// cases need, or the gap is a named waiver here rather than a nil hook left
-// standing behind a call this check would count as wired.
+// call it adopted. Legs do this today. For example, the dolt, embeddeddolt
+// and uow legs wire the expected-revision, cross-record-invariant and
+// retention contracts (and the http leg the expected-revision contract) with
+// hooks such as CompareAndSetVersion, Remove and AcquireAdvisoryLease left
+// nil; the http leg's counter (List) and journal-arrival
+// (JournalArrivalHooks.*) contracts and the uow leg's journal contract
+// (JournalArrivalHooks.Rename) do the same. Those cases run as skips this
+// check counts as wired. What this check cannot see,
+// the runtime skip census does: tools/bazel/skip_census.txt lists each such
+// case per leg target as a `nil-hook <Hook>` line, and the Dolt-tier lanes'
+// check_testcases.py --skip-census fails on a skip the census does not list
+// and on a listed case that runs again, so supplying a hook deletes its lines.
 func conformanceEntrypointsWiredBy(t *testing.T, dir string) (map[string]bool, []string) {
 	t.Helper()
 	files, err := filepath.Glob(filepath.Join(dir, "*_test.go"))

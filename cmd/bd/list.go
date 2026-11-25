@@ -220,8 +220,8 @@ func runListCore(cmd *cobra.Command, _ []string) error {
 
 	// `bd list`'s PAGE is on issueops.Reader. The filter is still built here
 	// because --watch and the hierarchical --parent tree consume it as a VALUE:
-	// the poll loop re-runs it on a ticker and the tree walk re-parents a copy
-	// of it at every level, neither of which a page can express. Building it
+	// the poll loop re-runs it every poll interval and the tree walk re-parents
+	// a copy of it at every level, neither of which a page can express. Building it
 	// unconditionally also keeps the page query ahead of the tree branch, so
 	// `--parent --pretty --max-rows N` still refuses on the cap where it did.
 	cfg, err := workapi.LoadStoreListConfig(rootCtx, store)
@@ -468,7 +468,7 @@ func init() {
 	listCmd.Flags().IntP("limit", "n", workapi.DefaultListLimit, "Limit results (an explicit --limit always wins, 0 meaning unlimited; otherwise --all is unlimited; otherwise a configured list.limit applies; otherwise unlimited when piped, else 20 in agent mode at a terminal, else 50)")
 	listCmd.Flags().Int("offset", 0, "Skip the first N matching results (0-based). Only supported under --proxied-server.")
 	listCmd.Flags().String("format", "", "Export the dependency graph of the listed issues: 'digraph' (edge list for golang.org/x/tools/cmd/digraph), 'dot' (Graphviz), or a Go template rendered once per edge over .IssueID, .DependsOnID, .Type, .Issue, .Dependency. 'json' is the exception and does not export the graph: it is equivalent to --json, which also wins when both flags are given. 'digraph' and templates print nothing when no listed issue depends on another; 'dot' still prints the nodes")
-	listCmd.Flags().Bool("all", false, "Show all issues including closed (overrides default filter)")
+	listCmd.Flags().Bool("all", false, "Lift default status and pinned exclusions and the default limit (type and plane suppressions still apply; see --include-all-types)")
 	listCmd.Flags().Bool("long", false, "Show detailed multi-line output for each issue")
 	listCmd.Flags().String("sort", "", "Sort by field: priority, created, updated, closed, status, id, title, type, assignee")
 	listCmd.Flags().BoolP("reverse", "r", false, "Invert the sort field's default direction (created/updated/closed default to newest-first, so --sort updated --reverse is oldest-first)")
@@ -548,6 +548,14 @@ func init() {
 	// through --include-infra's wider bundle, which leaves --wisp-type below
 	// with no narrow way to match anything.
 	listCmd.Flags().Bool("include-ephemeral", false, "Include ephemeral wisp-plane rows in output (normally hidden)")
+
+	// The union of the four include flags above: ListRequest.IncludeAllTypes
+	// skips applyTypeSuppressions entirely (internal/workapi/list.go), so it
+	// lifts every default type/plane suppression — including one added after
+	// this flag was written, which is exactly what the narrow enumeration
+	// cannot promise. It is not --all: the default status and pinned
+	// exclusions are a separate axis and still apply.
+	listCmd.Flags().Bool("include-all-types", false, "Include all issue types and the ephemeral wisp plane (default status and pinned exclusions still apply; see --all)")
 
 	// Explicit type exclusion
 	listCmd.Flags().StringSlice("exclude-type", nil, "Exclude issue types from results (comma-separated or repeatable, e.g., --exclude-type=convoy,epic)")

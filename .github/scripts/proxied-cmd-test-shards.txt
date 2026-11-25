@@ -39,6 +39,7 @@
 34 2 TestProxiedServerDepListSingleIDWarnsOnDroppedExternalEdge
 34 2 TestProxiedServerGateList
 34 2 TestProxiedServerList
+34 2 TestProxiedServerRetainIDs
 34 2 TestProxiedServerServeRemoveDependency
 34 2 TestProxiedServerUpdateC
 
@@ -103,12 +104,14 @@
 34 10 TestProxiedServerContext
 34 10 TestProxiedServerCreate2B
 34 10 TestProxiedServerGateCheckB
+34 10 TestProxiedServerServeDeleteIfRevisionSingleWinner
 34 10 TestProxiedServerServeRefusesAStreamOnADisabledJournal
 34 10 TestProxiedServerTypes
 34 10 TestProxiedServerUpdate2C
 
 34 11 TestProxiedServerBatchParity
 34 11 TestProxiedServerCompactHistory
+34 11 TestProxiedServerCompactKeepsPendingWrite
 34 11 TestProxiedServerPour
 34 11 TestProxiedServerQuery
 34 11 TestProxiedServerReady
@@ -143,6 +146,7 @@
 34 15 TestProxiedServerImport
 34 15 TestProxiedServerMoleculeFrontDoorWriteParity
 34 15 TestProxiedServerReopenConcurrent
+34 15 TestProxiedServerSDKOpenBestAvailable
 34 15 TestProxiedServerSQL
 
 34 16 TestProxiedServerBackupRefusedOnExternalTopology
@@ -152,6 +156,7 @@
 34 16 TestProxiedServerServeCount
 34 16 TestProxiedServerServeCreate
 34 16 TestProxiedServerUpdateHooks
+34 16 TestServerModeReadRefusesASchemaItsReadsCannotQuery
 
 34 17 TestProxiedServerDep
 34 17 TestProxiedServerMultiStatementSQL
@@ -159,7 +164,7 @@
 34 17 TestProxiedServerPrime
 34 17 TestProxiedServerSQLDatabaseFlag
 34 17 TestProxiedServerServeModeGate
-34 17 TestServerModeServeIgnoresGraphModeDependency
+34 17 TestProxiedServerTemplateGuardAcrossWriteVerbs
 
 34 18 TestProxiedServerClose3
 34 18 TestProxiedServerCount
@@ -249,6 +254,7 @@
 34 29 TestProxiedServerGateFrontDoorDirectServerProxyParity
 34 29 TestProxiedServerMolDistill
 34 29 TestProxiedServerReopen
+34 29 TestProxiedServerRetainedTypes
 34 29 TestProxiedServerServeDelete
 34 29 TestProxiedServerState
 
@@ -268,9 +274,13 @@
 34 31 TestProxiedServerIfRevisionGuardClose
 34 31 TestProxiedServerMolBond
 
+34 32 TestProxiedServerAssigneeHiddenEmptyClears
+34 32 TestProxiedServerClaimPathsJournalSidecar
 34 32 TestProxiedServerCleanDatabasesPurgeDropped
 34 32 TestProxiedServerConfigConcurrent
+34 32 TestProxiedServerDatabaseFlagForeignProjectIdentity
 34 32 TestProxiedServerDepB
+34 32 TestProxiedServerDoltDropDatabase
 34 32 TestProxiedServerServeStreamsTheJournalItIsWriting
 34 32 TestProxiedServerServeUpdateClaim
 34 32 TestProxiedServerStorageClass

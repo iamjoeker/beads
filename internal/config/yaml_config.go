@@ -4,14 +4,17 @@ import (
 	"bufio"
 	"errors"
 	"fmt"
+	"maps"
 	"os"
 	"os/exec"
 	"path/filepath"
 	"regexp"
 	"runtime"
+	"slices"
 	"strconv"
 	"strings"
 
+	"github.com/steveyegge/beads/internal/atomicfile"
 	"github.com/steveyegge/beads/internal/ceiling"
 	"github.com/steveyegge/beads/internal/gitenv"
 	"github.com/steveyegge/beads/internal/remedy"
@@ -26,6 +29,26 @@ import (
 // not.
 var ErrNoProjectConfigYaml = errors.New("no project config.yaml in this workspace")
 
+// CommandSettingKeys names configuration keys whose values bd executes. They
+// must be supplied from user-global YAML or shell environment variables, never
+// from project .beads/config.yaml or replicated database settings.
+var CommandSettingKeys = []string{
+	"mail.delegate",
+}
+
+// IsCommandSettingKey reports whether key names an executable command setting
+// (matched case-insensitively and normalizing underscores/hyphens to dots).
+func IsCommandSettingKey(key string) bool {
+	replacer := strings.NewReplacer("_", ".", "-", ".")
+	norm := replacer.Replace(strings.ToLower(strings.TrimSpace(key)))
+	for _, k := range CommandSettingKeys {
+		if norm == replacer.Replace(strings.ToLower(k)) {
+			return true
+		}
+	}
+	return false
+}
+
 // YamlOnlyKeys are configuration keys that must be stored in config.yaml
 // rather than the database. These are "startup" settings that are
 // read before the database is opened.
@@ -34,6 +57,7 @@ var ErrNoProjectConfigYaml = errors.New("no project config.yaml in this workspac
 // appeared to succeed but had no effect (because no-db is read from yaml
 // at startup, not from the database).
 var YamlOnlyKeys = map[string]bool{
+	"mail.delegate": true,
 	// Bootstrap flags (affect how bd starts)
 	"no-db": true,
 	"json":  true,
@@ -379,6 +403,7 @@ var userGlobalKeyPrefixes = []string{"metrics."}
 // to ~/.config/bd/config.yaml keeps it per-machine; viper still merges that
 // file, so config.NodeID() reads it back.
 var userGlobalExactKeys = map[string]bool{
+	"mail.delegate":        true,
 	"dolt.remotesapi-port": true,
 	"node_id":              true,
 }
@@ -393,6 +418,14 @@ func IsUserGlobalKey(key string) bool {
 		}
 	}
 	return false
+}
+
+// UserGlobalExactKeys returns the per-machine keys bd config set writes to the
+// user config (userGlobalExactKeys), sorted. The GH#8113 macOS metrics
+// bootstrap carries these from the old ~/Library/Application Support config
+// along with the metrics keys.
+func UserGlobalExactKeys() []string {
+	return slices.Sorted(maps.Keys(userGlobalExactKeys))
 }
 
 // readUserGlobalYamlValue reads a single dotted key from the user-global
@@ -578,25 +611,50 @@ func readYamlValueAtPath(path, key string) (string, bool) {
 	if err != nil {
 		return "", false
 	}
+	value, present, _ := YamlValueFromBytes(data, key)
+	return value, present
+}
+
+// YamlValueFromBytes decodes one dotted key from config.yaml content the way
+// bd's user-global reader (GetUserYamlConfig, MetricsDisabledByUserConfig)
+// does: the flat dotted form ("metrics.disabled: true") wins over the nested
+// form, a null reads as absent, and a non-string scalar is formatted with %v.
+// err is non-nil only when data is not a YAML mapping; the file reader treats
+// that as absent, and a caller that must tell the two apart (the GH#8113
+// macOS carry-over) can.
+func YamlValueFromBytes(data []byte, key string) (value string, present bool, err error) {
 	var root map[string]interface{}
 	if err := yaml.Unmarshal(data, &root); err != nil {
-		return "", false
+		return "", false, err
 	}
 	if raw, ok := root[key]; ok { // flat dotted form
-		return yamlScalarString(raw)
+		value, present = yamlScalarString(raw)
+		return value, present, nil
 	}
 	var node interface{} = root // nested form
 	for _, part := range strings.Split(key, ".") {
 		m, ok := node.(map[string]interface{})
 		if !ok {
-			return "", false
+			return "", false, nil
 		}
 		node, ok = m[part]
 		if !ok {
-			return "", false
+			return "", false, nil
 		}
 	}
-	return yamlScalarString(node)
+	value, present = yamlScalarString(node)
+	return value, present, nil
+}
+
+// ParseUserConfigBool parses a raw user-config scalar the way the metrics
+// consent readers do. ok is false for a value that is not a bool, which those
+// readers treat as the default.
+func ParseUserConfigBool(raw string) (value bool, ok bool) {
+	parsed, err := strconv.ParseBool(strings.TrimSpace(raw))
+	if err != nil {
+		return false, false
+	}
+	return parsed, true
 }
 
 func yamlScalarString(v interface{}) (string, bool) {
@@ -631,11 +689,23 @@ func MetricsDisabledByUserConfig() bool {
 	if !ok {
 		return false
 	}
-	disabled, err := strconv.ParseBool(strings.TrimSpace(raw))
-	if err != nil {
+	disabled, _ := ParseUserConfigBool(raw)
+	return disabled
+}
+
+// UserConfigSetsBoolKey reports whether the user-global config.yaml bd reads
+// holds key with a value ParseUserConfigBool accepts. An absent file, an
+// unreadable or malformed one, an absent or commented-out key, and a value
+// that is not a bool all read as false. On macOS, metrics stay off for a run
+// unless this holds for metrics.disabled (GH#8113): bd cannot tell a user
+// whose opt-out it failed to carry over from one who never had one.
+func UserConfigSetsBoolKey(key string) bool {
+	raw, ok := readUserGlobalYamlValue(key)
+	if !ok {
 		return false
 	}
-	return disabled
+	_, valid := ParseUserConfigBool(raw)
+	return valid
 }
 
 // UserMetricsEndpoint returns the metrics endpoint configured in the user-global
@@ -658,10 +728,7 @@ func MetricsNoticeShownByUserConfig() bool {
 	if !ok {
 		return false
 	}
-	shown, err := strconv.ParseBool(strings.TrimSpace(raw))
-	if err != nil {
-		return false
-	}
+	shown, _ := ParseUserConfigBool(raw)
 	return shown
 }
 
@@ -700,10 +767,10 @@ func UnsetUserYamlConfig(key string) (bool, error) {
 		return false, nil
 	}
 
-	// Preserve the owner-private 0600 posture every other user-global writer
-	// uses (SetUserYamlConfig, setYamlConfigAtPath, the metrics bootstrap);
-	// rewriting at 0644 would relax this shared user config to world-readable.
-	if err := os.WriteFile(configPath, []byte(newContent), 0o600); err != nil { //nolint:gosec // configPath is from UserConfigYamlPath
+	// replaceConfigYaml keeps the file's own mode, so the owner-private 0600
+	// posture every user-global writer creates it with (SetUserYamlConfig, the
+	// metrics bootstrap) survives the rewrite.
+	if err := replaceConfigYaml(configPath, []byte(newContent)); err != nil {
 		return false, fmt.Errorf("failed to write user config.yaml: %w", err)
 	}
 
@@ -731,6 +798,42 @@ func SetUserYamlConfig(key, value string) error {
 	return setYamlConfigAtPath(configPath, key, value)
 }
 
+// YamlKeyValue is one key and value for ApplyYamlConfigUpdates and
+// CheckYamlConfigUpdates.
+type YamlKeyValue struct {
+	Key, Value string
+}
+
+// ApplyYamlConfigUpdates applies updates, in order, to a copy of a
+// config.yaml held in content, using the same validation and update code
+// SetUserYamlConfig writes with, and returns the result: the document a
+// SetUserYamlConfig call per update would leave on disk. Nothing is written.
+// On error it returns nil and the first error.
+func ApplyYamlConfigUpdates(content []byte, updates ...YamlKeyValue) ([]byte, error) {
+	updated := string(content)
+	for _, u := range updates {
+		if err := validateYamlConfigValue(u.Key, u.Value); err != nil {
+			return nil, err
+		}
+		next, err := updateYamlKey(updated, u.Key, u.Value)
+		if err != nil {
+			return nil, err
+		}
+		updated = next
+	}
+	return []byte(updated), nil
+}
+
+// CheckYamlConfigUpdates is ApplyYamlConfigUpdates without the result.
+// Callers use it to learn whether a later SetUserYamlConfig call can succeed
+// before doing work that only makes sense if it will — a config whose top
+// level is not a mapping, or whose section already holds a scalar or list,
+// fails here as the write would.
+func CheckYamlConfigUpdates(content []byte, updates ...YamlKeyValue) error {
+	_, err := ApplyYamlConfigUpdates(content, updates...)
+	return err
+}
+
 func setYamlConfigAtPath(configPath, key, value string) error {
 	// Read existing config
 	content, err := os.ReadFile(configPath) //nolint:gosec // configPath is from findProjectConfigYaml
@@ -744,12 +847,87 @@ func setYamlConfigAtPath(configPath, key, value string) error {
 		return err
 	}
 
-	// Write back
-	if err := os.WriteFile(configPath, []byte(newContent), 0600); err != nil { //nolint:gosec // configPath is validated
+	if err := replaceConfigYaml(configPath, []byte(newContent)); err != nil {
 		return fmt.Errorf("failed to write config.yaml: %w", err)
 	}
 
 	return nil
+}
+
+// replaceConfigYaml replaces an existing config.yaml's content in one step:
+// temp file, then rename. Other bd processes read this file while bd writes
+// it: every command loads it at startup and reads events-journal activation
+// from it when it opens its store, and `bd serve` resolves that activation
+// once, at startup, for the life of the server. An in-place rewrite (truncate,
+// then write) hands a reader that lands in between an empty or partial file,
+// which parses as "key absent" and resolves to the key's default.
+//
+// On POSIX a reader sees the whole old file or the whole new one. Windows
+// refuses to rename over a file another handle holds open, so there the
+// replace waits for the reader to close it (internal/atomicfile retries for
+// about two seconds) and otherwise fails with the old file intact.
+//
+// A symlinked config.yaml is written through to its target rather than
+// replaced by a regular file, and the file keeps its own permissions. A
+// rename needs write permission on the directory only, so the file's own is
+// checked first: a config.yaml its owner made read-only is refused, as the
+// in-place write refused it, rather than rewritten.
+func replaceConfigYaml(configPath string, content []byte) error {
+	target, info, err := writableConfigYamlTarget(configPath)
+	if err != nil {
+		return err
+	}
+	return atomicfile.WriteFile(target, content, info.Mode().Perm())
+}
+
+// writableConfigYamlTarget resolves configPath through symlinks and checks the
+// target can be opened for writing: the checks replaceConfigYaml makes before
+// it writes.
+func writableConfigYamlTarget(configPath string) (string, os.FileInfo, error) {
+	target, err := filepath.EvalSymlinks(configPath)
+	if err != nil {
+		return "", nil, err
+	}
+	info, err := os.Stat(target)
+	if err != nil {
+		return "", nil, err
+	}
+	// Opened without O_TRUNC, so the probe changes nothing.
+	f, err := os.OpenFile(target, os.O_WRONLY, 0) //nolint:gosec // target is the resolved config.yaml path
+	if err != nil {
+		return "", nil, err
+	}
+	if err := f.Close(); err != nil {
+		return "", nil, err
+	}
+	return target, info, nil
+}
+
+// ConfigYamlReplaceable reports whether SetUserYamlConfig and friends could
+// rewrite the existing config.yaml at configPath: the symlink-resolved target
+// opens for writing and its directory accepts the temp file the atomic
+// replace renames over it. The temp file is removed again; configPath is
+// never modified.
+func ConfigYamlReplaceable(configPath string) error {
+	target, info, err := writableConfigYamlTarget(configPath)
+	if err != nil {
+		return err
+	}
+	w, err := atomicfile.Create(target, info.Mode().Perm())
+	if err != nil {
+		return err
+	}
+	return w.Abort()
+}
+
+// ReplaceConfigYaml replaces the whole content of the existing config.yaml at
+// configPath in one step, the way SetUserYamlConfig writes it: through a
+// symlink to its target, keeping the file's mode, and refusing a file its
+// owner made read-only. A reader sees the old content or the new, never a mix,
+// so several keys written with one call (ApplyYamlConfigUpdates) become
+// visible together.
+func ReplaceConfigYaml(configPath string, content []byte) error {
+	return replaceConfigYaml(configPath, content)
 }
 
 // GetYamlConfig gets a configuration value from config.yaml.
@@ -806,7 +984,7 @@ func UnsetYamlConfig(key string) (bool, error) {
 		return false, nil
 	}
 
-	if err := os.WriteFile(configPath, []byte(newContent), 0600); err != nil { //nolint:gosec // configPath is validated
+	if err := replaceConfigYaml(configPath, []byte(newContent)); err != nil {
 		return false, fmt.Errorf("failed to write config.yaml: %w", err)
 	}
 
